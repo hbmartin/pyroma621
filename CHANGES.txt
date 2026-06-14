@@ -1,7 +1,7 @@
 Changelog
 =========
 
-5.0.2 (unreleased)
+5.1b1 (2026-06-14)
 ------------------
 
 - Adds a rating that verifies pyproject.toml data with setuptools.
