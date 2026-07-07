@@ -7,7 +7,7 @@ from pathlib import Path
 from xmlrpc import client as xmlrpclib
 
 import pyroma
-from pyroma import distributiondata, projectdata, pypidata, ratings
+from pyroma import distributiondata, projectdata, pypidata, ratings, report
 from pyroma.ratings import rate
 
 TESTDATA_DIR = Path(__file__).parent / "testdata"
@@ -490,6 +490,66 @@ class SpecComplianceTest(unittest.TestCase):
             any(
                 "The 'version' key must either be set statically or be listed in 'dynamic'." in msg for msg in rating[1]
             )
+        )
+
+
+class ReportTest(unittest.TestCase):
+    maxDiff = None
+
+    def _rated(self):
+        return ratings.RatedProject(
+            name="example",
+            rating=9,
+            level=ratings.LEVELS[9],
+            problems=[
+                ratings.Problem(
+                    test="Description",
+                    message="The package's Description is quite short.",
+                    weight=50,
+                    fatal=False,
+                )
+            ],
+        )
+
+    def test_format_text(self):
+        self.assertEqual(
+            report.format_text(self._rated()),
+            "------------------------------\n"
+            "The package's Description is quite short.\n"
+            "------------------------------\n"
+            "Final rating: 9/10\n"
+            "Cottage Cheese\n"
+            "------------------------------",
+        )
+
+    def test_format_text_no_problems(self):
+        rated = ratings.RatedProject(name="example", rating=10, level=ratings.LEVELS[10], problems=[])
+        self.assertEqual(
+            report.format_text(rated),
+            "------------------------------\n"
+            "Final rating: 10/10\n"
+            "Your cheese is so fresh most people think it's a cream: Mascarpone\n"
+            "------------------------------",
+        )
+
+    def test_format_json(self):
+        document = json.loads(report.format_json(self._rated(), meta={"mode": "directory"}))
+        self.assertEqual(
+            document,
+            {
+                "name": "example",
+                "rating": 9,
+                "level": "Cottage Cheese",
+                "problems": [
+                    {
+                        "test": "Description",
+                        "message": "The package's Description is quite short.",
+                        "weight": 50,
+                        "fatal": False,
+                    }
+                ],
+                "_meta": {"mode": "directory"},
+            },
         )
 
 
