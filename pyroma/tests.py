@@ -329,6 +329,163 @@ class RatingsTest(unittest.TestCase):
         self.assertTrue(any("The metadata field 'license' is deprecated" in msg for msg in new_rating[1]))
 
 
+class SpecComplianceTest(unittest.TestCase):
+    """Tests for the strict, spec-grounded rating checks."""
+
+    maxDiff = None
+
+    def _messages(self, testdata):
+        return rate(testdata)[1]
+
+    def test_invalid_version(self):
+        testdata = COMPLETE.copy()
+        testdata["version"] = "1.0-foo"
+
+        rating = rate(testdata)
+        self.assertLess(rating[0], 10)
+        self.assertTrue(any("'1.0-foo' is not a valid version" in msg for msg in rating[1]))
+
+    def test_noncanonical_version(self):
+        testdata = COMPLETE.copy()
+        testdata["version"] = "1.0.DEV1"
+
+        messages = self._messages(testdata)
+        self.assertTrue(any("not in canonical form; it should be written as '1.0.dev1'" in msg for msg in messages))
+
+    def test_version_epoch_and_local_segment(self):
+        testdata = COMPLETE.copy()
+        testdata["version"] = "1!1.0+ubuntu1"
+
+        messages = self._messages(testdata)
+        self.assertTrue(any("uses a version epoch" in msg for msg in messages))
+        self.assertTrue(any("contains a local version segment" in msg for msg in messages))
+
+    def test_invalid_metadata_version(self):
+        testdata = COMPLETE.copy()
+        testdata["metadata-version"] = "2.0"
+
+        messages = self._messages(testdata)
+        self.assertTrue(any("'2.0' is not a valid Metadata-Version" in msg for msg in messages))
+
+    def test_invalid_name_is_fatal(self):
+        testdata = COMPLETE.copy()
+        testdata["name"] = "-not-valid-"
+
+        rating = rate(testdata)
+        self.assertEqual(rating[0], 0)
+        self.assertTrue(any("'-not-valid-' is not a valid project name" in msg for msg in rating[1]))
+
+    def test_license_and_license_expression_is_fatal(self):
+        testdata = COMPLETE.copy()
+        testdata["license"] = "MIT"
+
+        rating = rate(testdata)
+        self.assertEqual(rating[0], 0)
+        self.assertTrue(
+            any("Specifying both a License and a License-Expression is forbidden" in msg for msg in rating[1])
+        )
+
+    def test_invalid_license_expression_is_fatal(self):
+        testdata = COMPLETE.copy()
+        testdata["license-expression"] = "Bogus-License"
+
+        rating = rate(testdata)
+        self.assertEqual(rating[0], 0)
+        self.assertTrue(any("'Bogus-License' is not a valid SPDX license expression" in msg for msg in rating[1]))
+
+    def test_invalid_description_content_type(self):
+        testdata = COMPLETE.copy()
+        testdata["description-content-type"] = "text/html"
+
+        messages = self._messages(testdata)
+        self.assertTrue(any("The content type should be one of" in msg for msg in messages))
+
+    def test_description_content_type_parameters(self):
+        testdata = COMPLETE.copy()
+        testdata["description-content-type"] = "text/plain; charset=latin-1; variant=GFM"
+
+        messages = self._messages(testdata)
+        message = next(msg for msg in messages if "Description-Content-Type" in msg)
+        self.assertIn("The only accepted charset is UTF-8, not 'latin-1'.", message)
+        self.assertIn("The 'variant' parameter is only valid for text/markdown.", message)
+
+    def test_markdown_variant(self):
+        testdata = COMPLETE.copy()
+        testdata["description-content-type"] = "text/markdown; variant=GFM"
+        self.assertFalse(any("Description-Content-Type" in msg for msg in self._messages(testdata)))
+
+        testdata["description-content-type"] = "text/markdown; variant=Pandoc"
+        messages = self._messages(testdata)
+        self.assertTrue(
+            any("The markdown variant should be GFM or CommonMark, not 'Pandoc'." in msg for msg in messages)
+        )
+
+    def test_invalid_requires_dist(self):
+        testdata = COMPLETE.copy()
+        testdata["requires-dist"] = ["zope.event", "broken =="]
+
+        messages = self._messages(testdata)
+        self.assertTrue(any("'broken ==' is not a valid dependency specifier" in msg for msg in messages))
+
+    def test_requires_dist_style_warnings(self):
+        testdata = COMPLETE.copy()
+        testdata["requires-dist"] = [
+            "zope.event (>=4.0)",
+            'zope.interface; sys_platform > "linux"',
+        ]
+
+        messages = self._messages(testdata)
+        message = next(msg for msg in messages if "Requires-Dist" in msg)
+        self.assertIn("puts the version specifier in parentheses", message)
+        self.assertIn("ordered comparison on the 'sys_platform' environment marker", message)
+
+    def test_url_label_too_long_is_fatal(self):
+        testdata = COMPLETE.copy()
+        testdata["project-url"] = ["this label is far too long to be legal, https://example.com"]
+
+        rating = rate(testdata)
+        self.assertEqual(rating[0], 0)
+        self.assertTrue(any("Project-URL labels are limited to 32 characters" in msg for msg in rating[1]))
+
+    def test_url_no_well_known_labels(self):
+        testdata = COMPLETE.copy()
+        testdata["project-url"] = ["weird stuff, https://example.com"]
+
+        messages = self._messages(testdata)
+        self.assertTrue(any("None of your Project-URL labels match the well-known labels" in msg for msg in messages))
+
+    def test_console_scripts_in_entry_points_is_fatal(self):
+        testdata = COMPLETE.copy()
+        testdata["_path"] = TESTDATA_DIR / "bad_console_scripts"
+
+        rating = rate(testdata)
+        self.assertEqual(rating[0], 0)
+        self.assertTrue(any("Console and GUI scripts must be defined in [project.scripts]" in msg for msg in rating[1]))
+
+    def test_readme_both_file_and_text_is_fatal(self):
+        testdata = COMPLETE.copy()
+        testdata["_path"] = TESTDATA_DIR / "readme_both"
+
+        rating = rate(testdata)
+        self.assertEqual(rating[0], 0)
+        self.assertTrue(any("The 'readme' table must not specify both 'file' and 'text'." in msg for msg in rating[1]))
+
+    def test_dynamic_name_is_fatal(self):
+        testdata = COMPLETE.copy()
+        testdata["_path"] = TESTDATA_DIR / "dynamic_name"
+
+        rating = rate(testdata)
+        self.assertEqual(rating[0], 0)
+        self.assertTrue(
+            any("The 'name' key must be static, it must never be listed in 'dynamic'." in msg for msg in rating[1])
+        )
+        self.assertTrue(
+            any(
+                "The 'version' key must either be set statically or be listed in 'dynamic'." in msg for msg in rating[1]
+            )
+        )
+
+
 class PyPITest(unittest.TestCase):
     maxDiff = None
 

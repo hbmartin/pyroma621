@@ -1,0 +1,8 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# Invalid: 'name' must be static, and 'version' must be static or dynamic
+dynamic = ["name"]
+description = "A package that tries to make its name dynamic"
