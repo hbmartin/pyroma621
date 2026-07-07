@@ -19,11 +19,17 @@ import os
 import re
 from dataclasses import dataclass
 
+try:
+    import tomllib
+except ImportError:  # Python < 3.11
+    import tomli as tomllib
+
 from docutils.core import publish_parts
 from docutils.utils import SystemMessage
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
-from setuptools.config.pyprojecttoml import read_configuration
 from trove_classifiers import classifiers as CLASSIFIERS
+from validate_pyproject import api as pyproject_api
+from validate_pyproject import errors as pyproject_errors
 
 LEVELS = [
     "This cheese seems to contain no dairy products",
@@ -487,6 +493,18 @@ class MissingPyProjectToml(BaseTest):
         return self._passed(weight=0)
 
 
+_PYPROJECT_VALIDATOR = None
+
+
+def _pyproject_validator():
+    # The validator loads its schema plugins on creation, so build it lazily
+    # and only once.
+    global _PYPROJECT_VALIDATOR
+    if _PYPROJECT_VALIDATOR is None:
+        _PYPROJECT_VALIDATOR = pyproject_api.Validator()
+    return _PYPROJECT_VALIDATOR
+
+
 class PyprojectTomlValid(BaseTest):
     def test(self, data):
         # The build system tests give only negative weight, as they are effectively required
@@ -504,9 +522,11 @@ class PyprojectTomlValid(BaseTest):
         pyproject_path = os.path.join(data["_path"], "pyproject.toml")
 
         try:
-            read_configuration(pyproject_path)
+            with open(pyproject_path, "rb") as pyproject_file:
+                config = tomllib.load(pyproject_file)
+            _pyproject_validator()(config)
             return self._passed(weight=0)
-        except Exception as e:
+        except (OSError, tomllib.TOMLDecodeError, pyproject_errors.ValidationError) as e:
             return self._failed(
                 f"Your pyproject.toml is invalid: {e}\n"
                 "See https://packaging.python.org for more information on how to package your project.",
@@ -636,6 +656,11 @@ def rate_project(data, skip_tests=None):
                     )
                 ],
             )
+        if "_missing_build_system" in data:
+            # There is no way to build the package, so no metadata could be
+            # extracted. Only report the build-system problems; complaining
+            # about each missing metadata field would just be noise.
+            test_list = BUILD_SYSTEM_TESTS
 
     if "_wheel_build_failed" in data:
         problems.append(

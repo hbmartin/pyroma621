@@ -136,14 +136,15 @@ class RatingsTest(unittest.TestCase):
         )
 
     def test_only_config(self):
-        # In version 5, this is now an error, as there is no legacy setup.py,
-        # nor a modern pyproject.toml.
+        # There is no legacy setup.py, nor a modern pyproject.toml, so there
+        # is no way to build this project and no metadata to extract. Only
+        # the build system problems are reported.
         rating = self._get_file_rating("only_config")
 
         self.assertEqual(
             rating,
             (
-                5,
+                1,
                 [
                     "You seem to neither have a setup.py, nor a pyproject.toml, only setup.cfg.\n"
                     "This makes it unclear how your project should be built, and some packaging "
@@ -156,10 +157,6 @@ class RatingsTest(unittest.TestCase):
                     '    requires = ["setuptools>=42"]\n'
                     '    build-backend = "setuptools.build_meta"\n'
                     "See https://packaging.python.org for more information on how to package your project.",
-                    "Specifying both a License-Expression and license classifiers is ambiguous, "
-                    "deprecated, and may be rejected by package indices.",
-                    "The metadata field 'home-page' is deprecated; use 'project-url' instead.",
-                    "Check-manifest returned errors",
                 ],
             ),
         )

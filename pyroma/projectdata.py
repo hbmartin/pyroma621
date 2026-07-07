@@ -1,23 +1,9 @@
 # Extracts information from a project
 import os
-import pathlib
 import re
-from distutils.errors import DistutilsFileError
 
 import build
 import build.util
-from setuptools.config.setupcfg import read_configuration
-
-# MAP from old setup.py type keys to Core Metadata keys
-METADATA_MAP = {
-    "description": "summary",
-    "classifiers": "classifier",
-    "project-urls": "project-url",
-    "url": "home-page",
-    "long-description": "description",
-    "long-description-content-type": "description-content-type",
-    "python-requires": "requires-python",
-}
 
 
 def normalize(name):
@@ -80,24 +66,6 @@ def get_build_data(path, isolated=None):
     return metadata
 
 
-def get_setupcfg_data(path):
-    data = read_configuration(str(pathlib.Path(path) / "setup.cfg"))
-
-    metadata = {}
-    # Python requires is under "options" in setup.cfg (and so are other
-    # requirements, but those are optional and have no tests)
-    if "python_requires" in data["options"]:
-        metadata["requires-python"] = data["options"]["python_requires"]
-
-    for key, value in data["metadata"].items():
-        key = normalize(key)
-        if key in METADATA_MAP:
-            key = METADATA_MAP[key]
-        metadata[key] = value
-
-    return metadata
-
-
 def get_data(path):
     data = _get_data(path)
     if data:
@@ -111,18 +79,18 @@ def _get_data(path):
         return get_build_data(path)
     except build.BuildException as e:
         if "no pyproject.toml or setup.py" in e.args[0]:
-            # It couldn't build the package, because there is no setup.py or pyproject.toml.
-            # Let's see if there is a setup.cfg:
-            try:
-                metadata = get_setupcfg_data(path)
-                # Yes, there's a setup.cfg. Pyroma accepted this earlier, because it worked,
-                # and at some point the idea was that that setup.cfg should replace setup.py.
-                # But that never happened, and instead pyproject.toml arrived.
-                metadata["_missing_build_system"] = True
-                return metadata
-            except DistutilsFileError:
-                # There is no setup.cfg either, so this isn't a python package at all
-                return {"_no_config_found": True}
+            # It couldn't build the package, because there is no setup.py or
+            # pyproject.toml. Let's see if there is a setup.cfg:
+            if os.path.exists(os.path.join(path, "setup.cfg")):
+                # There is only a setup.cfg. Pyroma accepted this earlier,
+                # because it worked, and at some point the idea was that
+                # setup.cfg should replace setup.py. But that never happened,
+                # and instead pyproject.toml arrived. No standard tool can
+                # build such a project, so there is no metadata to extract;
+                # we just flag the broken build system.
+                return {"_missing_build_system": True}
+            # There is no setup.cfg either, so this isn't a python package at all
+            return {"_no_config_found": True}
         else:
             # There's something else wrong
             raise e
