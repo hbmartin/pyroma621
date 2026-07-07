@@ -366,7 +366,9 @@ class PyPITest(unittest.TestCase):
 
         pypidata._get_project_data("internalpkg", index_url="https://packages.example.com")
 
-        requestmock.assert_called_once_with("https://packages.example.com/pypi/internalpkg/json")
+        requestmock.assert_called_once_with(
+            "https://packages.example.com/pypi/internalpkg/json", timeout=pypidata.REQUEST_TIMEOUT
+        )
 
     @unittest.mock.patch("pyroma.pypidata.requests.get")
     def test_get_project_data_custom_index_url_with_pypi_path(self, requestmock):
@@ -377,7 +379,9 @@ class PyPITest(unittest.TestCase):
 
         pypidata._get_project_data("internalpkg", index_url="https://packages.example.com/pypi")
 
-        requestmock.assert_called_once_with("https://packages.example.com/pypi/internalpkg/json")
+        requestmock.assert_called_once_with(
+            "https://packages.example.com/pypi/internalpkg/json", timeout=pypidata.REQUEST_TIMEOUT
+        )
 
     @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")
     @unittest.mock.patch("pyroma.pypidata._get_project_data")

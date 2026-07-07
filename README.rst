@@ -45,6 +45,18 @@ In all cases the output is similar::
     Cottage Cheese
     ------------------------------
 
+For machine-readable output, pass ``--format json``::
+
+    $ pyroma --format json .
+
+Exit codes
+----------
+
+* ``0``: The package rated equal to or above the ``--min`` rating (default 8).
+* ``2``: The package rated below the ``--min`` rating.
+* ``1``: Used by the ``zest.releaser`` integration when you choose to abort
+  the release after a low rating.
+
 
 Tests
 -----
