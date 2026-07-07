@@ -10,7 +10,7 @@ from pathlib import Path
 import pyroma
 from xmlrpc import client as xmlrpclib
 
-from pyroma import projectdata, distributiondata, pypidata
+from pyroma import projectdata, distributiondata, pypidata, ratings
 from pyroma.ratings import rate
 
 TESTDATA_DIR = Path(__file__).parent / "testdata"
@@ -394,11 +394,13 @@ class PyPITest(unittest.TestCase):
         self.assertEqual(data["_owners"], ["dev1"])
         proxymock.assert_called_once_with("https://packages.example.com/pypi")
 
-    @unittest.mock.patch("pyroma.ratings.rate")
+    @unittest.mock.patch("pyroma.ratings.rate_project")
     @unittest.mock.patch("pyroma.pypidata.get_data")
     def test_run_forwards_custom_index_url(self, datamock, ratemock):
         datamock.return_value = {"name": "internalpkg"}
-        ratemock.return_value = (10, [])
+        ratemock.return_value = ratings.RatedProject(
+            name="internalpkg", rating=10, level=ratings.LEVELS[10], problems=[]
+        )
 
         result = pyroma.run("pypi", "internalpkg", quiet=True, index_url="https://packages.example.com")
 

@@ -1,10 +1,8 @@
-import logging
 import os
 import sys
 from argparse import ArgumentParser, ArgumentTypeError
-from pyroma import projectdata, distributiondata, pypidata, ratings
-
-logging.basicConfig(level=logging.DEBUG, stream=sys.stdout, format="%(message)s")
+from importlib.metadata import PackageNotFoundError, version as package_version
+from pyroma import projectdata, distributiondata, pypidata, ratings, report
 
 
 def zester(data):
@@ -133,6 +131,13 @@ def main():
         help="Output only the rating",
     )
     parser.add_argument(
+        "--format",
+        dest="output_format",
+        choices=report.FORMATS,
+        default="text",
+        help="Output format (default: text)",
+    )
+    parser.add_argument(
         "--skip-tests",
         type=skip_tests,
         help="Skip the named tests",
@@ -154,47 +159,46 @@ def main():
         else:
             mode = "pypi"
 
-    rating = run(mode, args.package, args.quiet, args.skip_tests, args.index_url)
+    rating = run(mode, args.package, args.quiet, args.skip_tests, args.index_url, args.output_format)
     if rating < args.min:
         sys.exit(2)
     sys.exit(0)
 
 
-def run(mode, argument, quiet=False, skip_tests=None, index_url=None):
-    if quiet:
-        logger = logging.getLogger()
-        logger.disabled = True
-
-    logging.info("-" * 30)
-    logging.info("Checking " + argument)
-
+def _get_data(mode, argument, index_url=None):
     if mode == "directory":
-        data = projectdata.get_data(os.path.abspath(argument))
-        logging.info("Found " + data.get("name", "nothing"))
-    elif mode == "file":
-        data = distributiondata.get_data(os.path.abspath(argument))
-        logging.info("Found " + data.get("name", "nothing"))
+        return projectdata.get_data(os.path.abspath(argument))
+    if mode == "file":
+        return distributiondata.get_data(os.path.abspath(argument))
+    # It's probably a package name
+    return pypidata.get_data(argument, index_url=index_url)
+
+
+def run(mode, argument, quiet=False, skip_tests=None, index_url=None, output_format="text"):
+    """Rate a package and print the result. Returns the rating as an int."""
+    verbose = not quiet and output_format == "text"
+
+    if verbose:
+        print("-" * 30)
+        print("Checking " + argument)
+
+    data = _get_data(mode, argument, index_url=index_url)
+
+    if verbose:
+        print("Found " + (data.get("name") or "nothing"))
+
+    rated = ratings.rate_project(data, skip_tests)
+
+    if output_format == "json":
+        meta = {"package": argument, "mode": mode}
+        try:
+            meta["pyroma"] = package_version("pyroma")
+        except PackageNotFoundError:
+            pass
+        print(report.format_json(rated, meta))
+    elif quiet:
+        print(rated.rating)
     else:
-        # It's probably a package name
-        data = pypidata.get_data(argument, index_url=index_url)
-        logging.info("Found " + data.get("name", "nothing"))
+        print(report.format_text(rated))
 
-    rating = ratings.rate(data, skip_tests)
-
-    logging.info("-" * 30)
-    for problem in rating[1]:
-        # XXX It would be nice with a * pointlist instead, but that requires
-        # that we know how wide the terminal is and nice word-breaks, so that's
-        # for later.
-        logging.info(problem)
-    if rating[1]:
-        logging.info("-" * 30)
-    logging.info("Final rating: " + str(rating[0]) + "/10")
-    logging.info(ratings.LEVELS[rating[0]])
-    logging.info("-" * 30)
-
-    if quiet:
-        logger.disabled = False
-        logging.info(rating[0])
-
-    return rating[0]
+    return rated.rating

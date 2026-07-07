@@ -7,6 +7,10 @@ import xmlrpc.client
 
 from pyroma import distributiondata
 
+# Genuine diagnostics go to a named logger; program output is handled by
+# pyroma.report.
+logger = logging.getLogger(__name__)
+
 # MAP from old PyPI `info` keys to Core Metadata keys
 INFO_MAP = {
     "classifiers": "classifier",
@@ -58,14 +62,14 @@ def get_data(project, index_url=None):
         data[key] = value
 
     release = data["version"]
-    logging.debug(f"Found {project} version {release}")
+    logger.debug(f"Found {project} version {release}")
 
     try:
         with xmlrpc.client.ServerProxy(_get_xmlrpc_url(index_url)) as xmlrpc_client:
             roles = xmlrpc_client.package_roles(project)
             data["_owners"] = [user for (role, user) in roles if role == "Owner"]
     except xmlrpc.client.ProtocolError:
-        logging.warning(
+        logger.warning(
             "Could not get package roles from XMLRPC API. Not all custom indexes "
             "support this, and some may have it disabled. Skipping role checks."
         )
@@ -86,7 +90,7 @@ def get_data(project, index_url=None):
             tempdir = tempfile.gettempdir()
             filename = download["url"].split("/")[-1]
             tmp = os.path.join(tempdir, filename)
-            logging.debug(f"Downloading {filename} to verify distribution")
+            logger.debug(f"Downloading {filename} to verify distribution")
             try:
                 with open(tmp, "wb") as outfile:
                     outfile.write(requests.get(download["url"]).content)

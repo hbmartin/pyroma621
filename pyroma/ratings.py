@@ -592,8 +592,11 @@ try:
             if "_path" not in data:
                 return self._skipped()
 
+            # A quiet UI, so check-manifest doesn't write to stdout and
+            # corrupt machine-readable output.
+            ui = check_manifest.UI(verbosity=0)
             try:
-                if check_manifest.check_manifest(data["_path"]):
+                if check_manifest.check_manifest(data["_path"], ui=ui):
                     return self._passed(weight=200)
             except check_manifest.Failure:
                 # Most likely this means check-manifest didn't find any
