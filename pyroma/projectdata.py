@@ -1,16 +1,21 @@
 # Extracts information from a project
 import os
 import re
+from typing import Any, Union, cast
 
-import build
 import build.util
 
+import build
+from pyroma.metadata import Metadata
 
-def normalize(name):
+Pathish = Union[str, "os.PathLike[str]"]
+
+
+def normalize(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def wheel_metadata(path, isolated=None):
+def wheel_metadata(path: Pathish, isolated: "bool | None" = None) -> Any:
     # If explictly specified whether to use isolation, pass it directly
     if isolated is not None:
         return build.util.project_wheel_metadata(path, isolated=isolated)
@@ -23,7 +28,7 @@ def wheel_metadata(path, isolated=None):
         return build.util.project_wheel_metadata(path, isolated=True)
 
 
-def build_metadata(path, isolated=None):
+def build_metadata(path: Pathish, isolated: "bool | None" = None) -> Metadata:
     try:
         metadata = wheel_metadata(path, isolated)
     except build.BuildBackendException:
@@ -36,7 +41,7 @@ def build_metadata(path, isolated=None):
     # As far as I can tell, we can't trust that the builders normalize the keys,
     # so we do it here. Definitely most builders do not lower case them, which
     # Core Metadata Specs recommend.
-    data = {}
+    data: dict[str, Any] = {}
     for key in set(metadata.keys()):
         value = metadata.get_all(key)
         key = normalize(key)
@@ -55,10 +60,10 @@ def build_metadata(path, isolated=None):
         description = metadata.get_payload().strip()
         if description:
             data["description"] = description + "\n"
-    return data
+    return cast(Metadata, data)
 
 
-def get_build_data(path, isolated=None):
+def get_build_data(path: Pathish, isolated: "bool | None" = None) -> Metadata:
     metadata = build_metadata(path, isolated=isolated)
     # Check if there is a pyproject_toml
     if "pyproject.toml" not in os.listdir(path):
@@ -66,7 +71,7 @@ def get_build_data(path, isolated=None):
     return metadata
 
 
-def get_data(path):
+def get_data(path: Pathish) -> Metadata:
     data = _get_data(path)
     if data:
         # We got something, add the path to it.
@@ -74,7 +79,7 @@ def get_data(path):
     return data
 
 
-def _get_data(path):
+def _get_data(path: Pathish) -> Metadata:
     try:
         return get_build_data(path)
     except build.BuildException as e:

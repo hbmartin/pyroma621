@@ -3,11 +3,13 @@ import sys
 from argparse import ArgumentParser, ArgumentTypeError
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
+from typing import Any
 
 from pyroma import distributiondata, projectdata, pypidata, ratings, report
+from pyroma import metadata as metadata_types
 
 
-def zester(data):
+def zester(data: "dict[str, Any]") -> None:
     main_files = set(os.listdir(data["workingdir"]))
     config_files = {"setup.py", "setup.cfg", "pyproject.toml"}
 
@@ -25,7 +27,7 @@ def zester(data):
                 sys.exit(1)
 
 
-def min_argument(arg):
+def min_argument(arg: str) -> int:
     try:
         f = int(arg)
     except ValueError as e:
@@ -39,32 +41,32 @@ def min_argument(arg):
     return f
 
 
-def get_all_tests():
+def get_all_tests() -> "list[str]":
     return [x.__class__.__name__ for x in ratings.ALL_TESTS]
 
 
-def parse_tests(arg):
+def parse_tests(arg: str) -> "list[str] | None":
     if not arg:
-        return
+        return None
 
     # Split on spaces, commas and semicolons
-    arg = [arg]
+    names = [arg]
     for sep in " ,;":
-        skips = []
-        for t in arg:
+        skips: list[str] = []
+        for t in names:
             skips.extend(t.split(sep))
-        arg = skips
+        names = skips
 
     tests = get_all_tests()
-    for skip in arg:
+    for skip in names:
         if skip not in tests:
             # Invalid test mentioned, fail and print valid tests
-            return
+            return None
 
-    return arg
+    return names
 
 
-def skip_tests(arg):
+def skip_tests(arg: str) -> "list[str]":
     test_to_skip = parse_tests(arg)
     if test_to_skip:
         return test_to_skip
@@ -75,9 +77,9 @@ def skip_tests(arg):
     raise ArgumentTypeError(message)
 
 
-def main():
+def main() -> None:
     parser = ArgumentParser()
-    parser.color = True
+    parser.color = True  # type: ignore[attr-defined]
     parser.add_argument(
         "package",
         help="A python package, can be a directory, a distribution file or a PyPI package name.",
@@ -167,7 +169,7 @@ def main():
     sys.exit(0)
 
 
-def _get_data(mode, argument, index_url=None):
+def _get_data(mode: str, argument: str, index_url: "str | None" = None) -> metadata_types.Metadata:
     if mode == "directory":
         return projectdata.get_data(os.path.abspath(argument))
     if mode == "file":
@@ -176,7 +178,14 @@ def _get_data(mode, argument, index_url=None):
     return pypidata.get_data(argument, index_url=index_url)
 
 
-def run(mode, argument, quiet=False, skip_tests=None, index_url=None, output_format="text"):
+def run(
+    mode: str,
+    argument: str,
+    quiet: bool = False,
+    skip_tests: "list[str] | str | None" = None,
+    index_url: "str | None" = None,
+    output_format: str = "text",
+) -> int:
     """Rate a package and print the result. Returns the rating as an int."""
     verbose = not quiet and output_format == "text"
 

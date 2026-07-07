@@ -3,10 +3,12 @@ import os
 import re
 import tempfile
 import xmlrpc.client
+from typing import Any, cast
 
 import requests
 
 from pyroma import distributiondata
+from pyroma.metadata import Metadata
 
 # Genuine diagnostics go to a named logger; program output is handled by
 # pyroma.report.
@@ -25,11 +27,11 @@ DEFAULT_PYPI_BASE_API_URL = "https://pypi.org/pypi"
 REQUEST_TIMEOUT = 30
 
 
-def normalize(name):
+def normalize(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def _get_base_api_url(index_url=None):
+def _get_base_api_url(index_url: "str | None" = None) -> str:
     # PyPI serves both the JSON REST API (<base>/<project>/json) and the
     # legacy XML-RPC API on the same /pypi base path.
     if not index_url:
@@ -41,7 +43,7 @@ def _get_base_api_url(index_url=None):
     return f"{base_url}/pypi"
 
 
-def _http_get(url):
+def _http_get(url: str) -> requests.Response:
     try:
         return requests.get(url, timeout=REQUEST_TIMEOUT)
     except requests.exceptions.Timeout as e:
@@ -50,7 +52,7 @@ def _http_get(url):
         raise ValueError(f"Could not connect to {url}: {e}") from e
 
 
-def _get_project_data(project, index_url=None):
+def _get_project_data(project: str, index_url: "str | None" = None) -> "dict[str, Any]":
     # This uses the JSON REST API, not the (deprecated) XML-RPC API.
     base_api_url = _get_base_api_url(index_url)
     response = _http_get(f"{base_api_url}/{project}/json")
@@ -64,14 +66,14 @@ def _get_project_data(project, index_url=None):
     return response.json()
 
 
-def get_data(project, index_url=None):
+def get_data(project: str, index_url: "str | None" = None) -> Metadata:
     # Pick the latest release.
     project_data = _get_project_data(project, index_url=index_url)
     # The `releases` key is deprecated on PyPI, but there is no JSON API
     # replacement for listing the files of the latest release, so we keep
     # using it while it lasts.
     releases = project_data["releases"]
-    data = {}
+    data: dict[str, Any] = {}
 
     for key, value in project_data["info"].items():
         key = normalize(key)
@@ -86,7 +88,7 @@ def get_data(project, index_url=None):
         # PyPI has deprecated the XML-RPC API, but package_roles (which the
         # BusFactor test needs) has no JSON API replacement yet.
         with xmlrpc.client.ServerProxy(_get_base_api_url(index_url)) as xmlrpc_client:
-            roles = xmlrpc_client.package_roles(project)
+            roles = cast("list[tuple[str, str]]", xmlrpc_client.package_roles(project))
             data["_owners"] = [user for (role, user) in roles if role == "Owner"]
     except xmlrpc.client.ProtocolError:
         logger.warning(
@@ -116,9 +118,10 @@ def get_data(project, index_url=None):
                 ddata = distributiondata.get_data(tmp)
 
             # Combine them, with the PyPI data winning:
-            ddata.update(data)
-            data = ddata
+            ddata_dict = cast("dict[str, Any]", ddata)
+            ddata_dict.update(data)
+            data = ddata_dict
             data["_source_download"] = True
             break
 
-    return data
+    return cast(Metadata, data)

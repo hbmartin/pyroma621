@@ -19,11 +19,12 @@ import os
 import re
 import string
 from dataclasses import dataclass
+from typing import Any, cast
 
 try:
     import tomllib
 except ImportError:  # Python < 3.11
-    import tomli as tomllib
+    import tomli as tomllib  # type: ignore[import-not-found, no-redef]
 
 from docutils.core import publish_parts
 from docutils.utils import SystemMessage
@@ -35,6 +36,8 @@ from packaging.version import Version as PackagingVersion
 from trove_classifiers import classifiers as CLASSIFIERS
 from validate_pyproject import api as pyproject_api
 from validate_pyproject import errors as pyproject_errors
+
+from pyroma.metadata import Metadata
 
 LEVELS = [
     "This cheese seems to contain no dairy products",
@@ -85,13 +88,13 @@ class BaseTest:
     weight = 0
     fatal = False
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         raise NotImplementedError
 
-    def _passed(self, weight=None):
+    def _passed(self, weight: "int | None" = None) -> TestResult:
         return TestResult(True, self.weight if weight is None else weight, self.fatal, "")
 
-    def _failed(self, message, weight=None, fatal=None):
+    def _failed(self, message: str, weight: "int | None" = None, fatal: "bool | None" = None) -> TestResult:
         return TestResult(
             False,
             self.weight if weight is None else weight,
@@ -99,15 +102,17 @@ class BaseTest:
             message,
         )
 
-    def _skipped(self):
+    def _skipped(self) -> TestResult:
         return TestResult(None, 0, False, "")
 
 
 class FieldTest(BaseTest):
     """Tests that a specific field is in the data and is not empty or False"""
 
-    def test(self, data):
-        if bool(data.get(self.field)):
+    field: str
+
+    def test(self, data: Metadata) -> TestResult:
+        if bool(cast("dict[str, Any]", data).get(self.field)):
             return self._passed()
         return self._failed(f"Your package does not have {self.field} data" + (self.fatal and "!" or "."))
 
@@ -125,7 +130,7 @@ class Version(FieldTest):
 class VersionIsString(BaseTest):
     weight = 50
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         # Check that the version is a string
         version = data.get("version")
         if isinstance(version, str):
@@ -136,7 +141,7 @@ class VersionIsString(BaseTest):
 class PEPVersion(BaseTest):
     weight = 50
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         # Check that the version number complies with the version specifiers
         # specification (PEP 440):
         version = data.get("version")
@@ -177,7 +182,7 @@ class MetadataVersion(BaseTest):
 
     _valid = ("1.0", "1.1", "1.2", "2.1", "2.2", "2.3", "2.4", "2.5")
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         metadata_version = data.get("metadata-version")
         if not metadata_version:
             return self._skipped()
@@ -196,7 +201,7 @@ NAME_RE = re.compile(r"^([A-Z0-9]|[A-Z0-9][A-Z0-9._-]*[A-Z0-9])\Z", re.IGNORECAS
 class NameFormat(BaseTest):
     fatal = True
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         name = data.get("name")
         if not name:
             # The Name test already handles a missing name.
@@ -214,7 +219,7 @@ class NameFormat(BaseTest):
 class Summary(BaseTest):
     weight = 100
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         summary = data.get("summary")
         if not summary:
             # No summary at all. That's fatal.
@@ -227,7 +232,7 @@ class Summary(BaseTest):
 class Description(BaseTest):
     weight = 50
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         description = data.get("description", "")
         if not isinstance(description, str):
             description = ""
@@ -244,7 +249,7 @@ class Classifiers(FieldTest):
 class ClassifierVerification(BaseTest):
     weight = 20
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         incorrect = []
         classifiers = data.get("classifier", [])
         for classifier in classifiers:
@@ -261,7 +266,7 @@ class ClassifierVerification(BaseTest):
 
 
 class PythonClassifierVersion(BaseTest):
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         major_version_specified = False
 
         classifiers = data.get("classifier", [])
@@ -310,7 +315,7 @@ class PythonClassifierVersion(BaseTest):
 class PythonRequiresVersion(BaseTest):
     weight = 100
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         # https://github.com/regebro/pyroma/pull/83#discussion_r955611236
         python_requires = data.get("requires-python", None)
 
@@ -335,7 +340,7 @@ class Author(FieldTest):
     weight = 100
     field = "author"
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         """Check if author-email field contains author name."""
         email = data.get("author-email")
         # Pass if author name in email, e.g. "Author Name <author@example.com>"
@@ -378,13 +383,13 @@ WELL_KNOWN_URL_LABELS = {
 }
 
 
-def _normalize_url_label(label):
+def _normalize_url_label(label: str) -> str:
     # Normalization from the well-known project URLs specification:
     # remove punctuation and whitespace, lowercase.
     return "".join(c for c in str(label).lower() if not c.isspace() and c not in string.punctuation)
 
 
-def _get_project_urls(data):
+def _get_project_urls(data: Metadata) -> "list[tuple[str, str]]":
     """Return the project URLs as a list of (label, url) tuples.
 
     Handles both the Core Metadata form ("label, https://url") and the
@@ -407,7 +412,7 @@ def _get_project_urls(data):
 class Url(BaseTest):
     weight = 20
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         urls = _get_project_urls(data)
         has_homepage = bool(data.get("home-page"))
 
@@ -443,7 +448,7 @@ class Url(BaseTest):
 class Licensing(BaseTest):
     weight = 50
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         license = data.get("license")
         license_expression = data.get("license-expression")
         classifiers = data.get("classifier", [])
@@ -498,7 +503,7 @@ class DescriptionContentType(BaseTest):
     _valid_types = ("text/plain", "text/x-rst", "text/markdown")
     _valid_variants = ("gfm", "commonmark")
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         raw = data.get("description-content-type")
         if not raw:
             # If absent, readers assume text/x-rst (or fall back to
@@ -558,7 +563,7 @@ _PARENTHESIZED_VERSIONS_RE = re.compile(r"\(\s*[<>=!~]")
 class DependencySpecifiers(BaseTest):
     weight = 100
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         requirements = data.get("requires-dist")
         if not requirements:
             return self._skipped()
@@ -602,7 +607,7 @@ class PyProjectProjectTable(BaseTest):
     """Spot violations of the pyproject.toml specification's [project] table
     rules that validate-pyproject's schemas do not catch."""
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         if "_path" not in data:
             return self._skipped()
 
@@ -664,7 +669,7 @@ class PyProjectProjectTable(BaseTest):
 class DevStatusClassifier(BaseTest):
     weight = 20
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         classifiers = data.get("classifier", [])
         for classifier in classifiers:
             parts = [p.strip() for p in classifier.split("::")]
@@ -679,7 +684,7 @@ class DevStatusClassifier(BaseTest):
 
 
 class SDist(BaseTest):
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         if "_has_sdist" not in data:
             # We aren't checking on PyPI
             return self._skipped()
@@ -697,7 +702,7 @@ class SDist(BaseTest):
 class ValidREST(BaseTest):
     weight = 50
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         content_type = data.get("description-content-type", None)
         if content_type in ("text/plain", "text/markdown"):
             # These can't fail. Markdown will just assume everything
@@ -723,7 +728,7 @@ class ValidREST(BaseTest):
 
 
 class BusFactor(BaseTest):
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         if "_owners" not in data:
             return self._skipped()
 
@@ -739,7 +744,7 @@ class BusFactor(BaseTest):
 
 
 class MissingBuildSystem(BaseTest):
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         if "_missing_build_system" in data:
             # The build system tests give only negative weight, as they are effectively required
             # for a working package, so passing them shouldn't give you a better rating,
@@ -755,7 +760,7 @@ class MissingBuildSystem(BaseTest):
 
 
 class MissingPyProjectToml(BaseTest):
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         # This may not yet be required, but it will be in the future, so we
         # give it a negative rating when it fails, but not a positive rating
         # when it succeeds.
@@ -776,7 +781,7 @@ class MissingPyProjectToml(BaseTest):
 _PYPROJECT_VALIDATOR = None
 
 
-def _pyproject_validator():
+def _pyproject_validator() -> pyproject_api.Validator:
     # The validator loads its schema plugins on creation, so build it lazily
     # and only once.
     global _PYPROJECT_VALIDATOR
@@ -786,7 +791,7 @@ def _pyproject_validator():
 
 
 class PyprojectTomlValid(BaseTest):
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         # The build system tests give only negative weight, as they are effectively required
         # for a working package, so passing them shouldn't give you a better rating,
         # but failing them should give you a worse rating.
@@ -826,7 +831,7 @@ class DeprecatedMetadataFields(BaseTest):
         "license": ("license-expression", "2.4"),
     }
 
-    def _version_at_least(self, data, minimum):
+    def _version_at_least(self, data: Metadata, minimum: str) -> bool:
         metadata_version = data.get("metadata-version")
         if not metadata_version:
             return True
@@ -839,14 +844,14 @@ class DeprecatedMetadataFields(BaseTest):
 
         return current >= required
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         warnings = []
 
         for deprecated, (replacement, deprecated_since) in self._deprecated.items():
             if not self._version_at_least(data, deprecated_since):
                 continue
 
-            if data.get(deprecated) and not data.get(replacement):
+            if cast("dict[str, Any]", data).get(deprecated) and not cast("dict[str, Any]", data).get(replacement):
                 warnings.append(f"The metadata field '{deprecated}' is deprecated; use '{replacement}' instead.")
 
         if warnings:
@@ -892,7 +897,7 @@ try:
     import check_manifest
 
     class CheckManifest(BaseTest):
-        def test(self, data):
+        def test(self, data: Metadata) -> TestResult:
             if "_path" not in data:
                 return self._skipped()
 
@@ -916,7 +921,7 @@ except ImportError:
     pass
 
 
-def rate_project(data, skip_tests=None):
+def rate_project(data: Metadata, skip_tests: "list[str] | str | None" = None) -> RatedProject:
     """Rate a package, returning a structured RatedProject result."""
     problems = []
     good = 0
@@ -994,7 +999,7 @@ def rate_project(data, skip_tests=None):
     return RatedProject(name=name, rating=rating, level=LEVELS[rating], problems=problems)
 
 
-def rate(data, skip_tests=None):
+def rate(data: Metadata, skip_tests: "list[str] | str | None" = None) -> "tuple[int, list[str]]":
     """Rate a package, returning a (rating, [problem messages]) tuple.
 
     This is the backwards-compatible API; rate_project() returns a
