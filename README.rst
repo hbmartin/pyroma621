@@ -45,42 +45,79 @@ In all cases the output is similar::
     Cottage Cheese
     ------------------------------
 
+For machine-readable output, pass ``--format json``::
+
+    $ pyroma --format json .
+
+Exit codes
+----------
+
+* ``0``: The package rated equal to or above the ``--min`` rating (default 8).
+* ``2``: The package rated below the ``--min`` rating.
+* ``1``: Used by the ``zest.releaser`` integration when you choose to abort
+  the release after a low rating.
+
 
 Tests
 -----
 
 This is the list of checks that are currently performed:
 
-* The package should have a name, a version and a Description.
+* The package should have a name, a version and a Summary.
   If it does not, it will receive a rating of 0.
 
-* The version number should be a string. A floating point number will
-  work with distutils, but most other tools will fail.
+* The name must follow the project name format from the packaging
+  specifications; package indices reject invalid names, so an invalid
+  name is fatal.
 
-* The version number should comply to PEP386.
+* The version number should be a string that complies with the version
+  specifiers specification (PEP 440). Non-canonical forms, version
+  epochs and local version segments are warned about.
 
-* The description should be over 10 characters, and the long_description
+* The ``Metadata-Version`` must be a legal value.
+
+* The Summary should be over 10 characters, and the Description
   should be over a 100 characters.
 
-* Pyroma will convert your long_description to HTML using Docutils, to
-  verify that it is possible. This guarantees pretty formatting of your
-  description on PyPI. As long as Docutils can convert it, this passes,
-  even if there are warnings or error in the conversion. These warnings
-  and errors are printed to stdout so you will see them.
+* If your Description is ReStructuredText (the default), pyroma will
+  convert it to HTML using Docutils, to verify that it is possible.
+  This guarantees pretty formatting of your description on PyPI.
 
-  NB! Currently this doesn't change the rating, this is because Docutils
-  no longer raises an error during this process, so I have to rewrite the
-  test. Once it's reinstated, incorrect syntax will be fatal.
+* The ``Description-Content-Type``, if given, must be a legal
+  type/charset/variant combination.
 
 * You should have the following meta data fields filled in:
-  classifiers, keywords, author, author_email, url and license.
+  classifiers, keywords, author, author_email and project URLs.
 
-* You should have classifiers specifying the supported Python versions.
+* You should have classifiers specifying the supported Python versions
+  and the development status.
 
 * You should have ``requires-python``/``python_requires``
   specifying the Python versions you support.
 
-* You should have a classifier specifying the project license.
+* You should specify your license with the ``License-Expression``
+  field. It must be a valid SPDX license expression; an invalid one, or
+  combining it with the deprecated ``License`` field, is fatal since
+  package indices reject such uploads.
+
+* Every ``Requires-Dist`` entry must be a valid dependency specifier;
+  legacy parenthesized version specifiers and ordered comparisons on
+  non-version environment markers are warned about.
+
+* Your project should have a ``pyproject.toml`` declaring your build
+  backend (any PEP 517 backend works: setuptools, flit, hatchling,
+  uv_build, etc.). The file is validated against the pyproject.toml
+  specification, including the ``[project]`` table rules (static name,
+  static-or-dynamic version, readme/license exclusivity, no
+  ``console_scripts``/``gui_scripts`` entry-point groups).
+
+* Your ``Project-URL`` labels should include well-known labels such as
+  Homepage, Source, Documentation, Changelog or Issues; labels over 32
+  characters are fatal since package indices reject them.
+
+* Deprecated metadata fields (``Home-page``, ``Download-URL``,
+  ``Requires``, ``Provides``, ``Obsoletes``, ``License``) are warned
+  about when your metadata version deprecates them.
 
 * If you are checking on a PyPI package, and not a local directory or
   local package, pyroma will check the number of owners the package has

@@ -4,7 +4,48 @@ Changelog
 5.1b3 (unreleased)
 ------------------
 
-- Nothing changed yet.
+- Rating tests are now stateless: each test returns a ``TestResult``
+  instead of mutating shared test instances, and the new
+  ``ratings.rate_project()`` returns a structured ``RatedProject``
+  with per-test problems. ``ratings.rate()`` keeps its old
+  ``(rating, messages)`` return value.
+
+- Added a ``--format json`` option for machine-readable output.
+  Program output no longer goes through the root logger, and
+  ``--quiet`` simply prints the rating.
+
+- pyroma no longer depends on setuptools or distutils at runtime.
+  pyproject.toml validation now uses ``validate-pyproject``, and
+  pyroma's own metadata lives in ``pyproject.toml``.
+
+- setup.cfg-only projects (no setup.py, no pyproject.toml) are now
+  rated 1 on their build-system problems alone, since no standard tool
+  can build them and no metadata can be extracted.
+
+- New and stricter checks based on the packaging specifications:
+  version numbers are validated with ``packaging.version`` (warning
+  about non-canonical forms, epochs and local version segments),
+  ``Metadata-Version`` must be a legal value, project names must match
+  the packaging name format (fatal), ``License-Expression`` must be
+  valid SPDX (fatal, as is combining it with ``License``),
+  ``Description-Content-Type`` and every ``Requires-Dist`` entry are
+  validated, the pyproject.toml ``[project]`` table MUST-rules are
+  enforced (fatal), and ``Project-URL`` labels are checked against the
+  well-known labels (with the 32 character limit fatal).
+
+- Official support for the ``uv_build`` backend, and backend-neutral
+  advice when pyproject.toml is missing.
+
+- PyPI requests now use timeouts and clear error messages, and
+  downloaded sdists are always cleaned up.
+
+- All code is now type-annotated and checked with mypy; a
+  ``py.typed`` marker ships with the package.
+
+- Linting moved from black + flake8 to Ruff; the test suite runs with
+  a coverage gate.
+
+- Exit codes are now documented in the README.
 
 
 5.1b2 (2026-06-14)

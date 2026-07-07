@@ -1,16 +1,13 @@
 import io
-
 import json
 import os
 import unittest
-
 import unittest.mock
 from pathlib import Path
-
-import pyroma
 from xmlrpc import client as xmlrpclib
 
-from pyroma import projectdata, distributiondata, pypidata
+import pyroma
+from pyroma import distributiondata, projectdata, pypidata, ratings, report
 from pyroma.ratings import rate
 
 TESTDATA_DIR = Path(__file__).parent / "testdata"
@@ -127,10 +124,11 @@ class RatingsTest(unittest.TestCase):
                 8,
                 [
                     "Your project does not have a pyproject.toml file, which is highly recommended.\n"
-                    "You probably want to create one with the following configuration:\n\n"
+                    "You probably want to create one declaring your build backend, for example:\n\n"
                     "    [build-system]\n"
-                    '    requires = ["setuptools>=42"]\n'
-                    '    build-backend = "setuptools.build_meta"\n'
+                    '    requires = ["setuptools>=77"]\n'
+                    '    build-backend = "setuptools.build_meta"\n\n'
+                    "Any PEP 517 build backend works, for example flit_core, hatchling or uv_build.\n"
                     "See https://packaging.python.org for more information on how to package your project.",
                     "Using license classifiers is deprecated in favour of the license-expression field.",
                     "The metadata field 'home-page' is deprecated; use 'project-url' instead.",
@@ -139,14 +137,15 @@ class RatingsTest(unittest.TestCase):
         )
 
     def test_only_config(self):
-        # In version 5, this is now an error, as there is no legacy setup.py,
-        # nor a modern pyproject.toml.
+        # There is no legacy setup.py, nor a modern pyproject.toml, so there
+        # is no way to build this project and no metadata to extract. Only
+        # the build system problems are reported.
         rating = self._get_file_rating("only_config")
 
         self.assertEqual(
             rating,
             (
-                5,
+                1,
                 [
                     "You seem to neither have a setup.py, nor a pyproject.toml, only setup.cfg.\n"
                     "This makes it unclear how your project should be built, and some packaging "
@@ -154,15 +153,12 @@ class RatingsTest(unittest.TestCase):
                     "See https://packaging.python.org for more information on how to package your project.",
                     "Your project does not have a pyproject.toml file, which is highly "
                     "recommended.\n"
-                    "You probably want to create one with the following configuration:\n\n"
+                    "You probably want to create one declaring your build backend, for example:\n\n"
                     "    [build-system]\n"
-                    '    requires = ["setuptools>=42"]\n'
-                    '    build-backend = "setuptools.build_meta"\n'
+                    '    requires = ["setuptools>=77"]\n'
+                    '    build-backend = "setuptools.build_meta"\n\n'
+                    "Any PEP 517 build backend works, for example flit_core, hatchling or uv_build.\n"
                     "See https://packaging.python.org for more information on how to package your project.",
-                    "Specifying both a License-Expression and license classifiers is ambiguous, "
-                    "deprecated, and may be rejected by package indices.",
-                    "The metadata field 'home-page' is deprecated; use 'project-url' instead.",
-                    "Check-manifest returned errors",
                 ],
             ),
         )
@@ -187,6 +183,10 @@ class RatingsTest(unittest.TestCase):
         rating = self._get_file_rating("pep621")
         self.assertGreaterEqual(rating[0], 9)
 
+    def test_uv_build(self):
+        rating = self._get_file_rating("uv_build")
+        self.assertGreaterEqual(rating[0], 9)
+
     def test_minimal(self):
         rating = self._get_file_rating("minimal")
         self.assertEqual(
@@ -199,7 +199,7 @@ class RatingsTest(unittest.TestCase):
                     "Your package does not have classifier data.",
                     "The classifiers should specify what Python versions you support."
                     "You can find the list of standard classifiers here: https://pypi.org/classifiers/",
-                    "You should specify what Python versions you support with " "the 'Requires-Python' metadata.",
+                    "You should specify what Python versions you support with the 'Requires-Python' metadata.",
                     "Your package does not have keywords data.",
                     "Your package does not have author data.",
                     "Your package does not have author-email data.",
@@ -224,17 +224,18 @@ class RatingsTest(unittest.TestCase):
                 0,
                 [
                     "Your project does not have a pyproject.toml file, which is highly recommended.\n"
-                    "You probably want to create one with the following configuration:\n\n"
+                    "You probably want to create one declaring your build backend, for example:\n\n"
                     "    [build-system]\n"
-                    '    requires = ["setuptools>=42"]\n'
-                    '    build-backend = "setuptools.build_meta"\n'
+                    '    requires = ["setuptools>=77"]\n'
+                    '    build-backend = "setuptools.build_meta"\n\n'
+                    "Any PEP 517 build backend works, for example flit_core, hatchling or uv_build.\n"
                     "See https://packaging.python.org for more information on how to package your project.",
                     "The package had no Summary!",
                     "The package's Description is quite short.",
                     "Your package does not have classifier data.",
                     "The classifiers should specify what Python versions you support."
                     "You can find the list of standard classifiers here: https://pypi.org/classifiers/",
-                    "You should specify what Python versions you support with " "the 'Requires-Python' metadata.",
+                    "You should specify what Python versions you support with the 'Requires-Python' metadata.",
                     "Your package does not have keywords data.",
                     "Your package does not have author data.",
                     "Your package does not have author-email data.",
@@ -264,7 +265,7 @@ class RatingsTest(unittest.TestCase):
                     "Your package does not have classifier data.",
                     "The classifiers should specify what Python versions you support."
                     "You can find the list of standard classifiers here: https://pypi.org/classifiers/",
-                    "You should specify what Python versions you support with " "the 'Requires-Python' metadata.",
+                    "You should specify what Python versions you support with the 'Requires-Python' metadata.",
                     "Your package does not have keywords data.",
                     "Your package does not have author data.",
                     "Your package does not have author-email data.",
@@ -335,6 +336,223 @@ class RatingsTest(unittest.TestCase):
         self.assertTrue(any("The metadata field 'license' is deprecated" in msg for msg in new_rating[1]))
 
 
+class SpecComplianceTest(unittest.TestCase):
+    """Tests for the strict, spec-grounded rating checks."""
+
+    maxDiff = None
+
+    def _messages(self, testdata):
+        return rate(testdata)[1]
+
+    def test_invalid_version(self):
+        testdata = COMPLETE.copy()
+        testdata["version"] = "1.0-foo"
+
+        rating = rate(testdata)
+        self.assertLess(rating[0], 10)
+        self.assertTrue(any("'1.0-foo' is not a valid version" in msg for msg in rating[1]))
+
+    def test_noncanonical_version(self):
+        testdata = COMPLETE.copy()
+        testdata["version"] = "1.0.DEV1"
+
+        messages = self._messages(testdata)
+        self.assertTrue(any("not in canonical form; it should be written as '1.0.dev1'" in msg for msg in messages))
+
+    def test_version_epoch_and_local_segment(self):
+        testdata = COMPLETE.copy()
+        testdata["version"] = "1!1.0+ubuntu1"
+
+        messages = self._messages(testdata)
+        self.assertTrue(any("uses a version epoch" in msg for msg in messages))
+        self.assertTrue(any("contains a local version segment" in msg for msg in messages))
+
+    def test_invalid_metadata_version(self):
+        testdata = COMPLETE.copy()
+        testdata["metadata-version"] = "2.0"
+
+        messages = self._messages(testdata)
+        self.assertTrue(any("'2.0' is not a valid Metadata-Version" in msg for msg in messages))
+
+    def test_invalid_name_is_fatal(self):
+        testdata = COMPLETE.copy()
+        testdata["name"] = "-not-valid-"
+
+        rating = rate(testdata)
+        self.assertEqual(rating[0], 0)
+        self.assertTrue(any("'-not-valid-' is not a valid project name" in msg for msg in rating[1]))
+
+    def test_license_and_license_expression_is_fatal(self):
+        testdata = COMPLETE.copy()
+        testdata["license"] = "MIT"
+
+        rating = rate(testdata)
+        self.assertEqual(rating[0], 0)
+        self.assertTrue(
+            any("Specifying both a License and a License-Expression is forbidden" in msg for msg in rating[1])
+        )
+
+    def test_invalid_license_expression_is_fatal(self):
+        testdata = COMPLETE.copy()
+        testdata["license-expression"] = "Bogus-License"
+
+        rating = rate(testdata)
+        self.assertEqual(rating[0], 0)
+        self.assertTrue(any("'Bogus-License' is not a valid SPDX license expression" in msg for msg in rating[1]))
+
+    def test_invalid_description_content_type(self):
+        testdata = COMPLETE.copy()
+        testdata["description-content-type"] = "text/html"
+
+        messages = self._messages(testdata)
+        self.assertTrue(any("The content type should be one of" in msg for msg in messages))
+
+    def test_description_content_type_parameters(self):
+        testdata = COMPLETE.copy()
+        testdata["description-content-type"] = "text/plain; charset=latin-1; variant=GFM"
+
+        messages = self._messages(testdata)
+        message = next(msg for msg in messages if "Description-Content-Type" in msg)
+        self.assertIn("The only accepted charset is UTF-8, not 'latin-1'.", message)
+        self.assertIn("The 'variant' parameter is only valid for text/markdown.", message)
+
+    def test_markdown_variant(self):
+        testdata = COMPLETE.copy()
+        testdata["description-content-type"] = "text/markdown; variant=GFM"
+        self.assertFalse(any("Description-Content-Type" in msg for msg in self._messages(testdata)))
+
+        testdata["description-content-type"] = "text/markdown; variant=Pandoc"
+        messages = self._messages(testdata)
+        self.assertTrue(
+            any("The markdown variant should be GFM or CommonMark, not 'Pandoc'." in msg for msg in messages)
+        )
+
+    def test_invalid_requires_dist(self):
+        testdata = COMPLETE.copy()
+        testdata["requires-dist"] = ["zope.event", "broken =="]
+
+        messages = self._messages(testdata)
+        self.assertTrue(any("'broken ==' is not a valid dependency specifier" in msg for msg in messages))
+
+    def test_requires_dist_style_warnings(self):
+        testdata = COMPLETE.copy()
+        testdata["requires-dist"] = [
+            "zope.event (>=4.0)",
+            'zope.interface; sys_platform > "linux"',
+        ]
+
+        messages = self._messages(testdata)
+        message = next(msg for msg in messages if "Requires-Dist" in msg)
+        self.assertIn("puts the version specifier in parentheses", message)
+        self.assertIn("ordered comparison on the 'sys_platform' environment marker", message)
+
+    def test_url_label_too_long_is_fatal(self):
+        testdata = COMPLETE.copy()
+        testdata["project-url"] = ["this label is far too long to be legal, https://example.com"]
+
+        rating = rate(testdata)
+        self.assertEqual(rating[0], 0)
+        self.assertTrue(any("Project-URL labels are limited to 32 characters" in msg for msg in rating[1]))
+
+    def test_url_no_well_known_labels(self):
+        testdata = COMPLETE.copy()
+        testdata["project-url"] = ["weird stuff, https://example.com"]
+
+        messages = self._messages(testdata)
+        self.assertTrue(any("None of your Project-URL labels match the well-known labels" in msg for msg in messages))
+
+    def test_console_scripts_in_entry_points_is_fatal(self):
+        testdata = COMPLETE.copy()
+        testdata["_path"] = TESTDATA_DIR / "bad_console_scripts"
+
+        rating = rate(testdata)
+        self.assertEqual(rating[0], 0)
+        self.assertTrue(any("Console and GUI scripts must be defined in [project.scripts]" in msg for msg in rating[1]))
+
+    def test_readme_both_file_and_text_is_fatal(self):
+        testdata = COMPLETE.copy()
+        testdata["_path"] = TESTDATA_DIR / "readme_both"
+
+        rating = rate(testdata)
+        self.assertEqual(rating[0], 0)
+        self.assertTrue(any("The 'readme' table must not specify both 'file' and 'text'." in msg for msg in rating[1]))
+
+    def test_dynamic_name_is_fatal(self):
+        testdata = COMPLETE.copy()
+        testdata["_path"] = TESTDATA_DIR / "dynamic_name"
+
+        rating = rate(testdata)
+        self.assertEqual(rating[0], 0)
+        self.assertTrue(
+            any("The 'name' key must be static, it must never be listed in 'dynamic'." in msg for msg in rating[1])
+        )
+        self.assertTrue(
+            any(
+                "The 'version' key must either be set statically or be listed in 'dynamic'." in msg for msg in rating[1]
+            )
+        )
+
+
+class ReportTest(unittest.TestCase):
+    maxDiff = None
+
+    def _rated(self):
+        return ratings.RatedProject(
+            name="example",
+            rating=9,
+            level=ratings.LEVELS[9],
+            problems=[
+                ratings.Problem(
+                    test="Description",
+                    message="The package's Description is quite short.",
+                    weight=50,
+                    fatal=False,
+                )
+            ],
+        )
+
+    def test_format_text(self):
+        self.assertEqual(
+            report.format_text(self._rated()),
+            "------------------------------\n"
+            "The package's Description is quite short.\n"
+            "------------------------------\n"
+            "Final rating: 9/10\n"
+            "Cottage Cheese\n"
+            "------------------------------",
+        )
+
+    def test_format_text_no_problems(self):
+        rated = ratings.RatedProject(name="example", rating=10, level=ratings.LEVELS[10], problems=[])
+        self.assertEqual(
+            report.format_text(rated),
+            "------------------------------\n"
+            "Final rating: 10/10\n"
+            "Your cheese is so fresh most people think it's a cream: Mascarpone\n"
+            "------------------------------",
+        )
+
+    def test_format_json(self):
+        document = json.loads(report.format_json(self._rated(), meta={"mode": "directory"}))
+        self.assertEqual(
+            document,
+            {
+                "name": "example",
+                "rating": 9,
+                "level": "Cottage Cheese",
+                "problems": [
+                    {
+                        "test": "Description",
+                        "message": "The package's Description is quite short.",
+                        "weight": 50,
+                        "fatal": False,
+                    }
+                ],
+                "_meta": {"mode": "directory"},
+            },
+        )
+
+
 class PyPITest(unittest.TestCase):
     maxDiff = None
 
@@ -366,7 +584,9 @@ class PyPITest(unittest.TestCase):
 
         pypidata._get_project_data("internalpkg", index_url="https://packages.example.com")
 
-        requestmock.assert_called_once_with("https://packages.example.com/pypi/internalpkg/json")
+        requestmock.assert_called_once_with(
+            "https://packages.example.com/pypi/internalpkg/json", timeout=pypidata.REQUEST_TIMEOUT
+        )
 
     @unittest.mock.patch("pyroma.pypidata.requests.get")
     def test_get_project_data_custom_index_url_with_pypi_path(self, requestmock):
@@ -377,7 +597,9 @@ class PyPITest(unittest.TestCase):
 
         pypidata._get_project_data("internalpkg", index_url="https://packages.example.com/pypi")
 
-        requestmock.assert_called_once_with("https://packages.example.com/pypi/internalpkg/json")
+        requestmock.assert_called_once_with(
+            "https://packages.example.com/pypi/internalpkg/json", timeout=pypidata.REQUEST_TIMEOUT
+        )
 
     @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")
     @unittest.mock.patch("pyroma.pypidata._get_project_data")
@@ -394,11 +616,13 @@ class PyPITest(unittest.TestCase):
         self.assertEqual(data["_owners"], ["dev1"])
         proxymock.assert_called_once_with("https://packages.example.com/pypi")
 
-    @unittest.mock.patch("pyroma.ratings.rate")
+    @unittest.mock.patch("pyroma.ratings.rate_project")
     @unittest.mock.patch("pyroma.pypidata.get_data")
     def test_run_forwards_custom_index_url(self, datamock, ratemock):
         datamock.return_value = {"name": "internalpkg"}
-        ratemock.return_value = (10, [])
+        ratemock.return_value = ratings.RatedProject(
+            name="internalpkg", rating=10, level=ratings.LEVELS[10], problems=[]
+        )
 
         result = pyroma.run("pypi", "internalpkg", quiet=True, index_url="https://packages.example.com")
 

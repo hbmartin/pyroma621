@@ -30,3 +30,19 @@ You do it this way:
     $ cd pyroma/testdata/complete
     $ python setup.py sdist --formats=bztar,gztar,tar,zip
     $ cp dist/complete-1.0.dev1.* ../distributions/
+
+Future ideas
+------------
+
+Two improvements were considered but deliberately deferred:
+
+* A static fast-path that reads a fully-static ``[project]`` table from
+  ``pyproject.toml`` with ``tomllib`` to skip the wheel metadata build.
+  It is only a speed optimization: it cannot handle ``dynamic`` fields
+  or setup.py-only projects, so the ``build``-based path has to remain
+  as the fallback.
+
+* Capturing the build backend subprocess's stdout/stderr by passing a
+  custom ``runner`` to ``build.util.project_wheel_metadata`` (the
+  default ``quiet_subprocess_runner`` discards it), so that backend
+  deprecation warnings can be surfaced in a report section.

@@ -14,3 +14,4 @@ py3*
 *.class
 .venv
 .env
+.coverage

@@ -1,0 +1,10 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "readme-both"
+version = "1.0"
+description = "A package whose readme table has both file and text"
+# Invalid: the readme table must not specify both 'file' and 'text'
+readme = {file = "README.txt", text = "A readme", content-type = "text/plain"}
