@@ -17,14 +17,13 @@
 import io
 import os
 import re
-
 from dataclasses import dataclass
 
 from docutils.core import publish_parts
 from docutils.utils import SystemMessage
-from trove_classifiers import classifiers as CLASSIFIERS
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from setuptools.config.pyprojecttoml import read_configuration
+from trove_classifiers import classifiers as CLASSIFIERS
 
 LEVELS = [
     "This cheese seems to contain no dairy products",
@@ -295,7 +294,7 @@ class PythonRequiresVersion(BaseTest):
         # https://github.com/regebro/pyroma/pull/83#discussion_r955611236
         python_requires = data.get("requires-python", None)
 
-        message = "You should specify what Python versions you support with " "the 'Requires-Python' metadata."
+        message = "You should specify what Python versions you support with the 'Requires-Python' metadata."
         if not python_requires:
             return self._failed(message)
 

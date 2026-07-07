@@ -1,9 +1,10 @@
 import logging
 import os
 import re
-import requests
 import tempfile
 import xmlrpc.client
+
+import requests
 
 from pyroma import distributiondata
 
@@ -43,10 +44,10 @@ def _get_base_api_url(index_url=None):
 def _http_get(url):
     try:
         return requests.get(url, timeout=REQUEST_TIMEOUT)
-    except requests.exceptions.Timeout:
-        raise ValueError(f"Timed out after {REQUEST_TIMEOUT} seconds while fetching {url}.")
+    except requests.exceptions.Timeout as e:
+        raise ValueError(f"Timed out after {REQUEST_TIMEOUT} seconds while fetching {url}.") from e
     except requests.exceptions.ConnectionError as e:
-        raise ValueError(f"Could not connect to {url}: {e}")
+        raise ValueError(f"Could not connect to {url}: {e}") from e
 
 
 def _get_project_data(project, index_url=None):

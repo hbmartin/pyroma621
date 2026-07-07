@@ -2,5 +2,9 @@
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
-[tool.black]
+[tool.ruff]
 line-length = 120
+extend-exclude = ["pyroma/testdata"]
+
+[tool.ruff.lint]
+extend-select = ["B", "I", "UP"]

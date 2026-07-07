@@ -1,8 +1,10 @@
 import os
 import sys
 from argparse import ArgumentParser, ArgumentTypeError
-from importlib.metadata import PackageNotFoundError, version as package_version
-from pyroma import projectdata, distributiondata, pypidata, ratings, report
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
+
+from pyroma import distributiondata, projectdata, pypidata, ratings, report
 
 
 def zester(data):
@@ -26,8 +28,8 @@ def zester(data):
 def min_argument(arg):
     try:
         f = int(arg)
-    except ValueError:
-        raise ArgumentTypeError("Must be an integer between 1 and 10")
+    except ValueError as e:
+        raise ArgumentTypeError("Must be an integer between 1 and 10") from e
     if f < 0:
         raise ArgumentTypeError("Oh, it's not THAT bad, trust me.")
     if f < 1:

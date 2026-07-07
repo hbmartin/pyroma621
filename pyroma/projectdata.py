@@ -1,12 +1,12 @@
 # Extracts information from a project
-import build
-import build.util
 import os
 import pathlib
 import re
-
-from setuptools.config.setupcfg import read_configuration
 from distutils.errors import DistutilsFileError
+
+import build
+import build.util
+from setuptools.config.setupcfg import read_configuration
 
 # MAP from old setup.py type keys to Core Metadata keys
 METADATA_MAP = {

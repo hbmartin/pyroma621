@@ -1,16 +1,13 @@
 import io
-
 import json
 import os
 import unittest
-
 import unittest.mock
 from pathlib import Path
-
-import pyroma
 from xmlrpc import client as xmlrpclib
 
-from pyroma import projectdata, distributiondata, pypidata, ratings
+import pyroma
+from pyroma import distributiondata, projectdata, pypidata, ratings
 from pyroma.ratings import rate
 
 TESTDATA_DIR = Path(__file__).parent / "testdata"
@@ -199,7 +196,7 @@ class RatingsTest(unittest.TestCase):
                     "Your package does not have classifier data.",
                     "The classifiers should specify what Python versions you support."
                     "You can find the list of standard classifiers here: https://pypi.org/classifiers/",
-                    "You should specify what Python versions you support with " "the 'Requires-Python' metadata.",
+                    "You should specify what Python versions you support with the 'Requires-Python' metadata.",
                     "Your package does not have keywords data.",
                     "Your package does not have author data.",
                     "Your package does not have author-email data.",
@@ -234,7 +231,7 @@ class RatingsTest(unittest.TestCase):
                     "Your package does not have classifier data.",
                     "The classifiers should specify what Python versions you support."
                     "You can find the list of standard classifiers here: https://pypi.org/classifiers/",
-                    "You should specify what Python versions you support with " "the 'Requires-Python' metadata.",
+                    "You should specify what Python versions you support with the 'Requires-Python' metadata.",
                     "Your package does not have keywords data.",
                     "Your package does not have author data.",
                     "Your package does not have author-email data.",
@@ -264,7 +261,7 @@ class RatingsTest(unittest.TestCase):
                     "Your package does not have classifier data.",
                     "The classifiers should specify what Python versions you support."
                     "You can find the list of standard classifiers here: https://pypi.org/classifiers/",
-                    "You should specify what Python versions you support with " "the 'Requires-Python' metadata.",
+                    "You should specify what Python versions you support with the 'Requires-Python' metadata.",
                     "Your package does not have keywords data.",
                     "Your package does not have author data.",
                     "Your package does not have author-email data.",
