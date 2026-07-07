@@ -124,10 +124,11 @@ class RatingsTest(unittest.TestCase):
                 8,
                 [
                     "Your project does not have a pyproject.toml file, which is highly recommended.\n"
-                    "You probably want to create one with the following configuration:\n\n"
+                    "You probably want to create one declaring your build backend, for example:\n\n"
                     "    [build-system]\n"
-                    '    requires = ["setuptools>=42"]\n'
-                    '    build-backend = "setuptools.build_meta"\n'
+                    '    requires = ["setuptools>=77"]\n'
+                    '    build-backend = "setuptools.build_meta"\n\n'
+                    "Any PEP 517 build backend works, for example flit_core, hatchling or uv_build.\n"
                     "See https://packaging.python.org for more information on how to package your project.",
                     "Using license classifiers is deprecated in favour of the license-expression field.",
                     "The metadata field 'home-page' is deprecated; use 'project-url' instead.",
@@ -152,10 +153,11 @@ class RatingsTest(unittest.TestCase):
                     "See https://packaging.python.org for more information on how to package your project.",
                     "Your project does not have a pyproject.toml file, which is highly "
                     "recommended.\n"
-                    "You probably want to create one with the following configuration:\n\n"
+                    "You probably want to create one declaring your build backend, for example:\n\n"
                     "    [build-system]\n"
-                    '    requires = ["setuptools>=42"]\n'
-                    '    build-backend = "setuptools.build_meta"\n'
+                    '    requires = ["setuptools>=77"]\n'
+                    '    build-backend = "setuptools.build_meta"\n\n'
+                    "Any PEP 517 build backend works, for example flit_core, hatchling or uv_build.\n"
                     "See https://packaging.python.org for more information on how to package your project.",
                 ],
             ),
@@ -179,6 +181,10 @@ class RatingsTest(unittest.TestCase):
 
     def test_pep621(self):
         rating = self._get_file_rating("pep621")
+        self.assertGreaterEqual(rating[0], 9)
+
+    def test_uv_build(self):
+        rating = self._get_file_rating("uv_build")
         self.assertGreaterEqual(rating[0], 9)
 
     def test_minimal(self):
@@ -218,10 +224,11 @@ class RatingsTest(unittest.TestCase):
                 0,
                 [
                     "Your project does not have a pyproject.toml file, which is highly recommended.\n"
-                    "You probably want to create one with the following configuration:\n\n"
+                    "You probably want to create one declaring your build backend, for example:\n\n"
                     "    [build-system]\n"
-                    '    requires = ["setuptools>=42"]\n'
-                    '    build-backend = "setuptools.build_meta"\n'
+                    '    requires = ["setuptools>=77"]\n'
+                    '    build-backend = "setuptools.build_meta"\n\n'
+                    "Any PEP 517 build backend works, for example flit_core, hatchling or uv_build.\n"
                     "See https://packaging.python.org for more information on how to package your project.",
                     "The package had no Summary!",
                     "The package's Description is quite short.",

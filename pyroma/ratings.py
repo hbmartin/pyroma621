@@ -762,10 +762,11 @@ class MissingPyProjectToml(BaseTest):
         if "_missing_build_system" in data or "_missing_pyproject_toml" in data:
             return self._failed(
                 "Your project does not have a pyproject.toml file, which is highly recommended.\n"
-                "You probably want to create one with the following configuration:\n\n"
+                "You probably want to create one declaring your build backend, for example:\n\n"
                 "    [build-system]\n"
-                '    requires = ["setuptools>=42"]\n'
-                '    build-backend = "setuptools.build_meta"\n'
+                '    requires = ["setuptools>=77"]\n'
+                '    build-backend = "setuptools.build_meta"\n\n'
+                "Any PEP 517 build backend works, for example flit_core, hatchling or uv_build.\n"
                 "See https://packaging.python.org for more information on how to package your project.",
                 weight=100,
             )
