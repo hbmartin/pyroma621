@@ -336,7 +336,7 @@ class PythonClassifierVersion(BaseTest):
 class PythonRequiresVersion(BaseTest):
     weight = 100
 
-    _message = "You should specify what Python versions you support with " "the 'Requires-Python' metadata."
+    _message = "You should specify what Python versions you support with the 'Requires-Python' metadata."
 
     def test(self, data: Metadata) -> TestResult:
         # https://github.com/regebro/pyroma/pull/83#discussion_r955611236
@@ -418,9 +418,7 @@ class Licensing(BaseTest):
             )
 
         if has_license_classifier:
-            return self._failed(
-                "Using license classifiers is deprecated in favour of the license-expression field."
-            )
+            return self._failed("Using license classifiers is deprecated in favour of the license-expression field.")
 
         return self._passed()
 

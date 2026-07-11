@@ -2,8 +2,30 @@
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
-[tool.black]
+[tool.ruff]
 line-length = 120
+extend-exclude = ["pyroma/testdata"]
+
+[tool.ruff.lint]
+select = [
+    "B",   # flake8-bugbear
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "W",   # pycodestyle warnings
+]
+ignore = [
+    "B904", # raise-without-from-inside-except; the bare messages are intentional user-facing errors
+]
+
+[tool.coverage.run]
+source = ["pyroma"]
+omit = ["pyroma/tests.py", "pyroma/testdata/*"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 78
 
 [tool.mypy]
 python_version = "3.10"

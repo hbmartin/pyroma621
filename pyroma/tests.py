@@ -1,16 +1,13 @@
 import io
-
 import json
 import os
 import unittest
-
 import unittest.mock
 from pathlib import Path
-
-import pyroma
 from xmlrpc import client as xmlrpclib
 
-from pyroma import projectdata, distributiondata, pypidata
+import pyroma
+from pyroma import distributiondata, projectdata, pypidata
 from pyroma.ratings import Problem, Rating, rate
 from pyroma.report import JsonReporter, TextReporter
 
@@ -18,6 +15,7 @@ from pyroma.report import JsonReporter, TextReporter
 def astuple(rating):
     """The (rating, messages) view of a Rating, as the old rate() returned."""
     return (rating.rating, rating.messages)
+
 
 TESTDATA_DIR = Path(__file__).parent / "testdata"
 long_description = (TESTDATA_DIR / "complete" / "README.txt").read_text(encoding="UTF-8")
@@ -205,7 +203,7 @@ class RatingsTest(unittest.TestCase):
                     "Your package does not have classifier data.",
                     "The classifiers should specify what Python versions you support."
                     "You can find the list of standard classifiers here: https://pypi.org/classifiers/",
-                    "You should specify what Python versions you support with " "the 'Requires-Python' metadata.",
+                    "You should specify what Python versions you support with the 'Requires-Python' metadata.",
                     "Your package does not have keywords data.",
                     "Your package does not have author data.",
                     "Your package does not have author-email data.",
@@ -240,7 +238,7 @@ class RatingsTest(unittest.TestCase):
                     "Your package does not have classifier data.",
                     "The classifiers should specify what Python versions you support."
                     "You can find the list of standard classifiers here: https://pypi.org/classifiers/",
-                    "You should specify what Python versions you support with " "the 'Requires-Python' metadata.",
+                    "You should specify what Python versions you support with the 'Requires-Python' metadata.",
                     "Your package does not have keywords data.",
                     "Your package does not have author data.",
                     "Your package does not have author-email data.",
@@ -270,7 +268,7 @@ class RatingsTest(unittest.TestCase):
                     "Your package does not have classifier data.",
                     "The classifiers should specify what Python versions you support."
                     "You can find the list of standard classifiers here: https://pypi.org/classifiers/",
-                    "You should specify what Python versions you support with " "the 'Requires-Python' metadata.",
+                    "You should specify what Python versions you support with the 'Requires-Python' metadata.",
                     "Your package does not have keywords data.",
                     "Your package does not have author data.",
                     "Your package does not have author-email data.",
@@ -375,7 +373,9 @@ class PyPITest(unittest.TestCase):
 
         pypidata._get_project_data("internalpkg", index_url="https://packages.example.com")
 
-        requestmock.assert_called_once_with("https://packages.example.com/pypi/internalpkg/json")
+        requestmock.assert_called_once_with(
+            "https://packages.example.com/pypi/internalpkg/json", timeout=pypidata.REQUESTS_TIMEOUT
+        )
 
     @unittest.mock.patch("pyroma.pypidata.requests.get")
     def test_get_project_data_custom_index_url_with_pypi_path(self, requestmock):
@@ -386,7 +386,9 @@ class PyPITest(unittest.TestCase):
 
         pypidata._get_project_data("internalpkg", index_url="https://packages.example.com/pypi")
 
-        requestmock.assert_called_once_with("https://packages.example.com/pypi/internalpkg/json")
+        requestmock.assert_called_once_with(
+            "https://packages.example.com/pypi/internalpkg/json", timeout=pypidata.REQUESTS_TIMEOUT
+        )
 
     @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")
     @unittest.mock.patch("pyroma.pypidata._get_project_data")
