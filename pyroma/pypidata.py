@@ -3,16 +3,14 @@ import os
 import re
 import tempfile
 import xmlrpc.client
-from typing import Any, cast
+from typing import cast
 
 import requests
 
 from pyroma import distributiondata
-from pyroma.metadata import Metadata
+from pyroma._types import Metadata
 
-# Genuine diagnostics go to a named logger; program output is handled by
-# pyroma.report.
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("pyroma.pypidata")
 
 # MAP from old PyPI `info` keys to Core Metadata keys
 INFO_MAP = {
@@ -31,9 +29,7 @@ def normalize(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def _get_base_api_url(index_url: "str | None" = None) -> str:
-    # PyPI serves both the JSON REST API (<base>/<project>/json) and the
-    # legacy XML-RPC API on the same /pypi base path.
+def _get_xmlrpc_url(index_url: str | None = None) -> str:
     if not index_url:
         return DEFAULT_PYPI_BASE_API_URL
 
@@ -43,19 +39,10 @@ def _get_base_api_url(index_url: "str | None" = None) -> str:
     return f"{base_url}/pypi"
 
 
-def _http_get(url: str) -> requests.Response:
-    try:
-        return requests.get(url, timeout=REQUEST_TIMEOUT)
-    except requests.exceptions.Timeout as e:
-        raise ValueError(f"Timed out after {REQUEST_TIMEOUT} seconds while fetching {url}.") from e
-    except requests.exceptions.ConnectionError as e:
-        raise ValueError(f"Could not connect to {url}: {e}") from e
-
-
-def _get_project_data(project: str, index_url: "str | None" = None) -> "dict[str, Any]":
-    # This uses the JSON REST API, not the (deprecated) XML-RPC API.
-    base_api_url = _get_base_api_url(index_url)
-    response = _http_get(f"{base_api_url}/{project}/json")
+def _get_project_data(project: str, index_url: str | None = None) -> dict:
+    # I think I should be able to monkeypatch a mock-thingy here... I think.
+    xmlrpc_url = _get_xmlrpc_url(index_url)
+    response = requests.get(f"{xmlrpc_url}/{project}/json")
     if response.status_code == 404:
         if base_api_url == DEFAULT_PYPI_BASE_API_URL:
             raise ValueError(f"Did not find '{project}' on PyPI. Did you misspell it?")
@@ -66,14 +53,14 @@ def _get_project_data(project: str, index_url: "str | None" = None) -> "dict[str
     return response.json()
 
 
-def get_data(project: str, index_url: "str | None" = None) -> Metadata:
+def get_data(project: str, index_url: str | None = None) -> Metadata:
     # Pick the latest release.
     project_data = _get_project_data(project, index_url=index_url)
     # The `releases` key is deprecated on PyPI, but there is no JSON API
     # replacement for listing the files of the latest release, so we keep
     # using it while it lasts.
     releases = project_data["releases"]
-    data: dict[str, Any] = {}
+    data: Metadata = {}
 
     for key, value in project_data["info"].items():
         key = normalize(key)
@@ -85,9 +72,7 @@ def get_data(project: str, index_url: "str | None" = None) -> Metadata:
     logger.debug(f"Found {project} version {release}")
 
     try:
-        # PyPI has deprecated the XML-RPC API, but package_roles (which the
-        # BusFactor test needs) has no JSON API replacement yet.
-        with xmlrpc.client.ServerProxy(_get_base_api_url(index_url)) as xmlrpc_client:
+        with xmlrpc.client.ServerProxy(_get_xmlrpc_url(index_url)) as xmlrpc_client:
             roles = cast("list[tuple[str, str]]", xmlrpc_client.package_roles(project))
             data["_owners"] = [user for (role, user) in roles if role == "Owner"]
     except xmlrpc.client.ProtocolError:
@@ -110,9 +95,9 @@ def get_data(project: str, index_url: "str | None" = None) -> Metadata:
             # Found a source distribution. Download and analyze it.
             data["_has_sdist"] = True
             filename = download["url"].split("/")[-1]
+            tmp = os.path.join(tempdir, filename)
             logger.debug(f"Downloading {filename} to verify distribution")
-            with tempfile.TemporaryDirectory(prefix="pyroma-") as tempdir:
-                tmp = os.path.join(tempdir, filename)
+            try:
                 with open(tmp, "wb") as outfile:
                     outfile.write(_http_get(download["url"]).content)
                 ddata = distributiondata.get_data(tmp)

@@ -1,15 +1,29 @@
 import os
 import sys
 from argparse import ArgumentParser, ArgumentTypeError
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as package_version
-from typing import Any
+from collections.abc import Sequence
 
-from pyroma import distributiondata, projectdata, pypidata, ratings, report
-from pyroma import metadata as metadata_types
+from pyroma import distributiondata, projectdata, pypidata, ratings
+from pyroma._types import Metadata
+from pyroma.report import get_reporter
+
+logger = logging.getLogger("pyroma")
 
 
-def zester(data: "dict[str, Any]") -> None:
+def _configure_logging(suppress: bool) -> None:
+    """Send pyroma's diagnostic messages to stdout, or suppress them.
+
+    This only configures the "pyroma" logger, never the root logger, so
+    library users' logging configuration is left alone.
+    """
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
+    logger.setLevel(logging.CRITICAL + 1 if suppress else logging.DEBUG)
+
+
+def zester(data: dict) -> None:
     main_files = set(os.listdir(data["workingdir"]))
     config_files = {"setup.py", "setup.cfg", "pyproject.toml"}
 
@@ -21,7 +35,7 @@ def zester(data: "dict[str, Any]") -> None:
     from zest.releaser.utils import ask
 
     if ask("Run pyroma on the package before tagging?"):
-        rating = run("directory", os.path.abspath(data["workingdir"]), skip_tests="CheckManifest")
+        rating = run("directory", os.path.abspath(data["workingdir"]), skip_tests=["CheckManifest"])
         if rating < 8:
             if not ask("Continue?"):
                 sys.exit(1)
@@ -41,32 +55,32 @@ def min_argument(arg: str) -> int:
     return f
 
 
-def get_all_tests() -> "list[str]":
-    return [x.__class__.__name__ for x in ratings.ALL_TESTS]
+def get_all_tests() -> list[str]:
+    return [x.name() for x in ratings.ALL_TESTS]
 
 
-def parse_tests(arg: str) -> "list[str] | None":
+def parse_tests(arg: str) -> list[str] | None:
     if not arg:
         return None
 
     # Split on spaces, commas and semicolons
-    names = [arg]
+    parts = [arg]
     for sep in " ,;":
         skips: list[str] = []
-        for t in names:
+        for t in parts:
             skips.extend(t.split(sep))
-        names = skips
+        parts = skips
 
     tests = get_all_tests()
-    for skip in names:
+    for skip in parts:
         if skip not in tests:
             # Invalid test mentioned, fail and print valid tests
             return None
 
-    return names
+    return parts
 
 
-def skip_tests(arg: str) -> "list[str]":
+def skip_tests(arg: str) -> list[str]:
     test_to_skip = parse_tests(arg)
     if test_to_skip:
         return test_to_skip
@@ -79,7 +93,7 @@ def skip_tests(arg: str) -> "list[str]":
 
 def main() -> None:
     parser = ArgumentParser()
-    parser.color = True  # type: ignore[attr-defined]
+    parser.color = True  # type: ignore[attr-defined]  # Enables color output on Python 3.14+
     parser.add_argument(
         "package",
         help="A python package, can be a directory, a distribution file or a PyPI package name.",
@@ -151,6 +165,13 @@ def main() -> None:
         dest="index_url",
         help="Base URL of a PyPI-compatible package index (default: https://pypi.org)",
     )
+    parser.add_argument(
+        "--format",
+        dest="output_format",
+        choices=("text", "json"),
+        default="text",
+        help="Output format: classic human-readable text, or a JSON document (default: text)",
+    )
 
     args = parser.parse_args()
 
@@ -169,7 +190,7 @@ def main() -> None:
     sys.exit(0)
 
 
-def _get_data(mode: str, argument: str, index_url: "str | None" = None) -> metadata_types.Metadata:
+def _collect_data(mode: str, argument: str, index_url: str | None) -> Metadata:
     if mode == "directory":
         return projectdata.get_data(os.path.abspath(argument))
     if mode == "file":
@@ -182,34 +203,21 @@ def run(
     mode: str,
     argument: str,
     quiet: bool = False,
-    skip_tests: "list[str] | str | None" = None,
-    index_url: "str | None" = None,
+    skip_tests: Sequence[str] | None = None,
+    index_url: str | None = None,
     output_format: str = "text",
 ) -> int:
-    """Rate a package and print the result. Returns the rating as an int."""
-    verbose = not quiet and output_format == "text"
+    # Suppress diagnostics when quiet, and in JSON mode, where stdout
+    # must stay machine-readable.
+    _configure_logging(suppress=quiet or output_format == "json")
 
-    if verbose:
-        print("-" * 30)
-        print("Checking " + argument)
+    reporter = get_reporter(output_format, quiet=quiet)
+    reporter.start(str(argument))
 
-    data = _get_data(mode, argument, index_url=index_url)
+    data = _collect_data(mode, argument, index_url)
+    reporter.found(data.get("name", "nothing"))
 
-    if verbose:
-        print("Found " + (data.get("name") or "nothing"))
+    rating = ratings.rate(data, skip_tests)
+    reporter.finish(rating)
 
-    rated = ratings.rate_project(data, skip_tests)
-
-    if output_format == "json":
-        meta = {"package": argument, "mode": mode}
-        try:
-            meta["pyroma"] = package_version("pyroma")
-        except PackageNotFoundError:
-            pass
-        print(report.format_json(rated, meta))
-    elif quiet:
-        print(rated.rating)
-    else:
-        print(report.format_text(rated))
-
-    return rated.rating
+    return rating.rating

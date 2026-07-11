@@ -3,7 +3,12 @@ import os
 import re
 from typing import Any, Union, cast
 
+import build
 import build.util
+from distutils.errors import DistutilsFileError
+from setuptools.config.setupcfg import read_configuration
+
+from pyroma._types import Metadata
 
 import build
 from pyroma.metadata import Metadata
@@ -15,7 +20,7 @@ def normalize(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def wheel_metadata(path: Pathish, isolated: "bool | None" = None) -> Any:
+def wheel_metadata(path: "os.PathLike[str] | str", isolated: bool | None = None):
     # If explictly specified whether to use isolation, pass it directly
     if isolated is not None:
         return build.util.project_wheel_metadata(path, isolated=isolated)
@@ -28,7 +33,7 @@ def wheel_metadata(path: Pathish, isolated: "bool | None" = None) -> Any:
         return build.util.project_wheel_metadata(path, isolated=True)
 
 
-def build_metadata(path: Pathish, isolated: "bool | None" = None) -> Metadata:
+def build_metadata(path: "os.PathLike[str] | str", isolated: bool | None = None) -> Metadata:
     try:
         metadata = wheel_metadata(path, isolated)
     except build.BuildBackendException:
@@ -41,7 +46,7 @@ def build_metadata(path: Pathish, isolated: "bool | None" = None) -> Metadata:
     # As far as I can tell, we can't trust that the builders normalize the keys,
     # so we do it here. Definitely most builders do not lower case them, which
     # Core Metadata Specs recommend.
-    data: dict[str, Any] = {}
+    data: Metadata = {}
     for key in set(metadata.keys()):
         value = metadata.get_all(key)
         key = normalize(key)
@@ -63,7 +68,7 @@ def build_metadata(path: Pathish, isolated: "bool | None" = None) -> Metadata:
     return cast(Metadata, data)
 
 
-def get_build_data(path: Pathish, isolated: "bool | None" = None) -> Metadata:
+def get_build_data(path: "os.PathLike[str] | str", isolated: bool | None = None) -> Metadata:
     metadata = build_metadata(path, isolated=isolated)
     # Check if there is a pyproject_toml
     if "pyproject.toml" not in os.listdir(path):
@@ -71,7 +76,25 @@ def get_build_data(path: Pathish, isolated: "bool | None" = None) -> Metadata:
     return metadata
 
 
-def get_data(path: Pathish) -> Metadata:
+def get_setupcfg_data(path: "os.PathLike[str] | str") -> Metadata:
+    data = read_configuration(str(pathlib.Path(path) / "setup.cfg"))
+
+    metadata: Metadata = {}
+    # Python requires is under "options" in setup.cfg (and so are other
+    # requirements, but those are optional and have no tests)
+    if "python_requires" in data["options"]:
+        metadata["requires-python"] = data["options"]["python_requires"]
+
+    for key, value in data["metadata"].items():
+        key = normalize(key)
+        if key in METADATA_MAP:
+            key = METADATA_MAP[key]
+        metadata[key] = value
+
+    return metadata
+
+
+def get_data(path: "os.PathLike[str] | str") -> Metadata:
     data = _get_data(path)
     if data:
         # We got something, add the path to it.
@@ -79,7 +102,7 @@ def get_data(path: Pathish) -> Metadata:
     return data
 
 
-def _get_data(path: Pathish) -> Metadata:
+def _get_data(path: "os.PathLike[str] | str") -> Metadata:
     try:
         return get_build_data(path)
     except build.BuildException as e:

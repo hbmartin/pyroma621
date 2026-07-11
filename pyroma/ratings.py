@@ -1,43 +1,33 @@
 # This is a collection of "tests" done on the package data. The result of the
 # tests is used to give the package a rating.
 #
-# Each test returns a TestResult from its test() method:
+# Each test is a stateless object with a ``test(data)`` method that returns a
+# ``TestResult``:
 #
 #     outcome:  True for pass, False for fail and None for not applicable
 #               (meaning it will not be counted).
 #     weight:   The relative importance of the test.
-#               If the test is fatal this is ignored.
-#     fatal:    If True, the failure of this test will cause the
+#               If the result has fatal set to True this is ignored.
+#     fatal:    If set to True, the failure of this test will cause the
 #               package to achieve the rating of 0, which is minimum.
-#     message:  The message to show the user on failure.
+#     message:  The problem description when the test failed.
 #
-# Tests are stateless: they must not store per-run state on the (shared)
-# test instances, but compute everything locally and return it in the
-# TestResult.
+# Tests may choose weight, fatality and message depending on the severity of
+# the failure, but they must not mutate any state on the test instance: the
+# instances in ALL_TESTS are shared.
 import io
 import os
 import re
-import string
-from dataclasses import dataclass
-from typing import Any, cast
-
-try:
-    import tomllib
-except ImportError:  # Python < 3.11
-    import tomli as tomllib  # type: ignore[import-not-found, no-redef]
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 
 from docutils.core import publish_parts
 from docutils.utils import SystemMessage
-from packaging.licenses import InvalidLicenseExpression, canonicalize_license_expression
-from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
-from packaging.version import InvalidVersion
-from packaging.version import Version as PackagingVersion
+from setuptools.config.pyprojecttoml import read_configuration
 from trove_classifiers import classifiers as CLASSIFIERS
-from validate_pyproject import api as pyproject_api
-from validate_pyproject import errors as pyproject_errors
 
-from pyroma.metadata import Metadata
+from pyroma._types import Metadata
 
 LEVELS = [
     "This cheese seems to contain no dairy products",
@@ -52,6 +42,60 @@ LEVELS = [
     "Cottage Cheese",
     "Your cheese is so fresh most people think it's a cream: Mascarpone",
 ]
+
+MAX_RATING = 10
+
+
+@dataclass(frozen=True)
+class TestResult:
+    """The outcome of running a single rating test against package data."""
+
+    outcome: bool | None
+    weight: int
+    fatal: bool = False
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class Problem:
+    """A single failed check, as reported to the user."""
+
+    test: str
+    message: str
+    weight: int
+    fatal: bool
+
+
+@dataclass
+class Rating:
+    """The result of rating a package: a 0-10 score and a list of problems."""
+
+    rating: int
+    problems: list[Problem] = field(default_factory=list)
+
+    @property
+    def messages(self) -> list[str]:
+        return [problem.message for problem in self.problems]
+
+    @property
+    def level(self) -> str:
+        return LEVELS[self.rating]
+
+    def as_dict(self) -> dict:
+        return {
+            "rating": self.rating,
+            "max_rating": MAX_RATING,
+            "level": self.level,
+            "problems": [
+                {
+                    "test": problem.test,
+                    "message": problem.message,
+                    "weight": problem.weight,
+                    "fatal": problem.fatal,
+                }
+                for problem in self.problems
+            ],
+        }
 
 
 @dataclass(frozen=True)
@@ -87,6 +131,31 @@ class RatedProject:
 class BaseTest:
     weight = 0
     fatal = False
+    weight = 0
+
+    def test(self, data: Metadata) -> TestResult:
+        raise NotImplementedError
+
+    def name(self) -> str:
+        return self.__class__.__name__
+
+    def _passed(self, weight: int | None = None, fatal: bool | None = None) -> TestResult:
+        return TestResult(
+            outcome=True,
+            weight=self.weight if weight is None else weight,
+            fatal=self.fatal if fatal is None else fatal,
+        )
+
+    def _failed(self, message: str, weight: int | None = None, fatal: bool | None = None) -> TestResult:
+        return TestResult(
+            outcome=False,
+            weight=self.weight if weight is None else weight,
+            fatal=self.fatal if fatal is None else fatal,
+            message=message,
+        )
+
+    def _skipped(self) -> TestResult:
+        return TestResult(outcome=None, weight=0)
 
     def test(self, data: Metadata) -> TestResult:
         raise NotImplementedError
@@ -109,12 +178,15 @@ class BaseTest:
 class FieldTest(BaseTest):
     """Tests that a specific field is in the data and is not empty or False"""
 
-    field: str
+    field = ""
 
     def test(self, data: Metadata) -> TestResult:
-        if bool(cast("dict[str, Any]", data).get(self.field)):
+        if data.get(self.field):
             return self._passed()
-        return self._failed(f"Your package does not have {self.field} data" + (self.fatal and "!" or "."))
+        return self._failed(self._field_message())
+
+    def _field_message(self) -> str:
+        return (f"Your package does not have {self.field} data") + ("!" if self.fatal else ".")
 
 
 class Name(FieldTest):
@@ -138,81 +210,78 @@ class VersionIsString(BaseTest):
         return self._failed("The version number should be a string.")
 
 
+PEP386_RE = re.compile(
+    r"""
+    ^
+    (?P<version>\d+\.\d+)          # minimum 'N.N'
+    (?P<extraversion>(?:\.\d+)*)   # any number of extra '.N' segments
+    (?:
+        (?P<prerel>[abc]|rc)       # 'a'=alpha, 'b'=beta, 'c'=release candidate
+                                   # 'rc'= alias for release candidate
+        (?P<prerelversion>\d+(?:\.\d+)*)
+    )?
+    (?P<postdev>(\.post(?P<post>\d+))?(\.dev(?P<dev>\d+))?)?
+    $""",
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
+PEP440_RE = re.compile(
+    r"""^
+    v?
+    (?:
+        (?:(?P<epoch>[0-9]+)!)?                           # epoch
+        (?P<release>[0-9]+(?:\.[0-9]+)*)                  # release segment
+        (?P<pre>                                          # pre-release
+            [-_\.]?
+            (?P<pre_l>(a|b|c|rc|alpha|beta|pre|preview))
+            [-_\.]?
+            (?P<pre_n>[0-9]+)?
+        )?
+        (?P<post>                                         # post release
+            (?:-(?P<post_n1>[0-9]+))
+            |
+            (?:
+                [-_\.]?
+                (?P<post_l>post|rev|r)
+                [-_\.]?
+                (?P<post_n2>[0-9]+)?
+            )
+        )?
+        (?P<dev>                                          # dev release
+            [-_\.]?
+            (?P<dev_l>dev)
+            [-_\.]?
+            (?P<dev_n>[0-9]+)?
+        )?
+    )
+    (?:\+(?P<local>[a-z0-9]+(?:[-_\.][a-z0-9]+)*))?       # local version
+$""",
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
 class PEPVersion(BaseTest):
     weight = 50
 
     def test(self, data: Metadata) -> TestResult:
-        # Check that the version number complies with the version specifiers
-        # specification (PEP 440):
+        # Check that the version number complies to PEP-386:
         version = data.get("version")
-        if version is None:
-            return self._skipped()
-
-        try:
-            parsed = PackagingVersion(str(version))
-        except InvalidVersion:
+        pep386 = PEP386_RE.search(str(version)) is not None
+        # Note: a version matching the (older, stricter) PEP-386 form is
+        # counted with a lower weight, whether it passes or fails. This
+        # preserves the historical scoring of this test.
+        weight = 10 if pep386 else self.weight
+        if PEP440_RE.search(str(version)) is not None:
+            return self._passed(weight=weight)
+        if pep386:
             return self._failed(
-                f"'{version}' is not a valid version. See "
-                "https://packaging.python.org/en/latest/specifications/version-specifiers/",
-                weight=100,
+                "The package's version number complies only with PEP-386 and not PEP-440.",
+                weight=weight,
             )
-
-        warnings = []
-        if str(parsed) != str(version).strip():
-            warnings.append(
-                f"The version '{version}' is valid, but not in canonical form; it should be written as '{parsed}'."
-            )
-        if parsed.epoch:
-            warnings.append(
-                f"The version '{version}' uses a version epoch, which most tools handle poorly "
-                "and should only be used to recover from a broken versioning scheme."
-            )
-        if parsed.local:
-            warnings.append(
-                f"The version '{version}' contains a local version segment, "
-                "which should not be used for distributions published to an index."
-            )
-        if warnings:
-            return self._failed("\n".join(warnings), weight=20)
-        return self._passed()
-
-
-class MetadataVersion(BaseTest):
-    weight = 100
-
-    _valid = ("1.0", "1.1", "1.2", "2.1", "2.2", "2.3", "2.4", "2.5")
-
-    def test(self, data: Metadata) -> TestResult:
-        metadata_version = data.get("metadata-version")
-        if not metadata_version:
-            return self._skipped()
-        if str(metadata_version) in self._valid:
-            return self._passed(weight=20)
         return self._failed(
-            f"'{metadata_version}' is not a valid Metadata-Version; it must be one of {', '.join(self._valid)}."
-        )
-
-
-# The (\Z-anchored) project name format from the names-and-normalization
-# specification.
-NAME_RE = re.compile(r"^([A-Z0-9]|[A-Z0-9][A-Z0-9._-]*[A-Z0-9])\Z", re.IGNORECASE)
-
-
-class NameFormat(BaseTest):
-    fatal = True
-
-    def test(self, data: Metadata) -> TestResult:
-        name = data.get("name")
-        if not name:
-            # The Name test already handles a missing name.
-            return self._skipped()
-        if NAME_RE.match(str(name)):
-            return self._passed()
-        return self._failed(
-            f"'{name}' is not a valid project name: it may only contain ASCII letters, digits, "
-            "'.', '_' and '-', and must start and end with a letter or digit. Package indices "
-            "will reject it. See "
-            "https://packaging.python.org/en/latest/specifications/name-normalization/"
+            "The package's version number does not comply with PEP-386 or PEP-440.",
+            weight=weight,
         )
 
 
@@ -315,18 +384,20 @@ class PythonClassifierVersion(BaseTest):
 class PythonRequiresVersion(BaseTest):
     weight = 100
 
+    _message = "You should specify what Python versions you support with " "the 'Requires-Python' metadata."
+
     def test(self, data: Metadata) -> TestResult:
         # https://github.com/regebro/pyroma/pull/83#discussion_r955611236
         python_requires = data.get("requires-python", None)
 
         message = "You should specify what Python versions you support with the 'Requires-Python' metadata."
         if not python_requires:
-            return self._failed(message)
+            return self._failed(self._message)
 
         try:
             SpecifierSet(python_requires)
         except InvalidSpecifier:
-            return self._failed(message)
+            return self._failed(self._message)
 
         return self._passed()
 
@@ -413,36 +484,13 @@ class Url(BaseTest):
     weight = 20
 
     def test(self, data: Metadata) -> TestResult:
-        urls = _get_project_urls(data)
-        has_homepage = bool(data.get("home-page"))
-
-        if not urls and not has_homepage:
-            return self._failed(
-                "Your package should have a 'url' field with a link to the "
-                "project home page, or a 'project_urls' field, with a "
-                "dictionary of links, or both."
-            )
-
-        too_long = [label for label, _ in urls if len(label) > 32]
-        if too_long:
-            return self._failed(
-                "Project-URL labels are limited to 32 characters, and package indices "
-                f"will reject longer ones. Too long: {', '.join(too_long)}",
-                fatal=True,
-            )
-
-        well_known = {WELL_KNOWN_URL_LABELS.get(_normalize_url_label(label)) for label, _ in urls}
-        well_known.discard(None)
-        if has_homepage:
-            well_known.add("homepage")
-        if not well_known:
-            return self._failed(
-                "None of your Project-URL labels match the well-known labels. Consider labeling "
-                "your URLs with Homepage, Source, Documentation, Changelog or Issues. See "
-                "https://packaging.python.org/en/latest/specifications/well-known-project-urls/",
-                weight=10,
-            )
-        return self._passed()
+        if bool(data.get("home-page")) or bool(data.get("project-url")):
+            return self._passed()
+        return self._failed(
+            "Your package should have a 'url' field with a link to the "
+            "project home page, or a 'project_urls' field, with a "
+            "dictionary of links, or both."
+        )
 
 
 class Licensing(BaseTest):
@@ -462,208 +510,23 @@ class Licensing(BaseTest):
             )
 
         if license and license_expression:
-            # The Core Metadata specification forbids this, and PyPI rejects
-            # such uploads.
             return self._failed(
-                "Specifying both a License and a License-Expression is forbidden "
-                "and will be rejected by package indices.",
-                fatal=True,
+                "Specifying both a License and a License-Expression is ambiguous, deprecated, "
+                "and may be rejected by package indices."
             )
 
-        if license_expression:
-            try:
-                canonicalize_license_expression(str(license_expression))
-            except InvalidLicenseExpression:
-                # A License-Expression must be a valid SPDX expression, and
-                # PyPI rejects invalid ones.
-                return self._failed(
-                    f"'{license_expression}' is not a valid SPDX license expression, "
-                    "and package indices will reject it. See https://spdx.org/licenses/",
-                    fatal=True,
-                )
-
-            if has_license_classifier:
-                return self._failed(
-                    "Specifying both a License-Expression and license classifiers is ambiguous, deprecated, "
-                    "and may be rejected by package indices."
-                )
-            return self._passed()
+        if license_expression and has_license_classifier:
+            return self._failed(
+                "Specifying both a License-Expression and license classifiers is ambiguous, deprecated, "
+                "and may be rejected by package indices."
+            )
 
         if has_license_classifier:
-            return self._failed("Using license classifiers is deprecated in favour of the license-expression field.")
+            return self._failed(
+                "Using license classifiers is deprecated in favour of the license-expression field."
+            )
 
-        # Only the classic License field; its deprecation is reported by
-        # DeprecatedMetadataFields.
         return self._passed()
-
-
-class DescriptionContentType(BaseTest):
-    weight = 50
-
-    _valid_types = ("text/plain", "text/x-rst", "text/markdown")
-    _valid_variants = ("gfm", "commonmark")
-
-    def test(self, data: Metadata) -> TestResult:
-        raw = data.get("description-content-type")
-        if not raw:
-            # If absent, readers assume text/x-rst (or fall back to
-            # text/plain), so this is not an error.
-            return self._skipped()
-
-        parts = [part.strip() for part in str(raw).split(";")]
-        content_type = parts[0].lower()
-        problems = []
-
-        if content_type not in self._valid_types:
-            problems.append(f"The content type should be one of {', '.join(self._valid_types)}, not '{parts[0]}'.")
-
-        for parameter in parts[1:]:
-            key, _, value = parameter.partition("=")
-            key = key.strip().lower()
-            value = value.strip().strip('"')
-            if key == "charset":
-                if value.lower() != "utf-8":
-                    problems.append(f"The only accepted charset is UTF-8, not '{value}'.")
-            elif key == "variant":
-                if content_type != "text/markdown":
-                    problems.append("The 'variant' parameter is only valid for text/markdown.")
-                elif value.lower() not in self._valid_variants:
-                    problems.append(f"The markdown variant should be GFM or CommonMark, not '{value}'.")
-            else:
-                problems.append(f"'{key}' is not a valid Description-Content-Type parameter.")
-
-        if problems:
-            return self._failed(
-                f"Your Description-Content-Type '{raw}' is invalid:\n"
-                + "\n".join(problems)
-                + "\nSee https://packaging.python.org/en/latest/specifications/core-metadata/#description-content-type"
-            )
-        return self._passed(weight=20)
-
-
-# Marker variables that are not versions, so ordered comparison operators
-# make no sense for them.
-NON_VERSION_MARKERS = (
-    "os_name",
-    "sys_platform",
-    "platform_machine",
-    "platform_system",
-    "platform_python_implementation",
-    "implementation_name",
-    "extra",
-)
-
-_ORDERED_NON_VERSION_MARKER_RE = re.compile(rf"({'|'.join(NON_VERSION_MARKERS)})\s*(<=|>=|<|>|~=)")
-
-# A parenthesized version specifier, e.g. "zope.interface (>4.0)". The
-# dependency specifiers specification advises against this legacy form.
-_PARENTHESIZED_VERSIONS_RE = re.compile(r"\(\s*[<>=!~]")
-
-
-class DependencySpecifiers(BaseTest):
-    weight = 100
-
-    def test(self, data: Metadata) -> TestResult:
-        requirements = data.get("requires-dist")
-        if not requirements:
-            return self._skipped()
-        if isinstance(requirements, str):
-            requirements = [requirements]
-
-        errors = []
-        warnings = []
-        for requirement in requirements:
-            requirement = str(requirement)
-            try:
-                Requirement(requirement)
-            except InvalidRequirement as e:
-                errors.append(f"'{requirement}' is not a valid dependency specifier: {e}")
-                continue
-
-            specifier_part, _, marker_part = requirement.partition(";")
-            if _PARENTHESIZED_VERSIONS_RE.search(specifier_part):
-                warnings.append(
-                    f"'{requirement}' puts the version specifier in parentheses, "
-                    "a legacy form that the dependency specifiers specification advises against."
-                )
-            match = _ORDERED_NON_VERSION_MARKER_RE.search(marker_part)
-            if match:
-                warnings.append(
-                    f"'{requirement}' uses an ordered comparison on the '{match.group(1)}' "
-                    "environment marker, which is not a version, so the comparison "
-                    "is a lexical string comparison and probably not what you want."
-                )
-
-        if errors:
-            return self._failed(
-                "Your Requires-Dist entries have problems:\n" + "\n".join(errors + warnings), weight=100
-            )
-        if warnings:
-            return self._failed("Your Requires-Dist entries have problems:\n" + "\n".join(warnings), weight=10)
-        return self._passed(weight=20)
-
-
-class PyProjectProjectTable(BaseTest):
-    """Spot violations of the pyproject.toml specification's [project] table
-    rules that validate-pyproject's schemas do not catch."""
-
-    def test(self, data: Metadata) -> TestResult:
-        if "_path" not in data:
-            return self._skipped()
-
-        if "_missing_pyproject_toml" in data or "_missing_build_system" in data:
-            return self._skipped()
-
-        pyproject_path = os.path.join(data["_path"], "pyproject.toml")
-        try:
-            with open(pyproject_path, "rb") as pyproject_file:
-                config = tomllib.load(pyproject_file)
-        except (OSError, tomllib.TOMLDecodeError):
-            # PyprojectTomlValid reports unreadable/unparseable files.
-            return self._skipped()
-
-        project = config.get("project")
-        if not isinstance(project, dict):
-            # No [project] table; the metadata comes from somewhere else.
-            return self._skipped()
-
-        errors = []
-        dynamic = project.get("dynamic", [])
-
-        if "name" in dynamic:
-            errors.append("The 'name' key must be static, it must never be listed in 'dynamic'.")
-
-        if "version" not in project and "version" not in dynamic:
-            errors.append("The 'version' key must either be set statically or be listed in 'dynamic'.")
-
-        readme = project.get("readme")
-        if isinstance(readme, dict) and "file" in readme and "text" in readme:
-            errors.append("The 'readme' table must not specify both 'file' and 'text'.")
-
-        license = project.get("license")
-        if isinstance(license, dict) and "file" in license and "text" in license:
-            errors.append("The 'license' table must not specify both 'file' and 'text'.")
-
-        entry_points = project.get("entry-points", {})
-        if isinstance(entry_points, dict):
-            for group in ("console_scripts", "gui_scripts"):
-                if group in entry_points:
-                    errors.append(
-                        f"Console and GUI scripts must be defined in [project.scripts] and "
-                        f"[project.gui-scripts], not [project.entry-points.{group}]."
-                    )
-
-        if errors:
-            # These are all MUST rules in the pyproject.toml specification;
-            # build backends are required to raise errors for them.
-            return self._failed(
-                "Your pyproject.toml [project] table violates the pyproject.toml specification:\n"
-                + "\n".join(errors)
-                + "\nSee https://packaging.python.org/en/latest/specifications/pyproject-toml/",
-                fatal=True,
-            )
-        # Like the other build system tests, this gives no positive rating.
-        return self._passed(weight=0)
 
 
 class DevStatusClassifier(BaseTest):
@@ -717,14 +580,14 @@ class ValidREST(BaseTest):
         message = ""
         try:
             publish_parts(source=source, writer="html4css1", settings_overrides=settings)
-        except SystemMessage as e:
-            message = e.args[0]
+        except SystemMessage:
+            # The errors also show up in the warning stream, handled below.
+            pass
         errors = stream.getvalue().strip()
         if not errors:
             return self._passed()
 
-        message = "\n" + errors
-        return self._failed("Your Description is not valid ReST: " + message)
+        return self._failed("Your Description is not valid ReST: " + "\n" + errors)
 
 
 class BusFactor(BaseTest):
@@ -767,27 +630,14 @@ class MissingPyProjectToml(BaseTest):
         if "_missing_build_system" in data or "_missing_pyproject_toml" in data:
             return self._failed(
                 "Your project does not have a pyproject.toml file, which is highly recommended.\n"
-                "You probably want to create one declaring your build backend, for example:\n\n"
+                "You probably want to create one with the following configuration:\n\n"
                 "    [build-system]\n"
-                '    requires = ["setuptools>=77"]\n'
-                '    build-backend = "setuptools.build_meta"\n\n'
-                "Any PEP 517 build backend works, for example flit_core, hatchling or uv_build.\n"
+                '    requires = ["setuptools>=42"]\n'
+                '    build-backend = "setuptools.build_meta"\n'
                 "See https://packaging.python.org for more information on how to package your project.",
                 weight=100,
             )
         return self._passed(weight=0)
-
-
-_PYPROJECT_VALIDATOR = None
-
-
-def _pyproject_validator() -> pyproject_api.Validator:
-    # The validator loads its schema plugins on creation, so build it lazily
-    # and only once.
-    global _PYPROJECT_VALIDATOR
-    if _PYPROJECT_VALIDATOR is None:
-        _PYPROJECT_VALIDATOR = pyproject_api.Validator()
-    return _PYPROJECT_VALIDATOR
 
 
 class PyprojectTomlValid(BaseTest):
@@ -807,16 +657,14 @@ class PyprojectTomlValid(BaseTest):
         pyproject_path = os.path.join(data["_path"], "pyproject.toml")
 
         try:
-            with open(pyproject_path, "rb") as pyproject_file:
-                config = tomllib.load(pyproject_file)
-            _pyproject_validator()(config)
-            return self._passed(weight=0)
-        except (OSError, tomllib.TOMLDecodeError, pyproject_errors.ValidationError) as e:
+            read_configuration(pyproject_path)
+        except Exception as e:
             return self._failed(
                 f"Your pyproject.toml is invalid: {e}\n"
                 "See https://packaging.python.org for more information on how to package your project.",
                 weight=100,
             )
+        return self._passed(weight=0)
 
 
 class DeprecatedMetadataFields(BaseTest):
@@ -851,7 +699,7 @@ class DeprecatedMetadataFields(BaseTest):
             if not self._version_at_least(data, deprecated_since):
                 continue
 
-            if cast("dict[str, Any]", data).get(deprecated) and not cast("dict[str, Any]", data).get(replacement):
+            if data.get(deprecated) and not data.get(replacement):
                 warnings.append(f"The metadata field '{deprecated}' is deprecated; use '{replacement}' instead.")
 
         if warnings:
@@ -859,9 +707,9 @@ class DeprecatedMetadataFields(BaseTest):
         return self._passed()
 
 
-BUILD_SYSTEM_TESTS = [MissingBuildSystem(), MissingPyProjectToml(), PyprojectTomlValid(), PyProjectProjectTable()]
+BUILD_SYSTEM_TESTS: list[BaseTest] = [MissingBuildSystem(), MissingPyProjectToml(), PyprojectTomlValid()]
 
-ALL_TESTS = [
+ALL_TESTS: list[BaseTest] = [
     MissingBuildSystem(),
     MissingPyProjectToml(),
     PyprojectTomlValid(),
@@ -901,18 +749,16 @@ try:
             if "_path" not in data:
                 return self._skipped()
 
-            # A quiet UI, so check-manifest doesn't write to stdout and
-            # corrupt machine-readable output.
-            ui = check_manifest.UI(verbosity=0)
             try:
-                if check_manifest.check_manifest(data["_path"], ui=ui):
-                    return self._passed(weight=200)
+                ok = check_manifest.check_manifest(data["_path"])
             except check_manifest.Failure:
                 # Most likely this means check-manifest didn't find any
                 # package configuration, which is the same failure as
                 # MissingBuildSystem, so this is double errors, but
                 # it does mean your setup is completely broken, so...
-                pass
+                ok = False
+            if ok:
+                return self._passed(weight=200)
             return self._failed("Check-manifest returned errors", weight=200)
 
     ALL_TESTS.append(CheckManifest())
@@ -921,9 +767,8 @@ except ImportError:
     pass
 
 
-def rate_project(data: Metadata, skip_tests: "list[str] | str | None" = None) -> RatedProject:
-    """Rate a package, returning a structured RatedProject result."""
-    problems = []
+def rate(data: Metadata, skip_tests: Sequence[str] | None = None) -> Rating:
+    problems: list[Problem] = []
     good = 0
     bad = 0
     fatality = False
@@ -933,24 +778,17 @@ def rate_project(data: Metadata, skip_tests: "list[str] | str | None" = None) ->
     if len([key for key in data if not key.startswith("_")]) == 0:
         if "_no_config_found" in data:
             # Are you in the correct directory?:
-            return RatedProject(
-                name=name,
-                rating=0,
-                level=LEVELS[0],
-                problems=[
+            return Rating(
+                0,
+                [
                     Problem(
-                        test="NoConfigFound",
+                        test="NoPackageData",
                         message="I couldn't find any package data. Are checking the correct directory or file?",
                         weight=0,
                         fatal=True,
                     )
                 ],
             )
-        if "_missing_build_system" in data:
-            # There is no way to build the package, so no metadata could be
-            # extracted. Only report the build-system problems; complaining
-            # about each missing metadata field would just be noise.
-            test_list = BUILD_SYSTEM_TESTS
 
     if "_wheel_build_failed" in data:
         problems.append(
@@ -972,12 +810,18 @@ def rate_project(data: Metadata, skip_tests: "list[str] | str | None" = None) ->
         skip_tests = []
 
     for test in test_list:
-        test_name = test.__class__.__name__
-        if test_name in skip_tests:
+        if test.name() in skip_tests:
             continue
         result = test.test(data)
         if result.outcome is False:
-            problems.append(Problem(test=test_name, message=result.message, weight=result.weight, fatal=result.fatal))
+            problems.append(
+                Problem(
+                    test=test.name(),
+                    message=result.message,
+                    weight=result.weight,
+                    fatal=result.fatal,
+                )
+            )
             if result.fatal:
                 fatality = True
             else:
@@ -989,21 +833,11 @@ def rate_project(data: Metadata, skip_tests: "list[str] | str | None" = None) ->
 
     if fatality:
         # A fatal test failed. That means we give a 0 rating:
-        rating = 0
-    else:
-        # Multiply good by 9, and add 1 to get a rating between
-        # 1: All non-fatal tests failed.
-        # 10: All tests succeeded.
-        rating = (good * 9) // (good + bad) + 1
-
-    return RatedProject(name=name, rating=rating, level=LEVELS[rating], problems=problems)
-
-
-def rate(data: Metadata, skip_tests: "list[str] | str | None" = None) -> "tuple[int, list[str]]":
-    """Rate a package, returning a (rating, [problem messages]) tuple.
-
-    This is the backwards-compatible API; rate_project() returns a
-    structured result.
-    """
-    rated = rate_project(data, skip_tests)
-    return rated.rating, [problem.message for problem in rated.problems]
+        return Rating(0, problems)
+    if good + bad == 0:
+        # Nothing was counted at all (everything skipped); nothing failed either.
+        return Rating(MAX_RATING, problems)
+    # Multiply good by 9, and add 1 to get a rating between
+    # 1: All non-fatal tests failed.
+    # 10: All tests succeeded.
+    return Rating((good * 9) // (good + bad) + 1, problems)

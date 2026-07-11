@@ -11,7 +11,7 @@ import tempfile
 import zipfile
 
 from pyroma import projectdata
-from pyroma.metadata import Metadata
+from pyroma._types import Metadata
 
 
 def _safe_extract_tar(tar: tarfile.TarFile, path: str = ".", members=None, numeric_owner: bool = False) -> None:
@@ -24,7 +24,7 @@ def _safe_extract_tar(tar: tarfile.TarFile, path: str = ".", members=None, numer
     tar.extractall(path, members, numeric_owner=numeric_owner)
 
 
-def get_data(path: "str | os.PathLike[str]") -> Metadata:
+def get_data(path: "os.PathLike[str] | str") -> Metadata:
     filename = os.path.split(path)[-1]
     basename, ext = os.path.splitext(filename)
     if basename.endswith(".tar"):
