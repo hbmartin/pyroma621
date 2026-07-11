@@ -1,12 +1,14 @@
 # Extracts information from a project
-import build
-import build.util
 import os
 import pathlib
 import re
 
-from setuptools.config.setupcfg import read_configuration
+import build
+import build.util
 from distutils.errors import DistutilsFileError
+from setuptools.config.setupcfg import read_configuration
+
+from pyroma._types import Metadata
 
 # MAP from old setup.py type keys to Core Metadata keys
 METADATA_MAP = {
@@ -20,11 +22,11 @@ METADATA_MAP = {
 }
 
 
-def normalize(name):
+def normalize(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def wheel_metadata(path, isolated=None):
+def wheel_metadata(path: "os.PathLike[str] | str", isolated: bool | None = None):
     # If explictly specified whether to use isolation, pass it directly
     if isolated is not None:
         return build.util.project_wheel_metadata(path, isolated=isolated)
@@ -37,7 +39,7 @@ def wheel_metadata(path, isolated=None):
         return build.util.project_wheel_metadata(path, isolated=True)
 
 
-def build_metadata(path, isolated=None):
+def build_metadata(path: "os.PathLike[str] | str", isolated: bool | None = None) -> Metadata:
     try:
         metadata = wheel_metadata(path, isolated)
     except build.BuildBackendException:
@@ -50,7 +52,7 @@ def build_metadata(path, isolated=None):
     # As far as I can tell, we can't trust that the builders normalize the keys,
     # so we do it here. Definitely most builders do not lower case them, which
     # Core Metadata Specs recommend.
-    data = {}
+    data: Metadata = {}
     for key in set(metadata.keys()):
         value = metadata.get_all(key)
         key = normalize(key)
@@ -72,7 +74,7 @@ def build_metadata(path, isolated=None):
     return data
 
 
-def get_build_data(path, isolated=None):
+def get_build_data(path: "os.PathLike[str] | str", isolated: bool | None = None) -> Metadata:
     metadata = build_metadata(path, isolated=isolated)
     # Check if there is a pyproject_toml
     if "pyproject.toml" not in os.listdir(path):
@@ -80,10 +82,10 @@ def get_build_data(path, isolated=None):
     return metadata
 
 
-def get_setupcfg_data(path):
+def get_setupcfg_data(path: "os.PathLike[str] | str") -> Metadata:
     data = read_configuration(str(pathlib.Path(path) / "setup.cfg"))
 
-    metadata = {}
+    metadata: Metadata = {}
     # Python requires is under "options" in setup.cfg (and so are other
     # requirements, but those are optional and have no tests)
     if "python_requires" in data["options"]:
@@ -98,7 +100,7 @@ def get_setupcfg_data(path):
     return metadata
 
 
-def get_data(path):
+def get_data(path: "os.PathLike[str] | str") -> Metadata:
     data = _get_data(path)
     if data:
         # We got something, add the path to it.
@@ -106,7 +108,7 @@ def get_data(path):
     return data
 
 
-def _get_data(path):
+def _get_data(path: "os.PathLike[str] | str") -> Metadata:
     try:
         return get_build_data(path)
     except build.BuildException as e:

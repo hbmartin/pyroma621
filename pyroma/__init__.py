@@ -2,12 +2,29 @@ import logging
 import os
 import sys
 from argparse import ArgumentParser, ArgumentTypeError
-from pyroma import projectdata, distributiondata, pypidata, ratings
+from collections.abc import Sequence
 
-logging.basicConfig(level=logging.DEBUG, stream=sys.stdout, format="%(message)s")
+from pyroma import distributiondata, projectdata, pypidata, ratings
+from pyroma._types import Metadata
+from pyroma.report import get_reporter
+
+logger = logging.getLogger("pyroma")
 
 
-def zester(data):
+def _configure_logging(suppress: bool) -> None:
+    """Send pyroma's diagnostic messages to stdout, or suppress them.
+
+    This only configures the "pyroma" logger, never the root logger, so
+    library users' logging configuration is left alone.
+    """
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
+    logger.setLevel(logging.CRITICAL + 1 if suppress else logging.DEBUG)
+
+
+def zester(data: dict) -> None:
     main_files = set(os.listdir(data["workingdir"]))
     config_files = {"setup.py", "setup.cfg", "pyproject.toml"}
 
@@ -19,13 +36,13 @@ def zester(data):
     from zest.releaser.utils import ask
 
     if ask("Run pyroma on the package before tagging?"):
-        rating = run("directory", os.path.abspath(data["workingdir"]), skip_tests="CheckManifest")
+        rating = run("directory", os.path.abspath(data["workingdir"]), skip_tests=["CheckManifest"])
         if rating < 8:
             if not ask("Continue?"):
                 sys.exit(1)
 
 
-def min_argument(arg):
+def min_argument(arg: str) -> int:
     try:
         f = int(arg)
     except ValueError:
@@ -39,32 +56,32 @@ def min_argument(arg):
     return f
 
 
-def get_all_tests():
-    return [x.__class__.__name__ for x in ratings.ALL_TESTS]
+def get_all_tests() -> list[str]:
+    return [x.name() for x in ratings.ALL_TESTS]
 
 
-def parse_tests(arg):
+def parse_tests(arg: str) -> list[str] | None:
     if not arg:
-        return
+        return None
 
     # Split on spaces, commas and semicolons
-    arg = [arg]
+    parts = [arg]
     for sep in " ,;":
-        skips = []
-        for t in arg:
+        skips: list[str] = []
+        for t in parts:
             skips.extend(t.split(sep))
-        arg = skips
+        parts = skips
 
     tests = get_all_tests()
-    for skip in arg:
+    for skip in parts:
         if skip not in tests:
             # Invalid test mentioned, fail and print valid tests
-            return
+            return None
 
-    return arg
+    return parts
 
 
-def skip_tests(arg):
+def skip_tests(arg: str) -> list[str]:
     test_to_skip = parse_tests(arg)
     if test_to_skip:
         return test_to_skip
@@ -75,9 +92,9 @@ def skip_tests(arg):
     raise ArgumentTypeError(message)
 
 
-def main():
+def main() -> None:
     parser = ArgumentParser()
-    parser.color = True
+    parser.color = True  # type: ignore[attr-defined]  # Enables color output on Python 3.14+
     parser.add_argument(
         "package",
         help="A python package, can be a directory, a distribution file or a PyPI package name.",
@@ -142,6 +159,13 @@ def main():
         dest="index_url",
         help="Base URL of a PyPI-compatible package index (default: https://pypi.org)",
     )
+    parser.add_argument(
+        "--format",
+        dest="output_format",
+        choices=("text", "json"),
+        default="text",
+        help="Output format: classic human-readable text, or a JSON document (default: text)",
+    )
 
     args = parser.parse_args()
 
@@ -154,47 +178,40 @@ def main():
         else:
             mode = "pypi"
 
-    rating = run(mode, args.package, args.quiet, args.skip_tests, args.index_url)
+    rating = run(mode, args.package, args.quiet, args.skip_tests, args.index_url, args.output_format)
     if rating < args.min:
         sys.exit(2)
     sys.exit(0)
 
 
-def run(mode, argument, quiet=False, skip_tests=None, index_url=None):
-    if quiet:
-        logger = logging.getLogger()
-        logger.disabled = True
-
-    logging.info("-" * 30)
-    logging.info("Checking " + argument)
-
+def _collect_data(mode: str, argument: str, index_url: str | None) -> Metadata:
     if mode == "directory":
-        data = projectdata.get_data(os.path.abspath(argument))
-        logging.info("Found " + data.get("name", "nothing"))
-    elif mode == "file":
-        data = distributiondata.get_data(os.path.abspath(argument))
-        logging.info("Found " + data.get("name", "nothing"))
-    else:
-        # It's probably a package name
-        data = pypidata.get_data(argument, index_url=index_url)
-        logging.info("Found " + data.get("name", "nothing"))
+        return projectdata.get_data(os.path.abspath(argument))
+    if mode == "file":
+        return distributiondata.get_data(os.path.abspath(argument))
+    # It's probably a package name
+    return pypidata.get_data(argument, index_url=index_url)
+
+
+def run(
+    mode: str,
+    argument: str,
+    quiet: bool = False,
+    skip_tests: Sequence[str] | None = None,
+    index_url: str | None = None,
+    output_format: str = "text",
+) -> int:
+    # Suppress diagnostics when quiet, and in JSON mode, where stdout
+    # must stay machine-readable.
+    _configure_logging(suppress=quiet or output_format == "json")
+
+    reporter = get_reporter(output_format, quiet=quiet)
+    reporter.start(str(argument))
+
+    data = _collect_data(mode, argument, index_url)
+    reporter.found(data.get("name", "nothing"))
 
     rating = ratings.rate(data, skip_tests)
+    reporter.finish(rating)
 
-    logging.info("-" * 30)
-    for problem in rating[1]:
-        # XXX It would be nice with a * pointlist instead, but that requires
-        # that we know how wide the terminal is and nice word-breaks, so that's
-        # for later.
-        logging.info(problem)
-    if rating[1]:
-        logging.info("-" * 30)
-    logging.info("Final rating: " + str(rating[0]) + "/10")
-    logging.info(ratings.LEVELS[rating[0]])
-    logging.info("-" * 30)
-
-    if quiet:
-        logger.disabled = False
-        logging.info(rating[0])
-
-    return rating[0]
+    return rating.rating

@@ -1,11 +1,16 @@
 import logging
 import os
 import re
-import requests
 import tempfile
 import xmlrpc.client
+from typing import cast
+
+import requests
 
 from pyroma import distributiondata
+from pyroma._types import Metadata
+
+logger = logging.getLogger("pyroma.pypidata")
 
 # MAP from old PyPI `info` keys to Core Metadata keys
 INFO_MAP = {
@@ -17,11 +22,11 @@ INFO_MAP = {
 DEFAULT_PYPI_XMLRPC_URL = "https://pypi.org/pypi"
 
 
-def normalize(name):
+def normalize(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def _get_xmlrpc_url(index_url=None):
+def _get_xmlrpc_url(index_url: str | None = None) -> str:
     if not index_url:
         return DEFAULT_PYPI_XMLRPC_URL
 
@@ -31,7 +36,7 @@ def _get_xmlrpc_url(index_url=None):
     return f"{base_url}/pypi"
 
 
-def _get_project_data(project, index_url=None):
+def _get_project_data(project: str, index_url: str | None = None) -> dict:
     # I think I should be able to monkeypatch a mock-thingy here... I think.
     xmlrpc_url = _get_xmlrpc_url(index_url)
     response = requests.get(f"{xmlrpc_url}/{project}/json")
@@ -45,11 +50,11 @@ def _get_project_data(project, index_url=None):
     return response.json()
 
 
-def get_data(project, index_url=None):
+def get_data(project: str, index_url: str | None = None) -> Metadata:
     # Pick the latest release.
     project_data = _get_project_data(project, index_url=index_url)
     releases = project_data["releases"]
-    data = {}
+    data: Metadata = {}
 
     for key, value in project_data["info"].items():
         key = normalize(key)
@@ -58,14 +63,14 @@ def get_data(project, index_url=None):
         data[key] = value
 
     release = data["version"]
-    logging.debug(f"Found {project} version {release}")
+    logger.debug(f"Found {project} version {release}")
 
     try:
         with xmlrpc.client.ServerProxy(_get_xmlrpc_url(index_url)) as xmlrpc_client:
-            roles = xmlrpc_client.package_roles(project)
+            roles = cast("list[tuple[str, str]]", xmlrpc_client.package_roles(project))
             data["_owners"] = [user for (role, user) in roles if role == "Owner"]
     except xmlrpc.client.ProtocolError:
-        logging.warning(
+        logger.warning(
             "Could not get package roles from XMLRPC API. Not all custom indexes "
             "support this, and some may have it disabled. Skipping role checks."
         )
@@ -86,7 +91,7 @@ def get_data(project, index_url=None):
             tempdir = tempfile.gettempdir()
             filename = download["url"].split("/")[-1]
             tmp = os.path.join(tempdir, filename)
-            logging.debug(f"Downloading {filename} to verify distribution")
+            logger.debug(f"Downloading {filename} to verify distribution")
             try:
                 with open(tmp, "wb") as outfile:
                     outfile.write(requests.get(download["url"]).content)

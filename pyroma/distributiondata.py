@@ -11,9 +11,10 @@ import tempfile
 import zipfile
 
 from pyroma import projectdata
+from pyroma._types import Metadata
 
 
-def _safe_extract_tar(tar, path=".", members=None, numeric_owner=False):
+def _safe_extract_tar(tar: tarfile.TarFile, path: str = ".", members=None, numeric_owner: bool = False) -> None:
     """Safely extract a tar w/o traversing parent dirs to fix CVE-2007-4559."""
     root = pathlib.Path(path).resolve()
     for member in tar.getmembers():
@@ -23,7 +24,7 @@ def _safe_extract_tar(tar, path=".", members=None, numeric_owner=False):
     tar.extractall(path, members, numeric_owner=numeric_owner)
 
 
-def get_data(path):
+def get_data(path: "os.PathLike[str] | str") -> Metadata:
     filename = os.path.split(path)[-1]
     basename, ext = os.path.splitext(filename)
     if basename.endswith(".tar"):

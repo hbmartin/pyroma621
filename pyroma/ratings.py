@@ -1,28 +1,33 @@
-# This is a collection of "tests" done on the package data. The resut of the
+# This is a collection of "tests" done on the package data. The result of the
 # tests is used to give the package a rating.
 #
-# Each test has a couple of attributes. Both attributes are checked only after
-# the test is performed so the test can choose to set the attributes dependning
-# on the severity of the failure.
+# Each test is a stateless object with a ``test(data)`` method that returns a
+# ``TestResult``:
 #
-#     fatal:    If set to True, the failure of this test will cause the
-#               package to achieve the rating of 1, which is minimum
+#     outcome:  True for pass, False for fail and None for not applicable
+#               (meaning it will not be counted).
 #     weight:   The relative importance of the test.
-#               If the test has fatal set to True this is ignored.
+#               If the result has fatal set to True this is ignored.
+#     fatal:    If set to True, the failure of this test will cause the
+#               package to achieve the rating of 0, which is minimum.
+#     message:  The problem description when the test failed.
 #
-# Tests have two methods:
-#     test(data): Performs the test on the given data. Returns True for pass
-#                 False for fail and None for not applicable (meaning it will
-#                 not be counted).
+# Tests may choose weight, fatality and message depending on the severity of
+# the failure, but they must not mutate any state on the test instance: the
+# instances in ALL_TESTS are shared.
 import io
-import re
 import os
+import re
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 
 from docutils.core import publish_parts
 from docutils.utils import SystemMessage
-from trove_classifiers import classifiers as CLASSIFIERS
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from setuptools.config.pyprojecttoml import read_configuration
+from trove_classifiers import classifiers as CLASSIFIERS
+
+from pyroma._types import Metadata
 
 LEVELS = [
     "This cheese seems to contain no dairy products",
@@ -38,19 +43,102 @@ LEVELS = [
     "Your cheese is so fresh most people think it's a cream: Mascarpone",
 ]
 
+MAX_RATING = 10
+
+
+@dataclass(frozen=True)
+class TestResult:
+    """The outcome of running a single rating test against package data."""
+
+    outcome: bool | None
+    weight: int
+    fatal: bool = False
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class Problem:
+    """A single failed check, as reported to the user."""
+
+    test: str
+    message: str
+    weight: int
+    fatal: bool
+
+
+@dataclass
+class Rating:
+    """The result of rating a package: a 0-10 score and a list of problems."""
+
+    rating: int
+    problems: list[Problem] = field(default_factory=list)
+
+    @property
+    def messages(self) -> list[str]:
+        return [problem.message for problem in self.problems]
+
+    @property
+    def level(self) -> str:
+        return LEVELS[self.rating]
+
+    def as_dict(self) -> dict:
+        return {
+            "rating": self.rating,
+            "max_rating": MAX_RATING,
+            "level": self.level,
+            "problems": [
+                {
+                    "test": problem.test,
+                    "message": problem.message,
+                    "weight": problem.weight,
+                    "fatal": problem.fatal,
+                }
+                for problem in self.problems
+            ],
+        }
+
 
 class BaseTest:
     fatal = False
+    weight = 0
+
+    def test(self, data: Metadata) -> TestResult:
+        raise NotImplementedError
+
+    def name(self) -> str:
+        return self.__class__.__name__
+
+    def _passed(self, weight: int | None = None, fatal: bool | None = None) -> TestResult:
+        return TestResult(
+            outcome=True,
+            weight=self.weight if weight is None else weight,
+            fatal=self.fatal if fatal is None else fatal,
+        )
+
+    def _failed(self, message: str, weight: int | None = None, fatal: bool | None = None) -> TestResult:
+        return TestResult(
+            outcome=False,
+            weight=self.weight if weight is None else weight,
+            fatal=self.fatal if fatal is None else fatal,
+            message=message,
+        )
+
+    def _skipped(self) -> TestResult:
+        return TestResult(outcome=None, weight=0)
 
 
 class FieldTest(BaseTest):
     """Tests that a specific field is in the data and is not empty or False"""
 
-    def test(self, data):
-        return bool(data.get(self.field))
+    field = ""
 
-    def message(self):
-        return (f"Your package does not have {self.field} data") + (self.fatal and "!" or ".")
+    def test(self, data: Metadata) -> TestResult:
+        if data.get(self.field):
+            return self._passed()
+        return self._failed(self._field_message())
+
+    def _field_message(self) -> str:
+        return (f"Your package does not have {self.field} data") + ("!" if self.fatal else ".")
 
 
 class Name(FieldTest):
@@ -66,13 +154,12 @@ class Version(FieldTest):
 class VersionIsString(BaseTest):
     weight = 50
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         # Check that the version is a string
         version = data.get("version")
-        return isinstance(version, str)
-
-    def message(self):
-        return "The version number should be a string."
+        if isinstance(version, str):
+            return self._passed()
+        return self._failed("The version number should be a string.")
 
 
 PEP386_RE = re.compile(
@@ -128,55 +215,51 @@ $""",
 
 class PEPVersion(BaseTest):
     weight = 50
-    pep386 = False
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         # Check that the version number complies to PEP-386:
         version = data.get("version")
-        self.pep386 = False
-        if PEP386_RE.search(str(version)) is not None:
-            # Matches the old PEP386
-            self.weight = 10
-            self.pep386 = True
-        match = PEP440_RE.search(str(version))
-        return match is not None
-
-    def message(self):
-        if self.pep386:
-            return "The package's version number complies only with PEP-386 and not PEP-440."
-        return "The package's version number does not comply with PEP-386 or PEP-440."
+        pep386 = PEP386_RE.search(str(version)) is not None
+        # Note: a version matching the (older, stricter) PEP-386 form is
+        # counted with a lower weight, whether it passes or fails. This
+        # preserves the historical scoring of this test.
+        weight = 10 if pep386 else self.weight
+        if PEP440_RE.search(str(version)) is not None:
+            return self._passed(weight=weight)
+        if pep386:
+            return self._failed(
+                "The package's version number complies only with PEP-386 and not PEP-440.",
+                weight=weight,
+            )
+        return self._failed(
+            "The package's version number does not comply with PEP-386 or PEP-440.",
+            weight=weight,
+        )
 
 
 class Summary(BaseTest):
     weight = 100
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         summary = data.get("summary")
         if not summary:
-            # No description at all. That's fatal.
-            self.fatal = True
-            return False
-        self.fatal = False
-        return len(summary) > 10
-
-    def message(self):
-        if self.fatal:
-            return "The package had no Summary!"
-        else:
-            return "The package's Summary should be longer than 10 characters."
+            # No summary at all. That's fatal.
+            return self._failed("The package had no Summary!", fatal=True)
+        if len(summary) <= 10:
+            return self._failed("The package's Summary should be longer than 10 characters.")
+        return self._passed()
 
 
 class Description(BaseTest):
     weight = 50
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         description = data.get("description", "")
         if not isinstance(description, str):
             description = ""
-        return len(description) > 100
-
-    def message(self):
-        return "The package's Description is quite short."
+        if len(description) > 100:
+            return self._passed()
+        return self._failed("The package's Description is quite short.")
 
 
 class Classifiers(FieldTest):
@@ -187,28 +270,25 @@ class Classifiers(FieldTest):
 class ClassifierVerification(BaseTest):
     weight = 20
 
-    def test(self, data):
-        self._incorrect = []
+    def test(self, data: Metadata) -> TestResult:
+        incorrect = []
         classifiers = data.get("classifier", [])
         for classifier in classifiers:
             if classifier not in CLASSIFIERS and not classifier.startswith("Private :: "):
-                self._incorrect.append(classifier)
-        if self._incorrect:
-            return False
-        return True
-
-    def message(self):
-        err = "\n".join(self._incorrect)
-        return (
-            f"Some of your classifiers are not standard classifiers:\n{err}\n"
-            f"If you have custom classifiers, they should start with 'Private :: '\n"
-            f"You can find the list of standard classifiers here: https://pypi.org/classifiers/"
-        )
+                incorrect.append(classifier)
+        if incorrect:
+            err = "\n".join(incorrect)
+            return self._failed(
+                f"Some of your classifiers are not standard classifiers:\n{err}\n"
+                f"If you have custom classifiers, they should start with 'Private :: '\n"
+                f"You can find the list of standard classifiers here: https://pypi.org/classifiers/"
+            )
+        return self._passed()
 
 
 class PythonClassifierVersion(BaseTest):
-    def test(self, data):
-        self._major_version_specified = False
+    def test(self, data: Metadata) -> TestResult:
+        major_version_specified = False
 
         classifiers = data.get("classifier", [])
         for classifier in classifiers:
@@ -229,56 +309,48 @@ class PythonClassifierVersion(BaseTest):
                     # It's a valid float, but not a valid int. Hence it's
                     # something like "2.7" or "3.3" but not just "2" or "3".
                     # This is a good specification, and we only need one.
-                    # Set weight to 100 and finish.
-                    self.weight = 100
-                    return True
+                    return self._passed(weight=100)
 
                 # It's a valid int, meaning it specified "2" or "3".
-                self._major_version_specified = True
+                major_version_specified = True
 
         # There was some sort of failure:
-        if self._major_version_specified:
+        if major_version_specified:
             # Python 2 or 3 was specified but no more detail than that:
-            self.weight = 25
-        else:
-            # No Python version specified at all:
-            self.weight = 100
-        return False
-
-    def message(self):
-        if self._major_version_specified:
-            return (
+            return self._failed(
                 "The classifiers should specify what minor versions of "
                 "Python you support as well as what major version."
                 "You can find the list of standard classifiers here: "
-                "https://pypi.org/classifiers/"
+                "https://pypi.org/classifiers/",
+                weight=25,
             )
-        return (
+        # No Python version specified at all:
+        return self._failed(
             "The classifiers should specify what Python versions you support."
             "You can find the list of standard classifiers here: "
-            "https://pypi.org/classifiers/"
+            "https://pypi.org/classifiers/",
+            weight=100,
         )
 
 
 class PythonRequiresVersion(BaseTest):
     weight = 100
 
-    def test(self, data):
+    _message = "You should specify what Python versions you support with " "the 'Requires-Python' metadata."
+
+    def test(self, data: Metadata) -> TestResult:
         # https://github.com/regebro/pyroma/pull/83#discussion_r955611236
         python_requires = data.get("requires-python", None)
 
         if not python_requires:
-            return False
+            return self._failed(self._message)
 
         try:
             SpecifierSet(python_requires)
         except InvalidSpecifier:
-            return False
+            return self._failed(self._message)
 
-        return True
-
-    def message(self):
-        return "You should specify what Python versions you support with " "the 'Requires-Python' metadata."
+        return self._passed()
 
 
 class Keywords(FieldTest):
@@ -290,11 +362,13 @@ class Author(FieldTest):
     weight = 100
     field = "author"
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         """Check if author-email field contains author name."""
         email = data.get("author-email")
         # Pass if author name in email, e.g. "Author Name <author@example.com>"
-        return True if email and "<" in email else super().test(data)
+        if email and "<" in email:
+            return self._passed()
+        return super().test(data)
 
 
 class AuthorEmail(FieldTest):
@@ -305,11 +379,10 @@ class AuthorEmail(FieldTest):
 class Url(BaseTest):
     weight = 20
 
-    def test(self, data):
-        return bool(data.get("home-page")) or bool(data.get("project-url"))
-
-    def message(self):
-        return (
+    def test(self, data: Metadata) -> TestResult:
+        if bool(data.get("home-page")) or bool(data.get("project-url")):
+            return self._passed()
+        return self._failed(
             "Your package should have a 'url' field with a link to the "
             "project home page, or a 'project_urls' field, with a "
             "dictionary of links, or both."
@@ -319,58 +392,50 @@ class Url(BaseTest):
 class Licensing(BaseTest):
     weight = 50
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         license = data.get("license")
         license_expression = data.get("license-expression")
         classifiers = data.get("classifier", [])
         has_license_classifier = any(c.startswith("License") for c in classifiers)
 
         if not license and not license_expression and not has_license_classifier:
-            self._message = (
+            return self._failed(
                 "You should specify a license for your package with the 'License-Expression' field. "
                 "See https://packaging.python.org/en/latest/specifications/core-metadata/#license-expression "
                 "for more information."
             )
-            return False
 
         if license and license_expression:
-            self._message = (
+            return self._failed(
                 "Specifying both a License and a License-Expression is ambiguous, deprecated, "
                 "and may be rejected by package indices."
             )
-            return False
 
         if license_expression and has_license_classifier:
-            self._message = (
+            return self._failed(
                 "Specifying both a License-Expression and license classifiers is ambiguous, deprecated, "
                 "and may be rejected by package indices."
             )
-            return False
 
         if has_license_classifier:
-            self._message = "Using license classifiers is deprecated in favour of the license-expression field."
-            return False
+            return self._failed(
+                "Using license classifiers is deprecated in favour of the license-expression field."
+            )
 
-        return True
-
-    def message(self):
-        return self._message
+        return self._passed()
 
 
 class DevStatusClassifier(BaseTest):
     weight = 20
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         classifiers = data.get("classifier", [])
         for classifier in classifiers:
             parts = [p.strip() for p in classifier.split("::")]
             if parts[0] == "Development Status":
-                # license classifier exist
-                return True
-        return False
-
-    def message(self):
-        return (
+                # development status classifier exists
+                return self._passed()
+        return self._failed(
             "Specifying a development status in the classifiers gives users a "
             "hint of how stable your software is. See "
             "https://pypi.org/classifiers/"
@@ -378,32 +443,30 @@ class DevStatusClassifier(BaseTest):
 
 
 class SDist(BaseTest):
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         if "_has_sdist" not in data:
             # We aren't checking on PyPI
-            self.weight = 0
-            return None
+            return self._skipped()
 
-        self.weight = 100
-        return data["_has_sdist"]
-
-    def message(self):
-        return (
+        if data["_has_sdist"]:
+            return self._passed(weight=100)
+        return self._failed(
             "You have no source distribution on the Cheeseshop. "
             "Uploading the source distribution to the Cheeseshop ensures "
-            "maximum availability of your package."
+            "maximum availability of your package.",
+            weight=100,
         )
 
 
 class ValidREST(BaseTest):
     weight = 50
 
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         content_type = data.get("description-content-type", None)
         if content_type in ("text/plain", "text/markdown"):
             # These can't fail. Markdown will just assume everything
             # it doesn't understand is plain text.
-            return True
+            return self._passed()
 
         # This should be ReStructuredText
         source = data.get("description", "")
@@ -412,111 +475,91 @@ class ValidREST(BaseTest):
 
         try:
             publish_parts(source=source, writer="html4css1", settings_overrides=settings)
-        except SystemMessage as e:
-            self._message = e.args[0]
+        except SystemMessage:
+            # The errors also show up in the warning stream, handled below.
+            pass
         errors = stream.getvalue().strip()
         if not errors:
-            return True
+            return self._passed()
 
-        self._message = "\n" + errors
-        return False
-
-    def message(self):
-        return "Your Description is not valid ReST: " + self._message
+        return self._failed("Your Description is not valid ReST: " + "\n" + errors)
 
 
 class BusFactor(BaseTest):
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         if "_owners" not in data:
-            self.weight = 0
-            return None
+            return self._skipped()
 
+        message = "You should have three or more owners of the project on PyPI."
         if len(data.get("_owners", [])) == 1:
-            self.weight = 100
-            return False
+            return self._failed(message, weight=100)
 
         if len(data.get("_owners", [])) == 2:
-            self.weight = 50
-            return False
+            return self._failed(message, weight=50)
 
         # Three or more, that's good.
-        self.weight = 100
-        return True
-
-    def message(self):
-        return "You should have three or more owners of the project on PyPI."
+        return self._passed(weight=100)
 
 
 class MissingBuildSystem(BaseTest):
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         if "_missing_build_system" in data:
             # The build system tests give only negative weight, as they are effectively required
             # for a working package, so passing them shouldn't give you a better rating,
             # but failing them should give you a worse rating.
-            self.weight = 400
-            return False
+            return self._failed(
+                "You seem to neither have a setup.py, nor a pyproject.toml, only setup.cfg.\n"
+                "This makes it unclear how your project should be built, and some packaging tools may fail."
+                "See https://packaging.python.org for more information on how to package your project.",
+                weight=400,
+            )
 
-        self.weight = 0
-        return True
-
-    def message(self):
-        return (
-            "You seem to neither have a setup.py, nor a pyproject.toml, only setup.cfg.\n"
-            "This makes it unclear how your project should be built, and some packaging tools may fail."
-            "See https://packaging.python.org for more information on how to package your project."
-        )
+        return self._passed(weight=0)
 
 
 class MissingPyProjectToml(BaseTest):
-    def test(self, data):
-        # This may not yet be required, but it will be in the future, so we treat
-        # give it a negative rating when it fails, but not a positive rating when it succeeds.
-        self.weight = 0
+    def test(self, data: Metadata) -> TestResult:
+        # This may not yet be required, but it will be in the future, so we
+        # give it a negative rating when it fails, but not a positive rating
+        # when it succeeds.
         if "_missing_build_system" in data or "_missing_pyproject_toml" in data:
-            self.weight = 100
-            return False
-
-    def message(self):
-        return (
-            "Your project does not have a pyproject.toml file, which is highly recommended.\n"
-            "You probably want to create one with the following configuration:\n\n"
-            "    [build-system]\n"
-            '    requires = ["setuptools>=42"]\n'
-            '    build-backend = "setuptools.build_meta"\n'
-            "See https://packaging.python.org for more information on how to package your project."
-        )
+            return self._failed(
+                "Your project does not have a pyproject.toml file, which is highly recommended.\n"
+                "You probably want to create one with the following configuration:\n\n"
+                "    [build-system]\n"
+                '    requires = ["setuptools>=42"]\n'
+                '    build-backend = "setuptools.build_meta"\n'
+                "See https://packaging.python.org for more information on how to package your project.",
+                weight=100,
+            )
+        return self._passed(weight=0)
 
 
 class PyprojectTomlValid(BaseTest):
-    def test(self, data):
+    def test(self, data: Metadata) -> TestResult:
         # The build system tests give only negative weight, as they are effectively required
         # for a working package, so passing them shouldn't give you a better rating,
         # but failing them should give you a worse rating.
-        self.weight = 0
 
         # Only test if we have a path and pyproject.toml exists
         if "_path" not in data:
-            return None
+            return self._skipped()
 
         if "_missing_pyproject_toml" in data or "_missing_build_system" in data:
             # No pyproject.toml to validate, skip this test
-            return None
+            return self._skipped()
 
         pyproject_path = os.path.join(data["_path"], "pyproject.toml")
 
         try:
             read_configuration(pyproject_path)
-            return True
         except Exception as e:
-            self._message = str(e)
-            self.weight = 100
-            return False
-
-    def message(self):
-        return (
-            f"Your pyproject.toml is invalid: {self._message}\n"
-            "See https://packaging.python.org for more information on how to package your project."
-        )
+            return self._failed(
+                f"Your pyproject.toml is invalid: {e}\n"
+                "See https://packaging.python.org for more information on how to package your project.",
+                weight=100,
+            )
+        return self._passed(weight=0)
 
 
 class DeprecatedMetadataFields(BaseTest):
@@ -531,7 +574,7 @@ class DeprecatedMetadataFields(BaseTest):
         "license": ("license-expression", "2.4"),
     }
 
-    def _version_at_least(self, data, minimum):
+    def _version_at_least(self, data: Metadata, minimum: str) -> bool:
         metadata_version = data.get("metadata-version")
         if not metadata_version:
             return True
@@ -544,25 +587,24 @@ class DeprecatedMetadataFields(BaseTest):
 
         return current >= required
 
-    def test(self, data):
-        self._warnings = []
+    def test(self, data: Metadata) -> TestResult:
+        warnings = []
 
         for deprecated, (replacement, deprecated_since) in self._deprecated.items():
             if not self._version_at_least(data, deprecated_since):
                 continue
 
             if data.get(deprecated) and not data.get(replacement):
-                self._warnings.append(f"The metadata field '{deprecated}' is deprecated; use '{replacement}' instead.")
+                warnings.append(f"The metadata field '{deprecated}' is deprecated; use '{replacement}' instead.")
 
-        return not self._warnings
+        if warnings:
+            return self._failed("\n".join(warnings))
+        return self._passed()
 
-    def message(self):
-        return "\n".join(self._warnings)
 
+BUILD_SYSTEM_TESTS: list[BaseTest] = [MissingBuildSystem(), MissingPyProjectToml(), PyprojectTomlValid()]
 
-BUILD_SYSTEM_TESTS = [MissingBuildSystem(), MissingPyProjectToml(), PyprojectTomlValid()]
-
-ALL_TESTS = [
+ALL_TESTS: list[BaseTest] = [
     MissingBuildSystem(),
     MissingPyProjectToml(),
     PyprojectTomlValid(),
@@ -593,24 +635,21 @@ try:
     import check_manifest
 
     class CheckManifest(BaseTest):
-        weight = 0
-
-        def test(self, data):
+        def test(self, data: Metadata) -> TestResult:
             if "_path" not in data:
-                return None
+                return self._skipped()
 
-            self.weight = 200
             try:
-                return check_manifest.check_manifest(data["_path"])
+                ok = check_manifest.check_manifest(data["_path"])
             except check_manifest.Failure:
                 # Most likely this means check-manifest didn't find any
                 # package configuration, which is the same failure as
                 # MissingBuildSystem, so this is double errors, but
                 # it does mean your setup is completely broken, so...
-                return False
-
-        def message(self):
-            return "Check-manifest returned errors"
+                ok = False
+            if ok:
+                return self._passed(weight=200)
+            return self._failed("Check-manifest returned errors", weight=200)
 
     ALL_TESTS.append(CheckManifest())
 
@@ -618,8 +657,8 @@ except ImportError:
     pass
 
 
-def rate(data, skip_tests=None):
-    fails = []
+def rate(data: Metadata, skip_tests: Sequence[str] | None = None) -> Rating:
+    problems: list[Problem] = []
     good = 0
     bad = 0
     fatality = False
@@ -628,13 +667,30 @@ def rate(data, skip_tests=None):
     if len([key for key in data if not key.startswith("_")]) == 0:
         if "_no_config_found" in data:
             # Are you in the correct directory?:
-            return (0, ["I couldn't find any package data. Are checking the correct directory or file?"])
+            return Rating(
+                0,
+                [
+                    Problem(
+                        test="NoPackageData",
+                        message="I couldn't find any package data. Are checking the correct directory or file?",
+                        weight=0,
+                        fatal=True,
+                    )
+                ],
+            )
 
     if "_wheel_build_failed" in data:
-        fails.append(
-            "Pyroma failed to build your packages wheel metadata, which indicates an error with "
-            "your build configuration, like you not having a pyproject.toml file, or it being faulty.\n"
-            "Running `python -m build` in your package directory may give more information."
+        problems.append(
+            Problem(
+                test="WheelBuildFailed",
+                message=(
+                    "Pyroma failed to build your packages wheel metadata, which indicates an error with "
+                    "your build configuration, like you not having a pyproject.toml file, or it being faulty.\n"
+                    "Running `python -m build` in your package directory may give more information."
+                ),
+                weight=0,
+                fatal=True,
+            )
         )
         fatality = True
         test_list = BUILD_SYSTEM_TESTS
@@ -643,23 +699,34 @@ def rate(data, skip_tests=None):
         skip_tests = []
 
     for test in test_list:
-        if test.__class__.__name__ in skip_tests:
+        if test.name() in skip_tests:
             continue
-        res = test.test(data)
-        if res is False:
-            fails.append(test.message())
-            if test.fatal:
+        result = test.test(data)
+        if result.outcome is False:
+            problems.append(
+                Problem(
+                    test=test.name(),
+                    message=result.message,
+                    weight=result.weight,
+                    fatal=result.fatal,
+                )
+            )
+            if result.fatal:
                 fatality = True
             else:
-                bad += test.weight
-        elif res is True:
-            if not test.fatal:
-                good += test.weight
-    # If res is None, it's ignored.
+                bad += result.weight
+        elif result.outcome is True:
+            if not result.fatal:
+                good += result.weight
+        # If the outcome is None, it's ignored.
+
     if fatality:
         # A fatal test failed. That means we give a 0 rating:
-        return 0, fails
+        return Rating(0, problems)
+    if good + bad == 0:
+        # Nothing was counted at all (everything skipped); nothing failed either.
+        return Rating(MAX_RATING, problems)
     # Multiply good by 9, and add 1 to get a rating between
     # 1: All non-fatal tests failed.
     # 10: All tests succeeded.
-    return (good * 9) // (good + bad) + 1, fails
+    return Rating((good * 9) // (good + bad) + 1, problems)

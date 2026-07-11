@@ -4,3 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [tool.black]
 line-length = 120
+
+[tool.mypy]
+python_version = "3.10"
+packages = ["pyroma"]
+exclude = ["testdata"]
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = [
+    "build.*",
+    "check_manifest",
+    "distutils.*",
+    "docutils.*",
+    "setuptools.*",
+    "trove_classifiers",
+    "zest.releaser.*",
+]
+ignore_missing_imports = true

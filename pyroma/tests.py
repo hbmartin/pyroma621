@@ -11,14 +11,20 @@ import pyroma
 from xmlrpc import client as xmlrpclib
 
 from pyroma import projectdata, distributiondata, pypidata
-from pyroma.ratings import rate
+from pyroma.ratings import Problem, Rating, rate
+from pyroma.report import JsonReporter, TextReporter
+
+
+def astuple(rating):
+    """The (rating, messages) view of a Rating, as the old rate() returned."""
+    return (rating.rating, rating.messages)
 
 TESTDATA_DIR = Path(__file__).parent / "testdata"
 long_description = (TESTDATA_DIR / "complete" / "README.txt").read_text(encoding="UTF-8")
 # Translate newlines to universal format
 long_description = io.StringIO(long_description, newline=None).read()
 
-COMPLETE = {
+COMPLETE: dict = {
     "metadata-version": "2.4",
     "name": "complete",
     "version": "1.0.dev1",
@@ -51,7 +57,7 @@ COMPLETE = {
 class ProxyStub:
     def set_debug_context(self, dataname, real_class, developmode):
         filename = TESTDATA_DIR / "xmlrpcdata" / dataname
-        data = {}
+        data: dict = {}
         with open(filename, encoding="UTF-8") as f:
             exec(f.read(), None, data)
         self.args = data["args"]
@@ -117,12 +123,12 @@ class RatingsTest(unittest.TestCase):
         data = projectdata.get_data(TESTDATA_DIR / "complete")
         rating = rate(data)
         # Should have a perfect score
-        self.assertEqual(rating, (10, []))
+        self.assertEqual(astuple(rating), (10, []))
 
     def test_setup_config(self):
         rating = self._get_file_rating("setup_config")
         self.assertEqual(
-            rating,
+            astuple(rating),
             (
                 8,
                 [
@@ -144,7 +150,7 @@ class RatingsTest(unittest.TestCase):
         rating = self._get_file_rating("only_config")
 
         self.assertEqual(
-            rating,
+            astuple(rating),
             (
                 5,
                 [
@@ -169,11 +175,11 @@ class RatingsTest(unittest.TestCase):
 
     def test_skip_tests(self):
         # Find all errors
-        all_errors = self._get_file_rating("lacking")[1]
+        all_errors = self._get_file_rating("lacking").messages
 
         fewer_errors = self._get_file_rating(
             "lacking", skip_tests=["PythonRequiresVersion", "Description", "Summary", "Classifiers"]
-        )[1]
+        ).messages
 
         self.assertEqual(len(all_errors), 13)
         # Errors have been skipped!
@@ -181,16 +187,16 @@ class RatingsTest(unittest.TestCase):
 
     def test_pep517(self):
         rating = self._get_file_rating("pep517")
-        self.assertGreaterEqual(rating[0], 9)
+        self.assertGreaterEqual(rating.rating, 9)
 
     def test_pep621(self):
         rating = self._get_file_rating("pep621")
-        self.assertGreaterEqual(rating[0], 9)
+        self.assertGreaterEqual(rating.rating, 9)
 
     def test_minimal(self):
         rating = self._get_file_rating("minimal")
         self.assertEqual(
-            rating,
+            astuple(rating),
             (
                 2,
                 [
@@ -219,7 +225,7 @@ class RatingsTest(unittest.TestCase):
         rating = self._get_file_rating("lacking")
 
         self.assertEqual(
-            rating,
+            astuple(rating),
             (
                 0,
                 [
@@ -255,7 +261,7 @@ class RatingsTest(unittest.TestCase):
         rating = self._get_file_rating("custom_test")
 
         self.assertEqual(
-            rating,
+            astuple(rating),
             (
                 4,
                 [
@@ -281,7 +287,7 @@ class RatingsTest(unittest.TestCase):
 
     def test_private_classifier(self):
         rating = self._get_file_rating("private_classifier")
-        self.assertGreaterEqual(rating[0], 9)
+        self.assertGreaterEqual(rating.rating, 9)
 
     def test_invalid_pyproject(self):
         # Use valid metadata so we exercise the rating check itself,
@@ -290,8 +296,8 @@ class RatingsTest(unittest.TestCase):
         testdata["_path"] = TESTDATA_DIR / "invalid_pyproject"
 
         rating = rate(testdata)
-        self.assertLess(rating[0], 10)
-        self.assertTrue(any("pyproject.toml is invalid" in msg for msg in rating[1]))
+        self.assertLess(rating.rating, 10)
+        self.assertTrue(any("pyproject.toml is invalid" in msg for msg in rating.messages))
 
     def test_markdown(self):
         # Markdown and text shouldn't get ReST errors
@@ -300,11 +306,11 @@ class RatingsTest(unittest.TestCase):
         testdata["description-content-type"] = "text/markdown"
 
         rating = rate(testdata)
-        self.assertEqual(rating, (9, ["The package's Description is quite short."]))
+        self.assertEqual(astuple(rating), (9, ["The package's Description is quite short."]))
 
         testdata["description-content-type"] = "text/plain"
         rating = rate(testdata)
-        self.assertEqual(rating, (9, ["The package's Description is quite short."]))
+        self.assertEqual(astuple(rating), (9, ["The package's Description is quite short."]))
 
     def test_deprecated_metadata_field_warning(self):
         testdata = COMPLETE.copy()
@@ -314,7 +320,10 @@ class RatingsTest(unittest.TestCase):
         rating = rate(testdata)
 
         self.assertTrue(
-            any("The metadata field 'home-page' is deprecated; use 'project-url' instead." in msg for msg in rating[1])
+            any(
+                "The metadata field 'home-page' is deprecated; use 'project-url' instead." in msg
+                for msg in rating.messages
+            )
         )
 
     def test_deprecated_license_warning_respects_metadata_version(self):
@@ -324,7 +333,7 @@ class RatingsTest(unittest.TestCase):
         old_metadata.pop("license-expression", None)
 
         old_rating = rate(old_metadata)
-        self.assertFalse(any("The metadata field 'license' is deprecated" in msg for msg in old_rating[1]))
+        self.assertFalse(any("The metadata field 'license' is deprecated" in msg for msg in old_rating.messages))
 
         new_metadata = COMPLETE.copy()
         new_metadata["metadata-version"] = "2.4"
@@ -332,7 +341,7 @@ class RatingsTest(unittest.TestCase):
         new_metadata.pop("license-expression", None)
 
         new_rating = rate(new_metadata)
-        self.assertTrue(any("The metadata field 'license' is deprecated" in msg for msg in new_rating[1]))
+        self.assertTrue(any("The metadata field 'license' is deprecated" in msg for msg in new_rating.messages))
 
 
 class PyPITest(unittest.TestCase):
@@ -355,7 +364,7 @@ class PyPITest(unittest.TestCase):
         data = pypidata.get_data("complete")
         rating = rate(data)
 
-        self.assertEqual(rating, (10, []))
+        self.assertEqual(astuple(rating), (10, []))
 
     @unittest.mock.patch("pyroma.pypidata.requests.get")
     def test_get_project_data_custom_index_url(self, requestmock):
@@ -398,12 +407,99 @@ class PyPITest(unittest.TestCase):
     @unittest.mock.patch("pyroma.pypidata.get_data")
     def test_run_forwards_custom_index_url(self, datamock, ratemock):
         datamock.return_value = {"name": "internalpkg"}
-        ratemock.return_value = (10, [])
+        ratemock.return_value = Rating(10, [])
 
         result = pyroma.run("pypi", "internalpkg", quiet=True, index_url="https://packages.example.com")
 
         self.assertEqual(result, 10)
         datamock.assert_called_once_with("internalpkg", index_url="https://packages.example.com")
+
+
+class ReporterTest(unittest.TestCase):
+    maxDiff = None
+
+    def _rating(self):
+        return Rating(
+            9,
+            [Problem(test="Description", message="The package's Description is quite short.", weight=50, fatal=False)],
+        )
+
+    def test_text_reporter(self):
+        buffer = io.StringIO()
+        reporter = TextReporter(stream=buffer)
+        reporter.start("complete")
+        reporter.found("complete")
+        reporter.finish(self._rating())
+
+        self.assertEqual(
+            buffer.getvalue(),
+            "------------------------------\n"
+            "Checking complete\n"
+            "Found complete\n"
+            "------------------------------\n"
+            "The package's Description is quite short.\n"
+            "------------------------------\n"
+            "Final rating: 9/10\n"
+            "Cottage Cheese\n"
+            "------------------------------\n",
+        )
+
+    def test_text_reporter_quiet(self):
+        buffer = io.StringIO()
+        reporter = TextReporter(stream=buffer, quiet=True)
+        reporter.start("complete")
+        reporter.found("complete")
+        reporter.finish(self._rating())
+
+        # Quiet mode outputs only the rating.
+        self.assertEqual(buffer.getvalue(), "9\n")
+
+    def test_json_reporter(self):
+        buffer = io.StringIO()
+        reporter = JsonReporter(stream=buffer)
+        reporter.start("complete")
+        reporter.found("complete")
+        reporter.finish(self._rating())
+
+        document = json.loads(buffer.getvalue())
+        self.assertEqual(
+            document,
+            {
+                "checked": "complete",
+                "name": "complete",
+                "rating": 9,
+                "max_rating": 10,
+                "level": "Cottage Cheese",
+                "problems": [
+                    {
+                        "test": "Description",
+                        "message": "The package's Description is quite short.",
+                        "weight": 50,
+                        "fatal": False,
+                    }
+                ],
+            },
+        )
+
+    def test_run_json_output(self):
+        # End-to-end: run() in JSON mode emits a single parseable document.
+        import contextlib
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            rating = pyroma.run(
+                "directory",
+                str(TESTDATA_DIR / "minimal"),
+                skip_tests=["CheckManifest"],
+                output_format="json",
+            )
+
+        document = json.loads(buffer.getvalue())
+        self.assertEqual(document["rating"], rating)
+        self.assertEqual(document["name"], "minimal")
+        self.assertTrue(document["problems"])
+        for problem in document["problems"]:
+            self.assertEqual(sorted(problem), ["fatal", "message", "test", "weight"])
 
 
 class ProjectDataTest(unittest.TestCase):
