@@ -2,94 +2,30 @@
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
-[project]
-name = "pyroma"
-version = "5.1b3.dev0"
-description = "Test your project's packaging friendliness"
-readme = "README.rst"
-authors = [{name = "Lennart Regebro", email = "regebro@gmail.com"}]
-classifiers = [
-    "Development Status :: 5 - Production/Stable",
-    "Intended Audience :: Developers",
-    "Operating System :: OS Independent",
-    "Programming Language :: Python",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
-    "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: Implementation :: PyPy",
-]
-keywords = ["pypi", "quality", "testing"]
-license = "MIT"
-license-files = ["LICENSE.txt"]
-requires-python = ">=3.10"
-dependencies = [
-    "build>=0.7.0",
-    "docutils>=0.22",
-    "packaging>=24.2",
-    "pygments",
-    "requests",
-    "tomli>=1.2.3; python_version < '3.11'",
-    "trove-classifiers>=2022.6.26",
-    "validate-pyproject>=0.16",
-]
-
-[project.optional-dependencies]
-test = [
-    "pytest",
-    "pytest-cov",
-    "setuptools>=77",
-    "zest.releaser[recommended]",
-    "flit_core>=3.4,<4",
-    "uv_build>=0.8.0,<1.0",
-    "tox",
-]
-
-[project.urls]
-Homepage = "https://github.com/regebro/pyroma"
-"Source Code" = "https://github.com/regebro/pyroma"
-
-[project.scripts]
-pyroma = "pyroma:main"
-
-[project.entry-points."zest.releaser.prereleaser.before"]
-pyroma = "pyroma:zester"
-
-[tool.setuptools]
-include-package-data = true
-
-[tool.setuptools.package-data]
-pyroma = ["py.typed"]
-
-[tool.setuptools.packages.find]
-include = ["pyroma*"]
-namespaces = false
-
-[tool.pytest.ini_options]
-testpaths = ["pyroma/tests.py"]
-
-[tool.check-manifest]
-ignore = [".pre-commit-hooks.yaml"]
-
-[tool.zest-releaser]
-create-wheel = true
-
-[tool.mypy]
-files = ["pyroma"]
-exclude = ["pyroma/testdata/", "pyroma/tests\\.py"]
-check_untyped_defs = true
-warn_unused_ignores = true
-
-[[tool.mypy.overrides]]
-module = ["trove_classifiers", "check_manifest", "zest.releaser.*"]
-ignore_missing_imports = true
-
 [tool.ruff]
 line-length = 120
+extend-exclude = ["pyroma/testdata"]
+
+[tool.ruff.lint]
+select = [
+    "B",   # flake8-bugbear
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "W",   # pycodestyle warnings
+]
+ignore = [
+    "B904", # raise-without-from-inside-except; the bare messages are intentional user-facing errors
+]
+
+[tool.coverage.run]
+source = ["pyroma"]
+omit = ["pyroma/tests.py", "pyroma/testdata/*"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 78
 
 [tool.mypy]
 python_version = "3.10"

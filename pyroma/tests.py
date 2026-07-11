@@ -6,7 +6,8 @@ import unittest.mock
 from pathlib import Path
 from xmlrpc import client as xmlrpclib
 
-from pyroma import projectdata, distributiondata, pypidata
+import pyroma
+from pyroma import distributiondata, projectdata, pypidata
 from pyroma.ratings import Problem, Rating, rate
 from pyroma.report import JsonReporter, TextReporter
 
@@ -14,6 +15,7 @@ from pyroma.report import JsonReporter, TextReporter
 def astuple(rating):
     """The (rating, messages) view of a Rating, as the old rate() returned."""
     return (rating.rating, rating.messages)
+
 
 TESTDATA_DIR = Path(__file__).parent / "testdata"
 long_description = (TESTDATA_DIR / "complete" / "README.txt").read_text(encoding="UTF-8")
@@ -593,7 +595,7 @@ class PyPITest(unittest.TestCase):
         pypidata._get_project_data("internalpkg", index_url="https://packages.example.com")
 
         requestmock.assert_called_once_with(
-            "https://packages.example.com/pypi/internalpkg/json", timeout=pypidata.REQUEST_TIMEOUT
+            "https://packages.example.com/pypi/internalpkg/json", timeout=pypidata.REQUESTS_TIMEOUT
         )
 
     @unittest.mock.patch("pyroma.pypidata.requests.get")
@@ -606,7 +608,7 @@ class PyPITest(unittest.TestCase):
         pypidata._get_project_data("internalpkg", index_url="https://packages.example.com/pypi")
 
         requestmock.assert_called_once_with(
-            "https://packages.example.com/pypi/internalpkg/json", timeout=pypidata.REQUEST_TIMEOUT
+            "https://packages.example.com/pypi/internalpkg/json", timeout=pypidata.REQUESTS_TIMEOUT
         )
 
     @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")

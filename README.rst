@@ -45,17 +45,38 @@ In all cases the output is similar::
     Cottage Cheese
     ------------------------------
 
-For machine-readable output, pass ``--format json``::
+For machine consumption, for example in CI pipelines, ``--format json``
+outputs the result as a single JSON document instead::
 
     $ pyroma --format json .
+    {
+      "checked": ".",
+      "name": "pyroma",
+      "rating": 9,
+      "max_rating": 10,
+      "level": "Cottage Cheese",
+      "problems": [
+        {
+          "test": "Description",
+          "message": "The package's Description is quite short.",
+          "weight": 50,
+          "fatal": false
+        }
+      ]
+    }
+
 
 Exit codes
 ----------
 
-* ``0``: The package rated equal to or above the ``--min`` rating (default 8).
-* ``2``: The package rated below the ``--min`` rating.
-* ``1``: Used by the ``zest.releaser`` integration when you choose to abort
-  the release after a low rating.
+Pyroma communicates the result through its exit code, so it can be used
+as a quality gate in CI:
+
+* ``0`` — the rating was equal to or higher than the minimum rating,
+  which is set with ``-n``/``--min`` and defaults to 8.
+* ``2`` — the rating was below the minimum, or the command line was
+  invalid (the standard library's argument parser also exits with 2 on
+  usage errors).
 
 
 Tests

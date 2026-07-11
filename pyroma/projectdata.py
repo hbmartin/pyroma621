@@ -1,11 +1,10 @@
 # Extracts information from a project
 import os
 import re
-from typing import Any, Union, cast
+from distutils.errors import DistutilsFileError
 
 import build
 import build.util
-from distutils.errors import DistutilsFileError
 from setuptools.config.setupcfg import read_configuration
 
 from pyroma._types import Metadata
