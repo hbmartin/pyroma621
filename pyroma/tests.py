@@ -342,6 +342,118 @@ class RatingsTest(unittest.TestCase):
         self.assertTrue(any("The metadata field 'license' is deprecated" in msg for msg in new_rating.messages))
 
 
+class SpecComplianceTest(unittest.TestCase):
+    """Tests for the strict packaging-specification checks.
+
+    These all start from the COMPLETE metadata, which rates a perfect 10,
+    and break one thing at a time.
+    """
+
+    maxDiff = None
+
+    def _rate_with(self, **overrides):
+        testdata = COMPLETE.copy()
+        for key, value in overrides.items():
+            key = key.replace("_", "-")
+            if value is None:
+                testdata.pop(key, None)
+            else:
+                testdata[key] = value
+        return rate(testdata)
+
+    def test_complete_baseline(self):
+        self.assertEqual(astuple(self._rate_with()), (10, []))
+
+    def test_invalid_version_is_fatal(self):
+        rating = self._rate_with(version="1.0-broken-version!")
+        self.assertEqual(rating.rating, 0)
+        self.assertTrue(any("does not comply with the version specifiers" in msg for msg in rating.messages))
+
+    def test_noncanonical_version(self):
+        rating = self._rate_with(version="v1.0")
+        self.assertEqual(rating.rating, 9)
+        self.assertTrue(any("not in the canonical normalized form '1.0'" in msg for msg in rating.messages))
+
+    def test_local_version_discouraged(self):
+        rating = self._rate_with(version="1.0+ubuntu.1")
+        self.assertTrue(any("local version segment" in msg for msg in rating.messages))
+
+    def test_version_epoch_discouraged(self):
+        rating = self._rate_with(version="2!1.0")
+        self.assertTrue(any("version epoch" in msg for msg in rating.messages))
+
+    def test_invalid_metadata_version(self):
+        rating = self._rate_with(metadata_version="2.0")
+        self.assertTrue(any("'2.0' is not a valid metadata version" in msg for msg in rating.messages))
+
+    def test_invalid_name_is_fatal(self):
+        rating = self._rate_with(name="-not-valid-")
+        self.assertEqual(rating.rating, 0)
+        self.assertTrue(any("not a valid project name" in msg for msg in rating.messages))
+
+    def test_license_and_license_expression_is_fatal(self):
+        rating = self._rate_with(license="MIT license text")
+        self.assertEqual(rating.rating, 0)
+        self.assertTrue(any("both a License and a License-Expression is ambiguous" in msg for msg in rating.messages))
+
+    def test_invalid_spdx_license_expression_is_fatal(self):
+        rating = self._rate_with(license_expression="LGPL")
+        self.assertEqual(rating.rating, 0)
+        self.assertTrue(any("not a valid SPDX license expression" in msg for msg in rating.messages))
+
+    def test_noncanonical_spdx_license_expression(self):
+        rating = self._rate_with(license_expression="mit")
+        self.assertEqual(rating.rating, 9)
+        self.assertTrue(any("canonical normalized form 'MIT'" in msg for msg in rating.messages))
+
+    def test_invalid_description_content_type(self):
+        rating = self._rate_with(description_content_type="text/html")
+        self.assertTrue(any("'text/html' is not one of the allowed types" in msg for msg in rating.messages))
+
+    def test_invalid_description_content_type_charset(self):
+        rating = self._rate_with(description_content_type="text/markdown; charset=latin-1")
+        self.assertTrue(any("charset must be UTF-8" in msg for msg in rating.messages))
+
+    def test_invalid_markdown_variant(self):
+        rating = self._rate_with(description_content_type="text/markdown; variant=Pandoc")
+        self.assertTrue(any("'Pandoc' is not one of GFM or CommonMark" in msg for msg in rating.messages))
+
+    def test_variant_only_valid_for_markdown(self):
+        rating = self._rate_with(description_content_type="text/plain; variant=GFM")
+        self.assertTrue(any("only valid for text/markdown" in msg for msg in rating.messages))
+
+    def test_content_type_with_parameters_accepted(self):
+        rating = self._rate_with(description_content_type="text/markdown; charset=UTF-8; variant=GFM")
+        self.assertEqual(astuple(rating), (10, []))
+
+    def test_invalid_dependency_specifier(self):
+        rating = self._rate_with(requires_dist=["zope.event", "broken =="])
+        self.assertTrue(any("not a valid dependency specifier" in msg for msg in rating.messages))
+
+    def test_unknown_marker_variable(self):
+        rating = self._rate_with(requires_dist=['foo; unknown_variable == "1"'])
+        self.assertTrue(any("not a valid dependency specifier" in msg for msg in rating.messages))
+
+    def test_arbitrary_equality_discouraged(self):
+        rating = self._rate_with(requires_dist=["foo===1.0"])
+        self.assertTrue(any("arbitrary equality operator '==='" in msg for msg in rating.messages))
+
+    def test_project_url_label_too_long(self):
+        rating = self._rate_with(
+            project_url=["ThisLabelIsMuchTooLongForTheThirtyTwoCharacterLimit, https://example.com"]
+        )
+        self.assertTrue(any("longer than the allowed 32 characters" in msg for msg in rating.messages))
+
+    def test_project_url_no_well_known_label(self):
+        rating = self._rate_with(project_url=["weird, https://example.com"])
+        self.assertTrue(any("well-known label" in msg for msg in rating.messages))
+
+    def test_project_url_dict_form(self):
+        # The PyPI JSON API represents project urls as a dictionary.
+        rating = self._rate_with(project_url={"Home-page": "https://example.com"})
+        self.assertEqual(astuple(rating), (10, []))
+
+
 class PyPITest(unittest.TestCase):
     maxDiff = None
 

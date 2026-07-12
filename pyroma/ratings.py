@@ -18,13 +18,18 @@
 import io
 import os
 import re
+import string
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from docutils.core import publish_parts
 from docutils.utils import SystemMessage
+from packaging.licenses import InvalidLicenseExpression, canonicalize_license_expression
+from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion
+from packaging.version import Version as PackagingVersion
 from trove_classifiers import classifiers as CLASSIFIERS
 from validate_pyproject import api as validate_pyproject
 
@@ -168,78 +173,87 @@ class VersionIsString(BaseTest):
         return self._failed("The version number should be a string.")
 
 
-PEP386_RE = re.compile(
-    r"""
-    ^
-    (?P<version>\d+\.\d+)          # minimum 'N.N'
-    (?P<extraversion>(?:\.\d+)*)   # any number of extra '.N' segments
-    (?:
-        (?P<prerel>[abc]|rc)       # 'a'=alpha, 'b'=beta, 'c'=release candidate
-                                   # 'rc'= alias for release candidate
-        (?P<prerelversion>\d+(?:\.\d+)*)
-    )?
-    (?P<postdev>(\.post(?P<post>\d+))?(\.dev(?P<dev>\d+))?)?
-    $""",
-    re.VERBOSE | re.IGNORECASE,
-)
-
-
-PEP440_RE = re.compile(
-    r"""^
-    v?
-    (?:
-        (?:(?P<epoch>[0-9]+)!)?                           # epoch
-        (?P<release>[0-9]+(?:\.[0-9]+)*)                  # release segment
-        (?P<pre>                                          # pre-release
-            [-_\.]?
-            (?P<pre_l>(a|b|c|rc|alpha|beta|pre|preview))
-            [-_\.]?
-            (?P<pre_n>[0-9]+)?
-        )?
-        (?P<post>                                         # post release
-            (?:-(?P<post_n1>[0-9]+))
-            |
-            (?:
-                [-_\.]?
-                (?P<post_l>post|rev|r)
-                [-_\.]?
-                (?P<post_n2>[0-9]+)?
-            )
-        )?
-        (?P<dev>                                          # dev release
-            [-_\.]?
-            (?P<dev_l>dev)
-            [-_\.]?
-            (?P<dev_n>[0-9]+)?
-        )?
-    )
-    (?:\+(?P<local>[a-z0-9]+(?:[-_\.][a-z0-9]+)*))?       # local version
-$""",
-    re.VERBOSE | re.IGNORECASE,
-)
+def _as_list(value) -> list:
+    return value if isinstance(value, list) else [value]
 
 
 class PEPVersion(BaseTest):
     weight = 50
 
     def test(self, data: Metadata) -> TestResult:
-        # Check that the version number complies to PEP-386:
+        # Check that the version number complies with the version specifiers
+        # specification (PEP 440):
         version = data.get("version")
-        pep386 = PEP386_RE.search(str(version)) is not None
-        # Note: a version matching the (older, stricter) PEP-386 form is
-        # counted with a lower weight, whether it passes or fails. This
-        # preserves the historical scoring of this test.
-        weight = 10 if pep386 else self.weight
-        if PEP440_RE.search(str(version)) is not None:
-            return self._passed(weight=weight)
-        if pep386:
+        try:
+            parsed = PackagingVersion(str(version))
+        except InvalidVersion:
+            # An unparseable version cannot be uploaded to PyPI at all.
             return self._failed(
-                "The package's version number complies only with PEP-386 and not PEP-440.",
-                weight=weight,
+                f"The package's version number '{version}' does not comply with the version "
+                "specifiers specification (PEP 440), and will be rejected by package indices. See "
+                "https://packaging.python.org/en/latest/specifications/version-specifiers/",
+                fatal=True,
             )
+
+        problems = []
+        canonical = str(parsed)
+        if canonical != str(version):
+            problems.append(
+                f"The package's version number '{version}' is not in the canonical normalized "
+                f"form '{canonical}' recommended by the version specifiers specification."
+            )
+        if parsed.local:
+            problems.append(
+                f"The package's version number has a local version segment ('+{parsed.local}'), "
+                "which must not be used for packages published to an index like PyPI."
+            )
+        if parsed.epoch:
+            problems.append("The package's version number uses a version epoch, which is explicitly discouraged.")
+        if problems:
+            return self._failed("\n".join(problems), weight=10)
+        return self._passed()
+
+
+# All existing Metadata-Version values. Note that there is no 2.0.
+KNOWN_METADATA_VERSIONS = ("1.0", "1.1", "1.2", "2.1", "2.2", "2.3", "2.4", "2.5")
+
+
+class MetadataVersion(BaseTest):
+    weight = 50
+
+    def test(self, data: Metadata) -> TestResult:
+        metadata_version = data.get("metadata-version")
+        if not metadata_version:
+            # Hand-assembled metadata may not have a metadata version at all.
+            return self._skipped()
+        if str(metadata_version) in KNOWN_METADATA_VERSIONS:
+            return self._passed()
         return self._failed(
-            "The package's version number does not comply with PEP-386 or PEP-440.",
-            weight=weight,
+            f"The metadata version '{metadata_version}' is not a valid metadata version. "
+            f"Valid versions are: {', '.join(KNOWN_METADATA_VERSIONS)}. See "
+            "https://packaging.python.org/en/latest/specifications/core-metadata/"
+        )
+
+
+# The project name format from the name-format specification. Note the \Z
+# anchor: a trailing newline is not a valid part of a name.
+NAME_RE = re.compile(r"^([A-Z0-9]|[A-Z0-9][A-Z0-9._-]*[A-Z0-9])\Z", re.IGNORECASE)
+
+
+class NameFormat(BaseTest):
+    def test(self, data: Metadata) -> TestResult:
+        name = data.get("name")
+        if not name:
+            # The Name test already handles a missing name.
+            return self._skipped()
+        if NAME_RE.match(str(name)):
+            return self._passed(weight=0)
+        return self._failed(
+            f"The package name '{name}' is not a valid project name: names may contain only "
+            "ASCII letters, digits, '.', '_' and '-', and must start and end with a letter or "
+            "digit. Package indices will reject it. See "
+            "https://packaging.python.org/en/latest/specifications/name-normalization/",
+            fatal=True,
         )
 
 
@@ -266,6 +280,57 @@ class Description(BaseTest):
         if len(description) > 100:
             return self._passed()
         return self._failed("The package's Description is quite short.")
+
+
+VALID_CONTENT_TYPES = ("text/plain", "text/x-rst", "text/markdown")
+VALID_MARKDOWN_VARIANTS = ("gfm", "commonmark")
+
+
+def _parse_content_type(value) -> tuple[str, dict[str, str]]:
+    """Split a Description-Content-Type into its media type and parameters."""
+    parts = [part.strip() for part in str(value).split(";")]
+    media_type = parts[0].lower()
+    params = {}
+    for part in parts[1:]:
+        if "=" in part:
+            key, _, val = part.partition("=")
+            params[key.strip().lower()] = val.strip()
+    return media_type, params
+
+
+class DescriptionContentType(BaseTest):
+    weight = 50
+
+    def test(self, data: Metadata) -> TestResult:
+        content_type = data.get("description-content-type")
+        if not content_type:
+            # The field is optional; indices then try to render the
+            # description as reStructuredText.
+            return self._skipped()
+
+        media_type, params = _parse_content_type(content_type)
+        problems = []
+        if media_type not in VALID_CONTENT_TYPES:
+            problems.append(
+                f"The description content type '{media_type}' is not one of the allowed types: "
+                + ", ".join(VALID_CONTENT_TYPES)
+                + "."
+            )
+        charset = params.get("charset")
+        if charset is not None and charset.upper() != "UTF-8":
+            problems.append(f"The description content type charset must be UTF-8, not '{charset}'.")
+        variant = params.get("variant")
+        if variant is not None:
+            if media_type != "text/markdown":
+                problems.append("The 'variant' parameter is only valid for text/markdown descriptions.")
+            elif variant.lower() not in VALID_MARKDOWN_VARIANTS:
+                problems.append(f"The markdown variant '{variant}' is not one of GFM or CommonMark.")
+        if problems:
+            return self._failed(
+                "\n".join(problems)
+                + "\nSee https://packaging.python.org/en/latest/specifications/core-metadata/#description-content-type"
+            )
+        return self._passed()
 
 
 class Classifiers(FieldTest):
@@ -359,6 +424,35 @@ class PythonRequiresVersion(BaseTest):
         return self._passed()
 
 
+class DependencySpecifiers(BaseTest):
+    weight = 100
+
+    def test(self, data: Metadata) -> TestResult:
+        requirements = data.get("requires-dist")
+        if not requirements:
+            return self._skipped()
+
+        problems = []
+        for requirement in _as_list(requirements):
+            try:
+                parsed = Requirement(str(requirement))
+            except InvalidRequirement as e:
+                problems.append(f"'{requirement}' is not a valid dependency specifier: {e}")
+                continue
+            for specifier in parsed.specifier:
+                if specifier.operator == "===":
+                    problems.append(
+                        f"'{requirement}' uses the arbitrary equality operator '===', which is heavily discouraged."
+                    )
+        if problems:
+            return self._failed(
+                "Your package has invalid dependency specifiers (Requires-Dist):\n"
+                + "\n".join(problems)
+                + "\nSee https://packaging.python.org/en/latest/specifications/dependency-specifiers/"
+            )
+        return self._passed()
+
+
 class Keywords(FieldTest):
     weight = 20
     field = "keywords"
@@ -382,17 +476,80 @@ class AuthorEmail(FieldTest):
     field = "author-email"
 
 
+# The well-known project URL labels from PEP 753, mapping each canonical
+# (normalized) label to its acceptable aliases.
+WELL_KNOWN_URL_LABELS = {
+    "homepage": (),
+    "source": ("repository", "sourcecode", "github"),
+    "download": (),
+    "changelog": ("changes", "whatsnew", "history"),
+    "releasenotes": (),
+    "documentation": ("docs",),
+    "issues": ("bugs", "issue", "tracker", "issuetracker", "bugtracker"),
+    "funding": ("sponsor", "donate", "donation"),
+}
+
+_WELL_KNOWN_LABELS = set(WELL_KNOWN_URL_LABELS) | {
+    alias for aliases in WELL_KNOWN_URL_LABELS.values() for alias in aliases
+}
+
+_LABEL_JUNK = str.maketrans("", "", string.punctuation + string.whitespace)
+
+
+def _normalize_url_label(label: str) -> str:
+    """Normalize a project URL label as specified by PEP 753."""
+    return label.translate(_LABEL_JUNK).lower()
+
+
+def _project_url_pairs(value) -> list[tuple[str, str]]:
+    """Turn the different shapes of project-url data into (label, url) pairs.
+
+    Wheel metadata has a list of "label, url" strings; the PyPI JSON API has
+    a dictionary.
+    """
+    if isinstance(value, dict):
+        return list(value.items())
+    pairs = []
+    for item in _as_list(value):
+        label, sep, url = str(item).partition(",")
+        if sep:
+            pairs.append((label.strip(), url.strip()))
+        else:
+            pairs.append(("", label.strip()))
+    return pairs
+
+
 class Url(BaseTest):
     weight = 20
 
     def test(self, data: Metadata) -> TestResult:
-        if bool(data.get("home-page")) or bool(data.get("project-url")):
+        project_urls = data.get("project-url")
+        if not project_urls and not data.get("home-page"):
+            return self._failed(
+                "Your package should have a 'url' field with a link to the "
+                "project home page, or a 'project_urls' field, with a "
+                "dictionary of links, or both."
+            )
+        if not project_urls:
+            # There is only the deprecated home-page field; the
+            # DeprecatedMetadataFields test flags that separately.
             return self._passed()
-        return self._failed(
-            "Your package should have a 'url' field with a link to the "
-            "project home page, or a 'project_urls' field, with a "
-            "dictionary of links, or both."
-        )
+
+        problems = []
+        labels = []
+        for label, _url in _project_url_pairs(project_urls):
+            if len(label) > 32:
+                problems.append(f"The project URL label '{label}' is longer than the allowed 32 characters.")
+            labels.append(_normalize_url_label(label))
+        if not any(label in _WELL_KNOWN_LABELS for label in labels):
+            problems.append(
+                "None of your project URLs use a well-known label (such as Homepage, Source, "
+                "Documentation, Issues or Changelog), which package indices display specially. See "
+                "https://packaging.python.org/en/latest/specifications/well-known-project-urls/"
+            )
+        if problems:
+            return self._failed("\n".join(problems), weight=10)
+        return self._passed()
 
 
 class Licensing(BaseTest):
@@ -412,9 +569,12 @@ class Licensing(BaseTest):
             )
 
         if license and license_expression:
+            # Metadata 2.4 (PEP 639) makes these mutually exclusive, and
+            # PyPI rejects uploads that specify both.
             return self._failed(
                 "Specifying both a License and a License-Expression is ambiguous, deprecated, "
-                "and may be rejected by package indices."
+                "and will be rejected by package indices.",
+                fatal=True,
             )
 
         if license_expression and has_license_classifier:
@@ -425,6 +585,24 @@ class Licensing(BaseTest):
 
         if has_license_classifier:
             return self._failed("Using license classifiers is deprecated in favour of the license-expression field.")
+
+        if license_expression:
+            try:
+                canonical = canonicalize_license_expression(str(license_expression))
+            except InvalidLicenseExpression:
+                # PyPI validates license expressions on upload.
+                return self._failed(
+                    f"The license expression '{license_expression}' is not a valid SPDX license "
+                    "expression, and will be rejected by package indices. See "
+                    "https://packaging.python.org/en/latest/specifications/license-expression/",
+                    fatal=True,
+                )
+            if str(canonical) != str(license_expression):
+                return self._failed(
+                    f"The license expression '{license_expression}' should be written in its "
+                    f"canonical normalized form '{canonical}'.",
+                    weight=10,
+                )
 
         return self._passed()
 
@@ -467,7 +645,8 @@ class ValidREST(BaseTest):
 
     def test(self, data: Metadata) -> TestResult:
         content_type = data.get("description-content-type", None)
-        if content_type in ("text/plain", "text/markdown"):
+        media_type, _params = _parse_content_type(content_type or "")
+        if media_type in ("text/plain", "text/markdown"):
             # These can't fail. Markdown will just assume everything
             # it doesn't understand is plain text.
             return self._passed()
@@ -560,10 +739,12 @@ class PyprojectTomlValid(BaseTest):
                 config = tomllib.load(pyproject_file)
             validate_pyproject.Validator()(config)
         except Exception as e:
+            # An invalid pyproject.toml means build backends must refuse to
+            # build the project, so this is fatal.
             return self._failed(
                 f"Your pyproject.toml is invalid: {e}\n"
                 "See https://packaging.python.org for more information on how to package your project.",
-                weight=100,
+                fatal=True,
             )
         return self._passed(weight=0)
 
@@ -615,15 +796,19 @@ ALL_TESTS: list[BaseTest] = [
     MissingPyProjectToml(),
     PyprojectTomlValid(),
     Name(),
+    NameFormat(),
     Version(),
     VersionIsString(),
     PEPVersion(),
+    MetadataVersion(),
     Summary(),
     Description(),
+    DescriptionContentType(),
     Classifiers(),
     ClassifierVerification(),
     PythonClassifierVersion(),
     PythonRequiresVersion(),
+    DependencySpecifiers(),
     Keywords(),
     Author(),
     AuthorEmail(),
