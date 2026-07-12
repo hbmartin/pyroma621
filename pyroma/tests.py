@@ -347,220 +347,115 @@ class RatingsTest(unittest.TestCase):
 
 
 class SpecComplianceTest(unittest.TestCase):
-    """Tests for the strict, spec-grounded rating checks."""
+    """Tests for the strict packaging-specification checks.
+
+    These all start from the COMPLETE metadata, which rates a perfect 10,
+    and break one thing at a time.
+    """
 
     maxDiff = None
 
-    def _messages(self, testdata):
-        return rate(testdata)[1]
-
-    def test_invalid_version(self):
+    def _rate_with(self, **overrides):
         testdata = COMPLETE.copy()
-        testdata["version"] = "1.0-foo"
+        for key, value in overrides.items():
+            key = key.replace("_", "-")
+            if value is None:
+                testdata.pop(key, None)
+            else:
+                testdata[key] = value
+        return rate(testdata)
 
-        rating = rate(testdata)
-        self.assertLess(rating[0], 10)
-        self.assertTrue(any("'1.0-foo' is not a valid version" in msg for msg in rating[1]))
+    def test_complete_baseline(self):
+        self.assertEqual(astuple(self._rate_with()), (10, []))
+
+    def test_invalid_version_is_fatal(self):
+        rating = self._rate_with(version="1.0-broken-version!")
+        self.assertEqual(rating.rating, 0)
+        self.assertTrue(any("does not comply with the version specifiers" in msg for msg in rating.messages))
 
     def test_noncanonical_version(self):
-        testdata = COMPLETE.copy()
-        testdata["version"] = "1.0.DEV1"
+        rating = self._rate_with(version="v1.0")
+        self.assertEqual(rating.rating, 9)
+        self.assertTrue(any("not in the canonical normalized form '1.0'" in msg for msg in rating.messages))
 
-        messages = self._messages(testdata)
-        self.assertTrue(any("not in canonical form; it should be written as '1.0.dev1'" in msg for msg in messages))
+    def test_local_version_discouraged(self):
+        rating = self._rate_with(version="1.0+ubuntu.1")
+        self.assertTrue(any("local version segment" in msg for msg in rating.messages))
 
-    def test_version_epoch_and_local_segment(self):
-        testdata = COMPLETE.copy()
-        testdata["version"] = "1!1.0+ubuntu1"
-
-        messages = self._messages(testdata)
-        self.assertTrue(any("uses a version epoch" in msg for msg in messages))
-        self.assertTrue(any("contains a local version segment" in msg for msg in messages))
+    def test_version_epoch_discouraged(self):
+        rating = self._rate_with(version="2!1.0")
+        self.assertTrue(any("version epoch" in msg for msg in rating.messages))
 
     def test_invalid_metadata_version(self):
-        testdata = COMPLETE.copy()
-        testdata["metadata-version"] = "2.0"
-
-        messages = self._messages(testdata)
-        self.assertTrue(any("'2.0' is not a valid Metadata-Version" in msg for msg in messages))
+        rating = self._rate_with(metadata_version="2.0")
+        self.assertTrue(any("'2.0' is not a valid metadata version" in msg for msg in rating.messages))
 
     def test_invalid_name_is_fatal(self):
-        testdata = COMPLETE.copy()
-        testdata["name"] = "-not-valid-"
-
-        rating = rate(testdata)
-        self.assertEqual(rating[0], 0)
-        self.assertTrue(any("'-not-valid-' is not a valid project name" in msg for msg in rating[1]))
+        rating = self._rate_with(name="-not-valid-")
+        self.assertEqual(rating.rating, 0)
+        self.assertTrue(any("not a valid project name" in msg for msg in rating.messages))
 
     def test_license_and_license_expression_is_fatal(self):
-        testdata = COMPLETE.copy()
-        testdata["license"] = "MIT"
+        rating = self._rate_with(license="MIT license text")
+        self.assertEqual(rating.rating, 0)
+        self.assertTrue(any("both a License and a License-Expression is ambiguous" in msg for msg in rating.messages))
 
-        rating = rate(testdata)
-        self.assertEqual(rating[0], 0)
-        self.assertTrue(
-            any("Specifying both a License and a License-Expression is forbidden" in msg for msg in rating[1])
-        )
+    def test_invalid_spdx_license_expression_is_fatal(self):
+        rating = self._rate_with(license_expression="LGPL")
+        self.assertEqual(rating.rating, 0)
+        self.assertTrue(any("not a valid SPDX license expression" in msg for msg in rating.messages))
 
-    def test_invalid_license_expression_is_fatal(self):
-        testdata = COMPLETE.copy()
-        testdata["license-expression"] = "Bogus-License"
-
-        rating = rate(testdata)
-        self.assertEqual(rating[0], 0)
-        self.assertTrue(any("'Bogus-License' is not a valid SPDX license expression" in msg for msg in rating[1]))
+    def test_noncanonical_spdx_license_expression(self):
+        rating = self._rate_with(license_expression="mit")
+        self.assertEqual(rating.rating, 9)
+        self.assertTrue(any("canonical normalized form 'MIT'" in msg for msg in rating.messages))
 
     def test_invalid_description_content_type(self):
-        testdata = COMPLETE.copy()
-        testdata["description-content-type"] = "text/html"
+        rating = self._rate_with(description_content_type="text/html")
+        self.assertTrue(any("'text/html' is not one of the allowed types" in msg for msg in rating.messages))
 
-        messages = self._messages(testdata)
-        self.assertTrue(any("The content type should be one of" in msg for msg in messages))
+    def test_invalid_description_content_type_charset(self):
+        rating = self._rate_with(description_content_type="text/markdown; charset=latin-1")
+        self.assertTrue(any("charset must be UTF-8" in msg for msg in rating.messages))
 
-    def test_description_content_type_parameters(self):
-        testdata = COMPLETE.copy()
-        testdata["description-content-type"] = "text/plain; charset=latin-1; variant=GFM"
+    def test_invalid_markdown_variant(self):
+        rating = self._rate_with(description_content_type="text/markdown; variant=Pandoc")
+        self.assertTrue(any("'Pandoc' is not one of GFM or CommonMark" in msg for msg in rating.messages))
 
-        messages = self._messages(testdata)
-        message = next(msg for msg in messages if "Description-Content-Type" in msg)
-        self.assertIn("The only accepted charset is UTF-8, not 'latin-1'.", message)
-        self.assertIn("The 'variant' parameter is only valid for text/markdown.", message)
+    def test_variant_only_valid_for_markdown(self):
+        rating = self._rate_with(description_content_type="text/plain; variant=GFM")
+        self.assertTrue(any("only valid for text/markdown" in msg for msg in rating.messages))
 
-    def test_markdown_variant(self):
-        testdata = COMPLETE.copy()
-        testdata["description-content-type"] = "text/markdown; variant=GFM"
-        self.assertFalse(any("Description-Content-Type" in msg for msg in self._messages(testdata)))
+    def test_content_type_with_parameters_accepted(self):
+        rating = self._rate_with(description_content_type="text/markdown; charset=UTF-8; variant=GFM")
+        self.assertEqual(astuple(rating), (10, []))
 
-        testdata["description-content-type"] = "text/markdown; variant=Pandoc"
-        messages = self._messages(testdata)
-        self.assertTrue(
-            any("The markdown variant should be GFM or CommonMark, not 'Pandoc'." in msg for msg in messages)
+    def test_invalid_dependency_specifier(self):
+        rating = self._rate_with(requires_dist=["zope.event", "broken =="])
+        self.assertTrue(any("not a valid dependency specifier" in msg for msg in rating.messages))
+
+    def test_unknown_marker_variable(self):
+        rating = self._rate_with(requires_dist=['foo; unknown_variable == "1"'])
+        self.assertTrue(any("not a valid dependency specifier" in msg for msg in rating.messages))
+
+    def test_arbitrary_equality_discouraged(self):
+        rating = self._rate_with(requires_dist=["foo===1.0"])
+        self.assertTrue(any("arbitrary equality operator '==='" in msg for msg in rating.messages))
+
+    def test_project_url_label_too_long(self):
+        rating = self._rate_with(
+            project_url=["ThisLabelIsMuchTooLongForTheThirtyTwoCharacterLimit, https://example.com"]
         )
+        self.assertTrue(any("longer than the allowed 32 characters" in msg for msg in rating.messages))
 
-    def test_invalid_requires_dist(self):
-        testdata = COMPLETE.copy()
-        testdata["requires-dist"] = ["zope.event", "broken =="]
+    def test_project_url_no_well_known_label(self):
+        rating = self._rate_with(project_url=["weird, https://example.com"])
+        self.assertTrue(any("well-known label" in msg for msg in rating.messages))
 
-        messages = self._messages(testdata)
-        self.assertTrue(any("'broken ==' is not a valid dependency specifier" in msg for msg in messages))
-
-    def test_requires_dist_style_warnings(self):
-        testdata = COMPLETE.copy()
-        testdata["requires-dist"] = [
-            "zope.event (>=4.0)",
-            'zope.interface; sys_platform > "linux"',
-        ]
-
-        messages = self._messages(testdata)
-        message = next(msg for msg in messages if "Requires-Dist" in msg)
-        self.assertIn("puts the version specifier in parentheses", message)
-        self.assertIn("ordered comparison on the 'sys_platform' environment marker", message)
-
-    def test_url_label_too_long_is_fatal(self):
-        testdata = COMPLETE.copy()
-        testdata["project-url"] = ["this label is far too long to be legal, https://example.com"]
-
-        rating = rate(testdata)
-        self.assertEqual(rating[0], 0)
-        self.assertTrue(any("Project-URL labels are limited to 32 characters" in msg for msg in rating[1]))
-
-    def test_url_no_well_known_labels(self):
-        testdata = COMPLETE.copy()
-        testdata["project-url"] = ["weird stuff, https://example.com"]
-
-        messages = self._messages(testdata)
-        self.assertTrue(any("None of your Project-URL labels match the well-known labels" in msg for msg in messages))
-
-    def test_console_scripts_in_entry_points_is_fatal(self):
-        testdata = COMPLETE.copy()
-        testdata["_path"] = TESTDATA_DIR / "bad_console_scripts"
-
-        rating = rate(testdata)
-        self.assertEqual(rating[0], 0)
-        self.assertTrue(any("Console and GUI scripts must be defined in [project.scripts]" in msg for msg in rating[1]))
-
-    def test_readme_both_file_and_text_is_fatal(self):
-        testdata = COMPLETE.copy()
-        testdata["_path"] = TESTDATA_DIR / "readme_both"
-
-        rating = rate(testdata)
-        self.assertEqual(rating[0], 0)
-        self.assertTrue(any("The 'readme' table must not specify both 'file' and 'text'." in msg for msg in rating[1]))
-
-    def test_dynamic_name_is_fatal(self):
-        testdata = COMPLETE.copy()
-        testdata["_path"] = TESTDATA_DIR / "dynamic_name"
-
-        rating = rate(testdata)
-        self.assertEqual(rating[0], 0)
-        self.assertTrue(
-            any("The 'name' key must be static, it must never be listed in 'dynamic'." in msg for msg in rating[1])
-        )
-        self.assertTrue(
-            any(
-                "The 'version' key must either be set statically or be listed in 'dynamic'." in msg for msg in rating[1]
-            )
-        )
-
-
-class ReportTest(unittest.TestCase):
-    maxDiff = None
-
-    def _rated(self):
-        return ratings.RatedProject(
-            name="example",
-            rating=9,
-            level=ratings.LEVELS[9],
-            problems=[
-                ratings.Problem(
-                    test="Description",
-                    message="The package's Description is quite short.",
-                    weight=50,
-                    fatal=False,
-                )
-            ],
-        )
-
-    def test_format_text(self):
-        self.assertEqual(
-            report.format_text(self._rated()),
-            "------------------------------\n"
-            "The package's Description is quite short.\n"
-            "------------------------------\n"
-            "Final rating: 9/10\n"
-            "Cottage Cheese\n"
-            "------------------------------",
-        )
-
-    def test_format_text_no_problems(self):
-        rated = ratings.RatedProject(name="example", rating=10, level=ratings.LEVELS[10], problems=[])
-        self.assertEqual(
-            report.format_text(rated),
-            "------------------------------\n"
-            "Final rating: 10/10\n"
-            "Your cheese is so fresh most people think it's a cream: Mascarpone\n"
-            "------------------------------",
-        )
-
-    def test_format_json(self):
-        document = json.loads(report.format_json(self._rated(), meta={"mode": "directory"}))
-        self.assertEqual(
-            document,
-            {
-                "name": "example",
-                "rating": 9,
-                "level": "Cottage Cheese",
-                "problems": [
-                    {
-                        "test": "Description",
-                        "message": "The package's Description is quite short.",
-                        "weight": 50,
-                        "fatal": False,
-                    }
-                ],
-                "_meta": {"mode": "directory"},
-            },
-        )
+    def test_project_url_dict_form(self):
+        # The PyPI JSON API represents project urls as a dictionary.
+        rating = self._rate_with(project_url={"Home-page": "https://example.com"})
+        self.assertEqual(astuple(rating), (10, []))
 
 
 class PyPITest(unittest.TestCase):

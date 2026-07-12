@@ -87,13 +87,33 @@ This is the list of checks that are currently performed:
 * The package should have a name, a version and a Summary.
   If it does not, it will receive a rating of 0.
 
-* The name must follow the project name format from the packaging
-  specifications; package indices reject invalid names, so an invalid
-  name is fatal.
+* The name must follow the project name format specification; an invalid
+  name is fatal, as package indices will reject it.
 
-* The version number should be a string that complies with the version
-  specifiers specification (PEP 440). Non-canonical forms, version
-  epochs and local version segments are warned about.
+* The version number should be a string. A floating point number will
+  work with distutils, but most other tools will fail.
+
+* The version number must comply with the version specifiers
+  specification (PEP 440); an unparseable version is fatal. Versions
+  that are valid but not in canonical normalized form, versions with
+  local version segments, and version epochs are warned about.
+
+* The Metadata-Version must be one that actually exists.
+
+* The Description-Content-Type, if given, must be one of text/plain,
+  text/x-rst or text/markdown, with a UTF-8 charset, and for Markdown
+  a GFM or CommonMark variant.
+
+* Licensing must be unambiguous: the modern License-Expression field
+  should be used, it must be a valid SPDX license expression (an invalid
+  one is fatal, as PyPI rejects it), and it must not be combined with the
+  deprecated License field (also fatal) or license classifiers.
+
+* Dependency specifiers (Requires-Dist) must be valid according to the
+  dependency specifiers specification (PEP 508).
+
+* Project URLs should use well-known labels (Homepage, Source,
+  Documentation, Issues, Changelog, ...) no longer than 32 characters.
 
 * The ``Metadata-Version`` must be a legal value.
 
