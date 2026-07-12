@@ -18,16 +18,22 @@
 import io
 import os
 import re
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from docutils.core import publish_parts
 from docutils.utils import SystemMessage
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
-from setuptools.config.pyprojecttoml import read_configuration
 from trove_classifiers import classifiers as CLASSIFIERS
+from validate_pyproject import api as validate_pyproject
 
 from pyroma._types import Metadata
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # Python 3.10
+    import tomli as tomllib
 
 LEVELS = [
     "This cheese seems to contain no dairy products",
@@ -655,7 +661,9 @@ class PyprojectTomlValid(BaseTest):
         pyproject_path = os.path.join(data["_path"], "pyproject.toml")
 
         try:
-            read_configuration(pyproject_path)
+            with open(pyproject_path, "rb") as pyproject_file:
+                config = tomllib.load(pyproject_file)
+            validate_pyproject.Validator()(config)
         except Exception as e:
             return self._failed(
                 f"Your pyproject.toml is invalid: {e}\n"

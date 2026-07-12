@@ -2,6 +2,79 @@
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
+[project]
+name = "pyroma"
+version = "5.1b3.dev0"
+description = "Test your project's packaging friendliness"
+readme = "README.rst"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE.txt"]
+authors = [
+    { name = "Lennart Regebro", email = "regebro@gmail.com" },
+]
+keywords = ["pypi", "quality", "testing"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+]
+dependencies = [
+    "build>=1.0",
+    "docutils>=0.22",
+    "packaging",
+    "pygments",
+    "pyproject_hooks",
+    "requests",
+    "tomli; python_version < '3.11'",
+    "trove-classifiers>=2022.6.26",
+    "validate-pyproject>=0.16",
+]
+
+[project.urls]
+Homepage = "https://github.com/regebro/pyroma"
+"Source Code" = "https://github.com/regebro/pyroma"
+
+[project.optional-dependencies]
+test = [
+    "flit_core>=3.4,<4",
+    "mypy",
+    "pytest",
+    "pytest-cov",
+    "setuptools>=77",
+    "tox",
+    "types-requests",
+    "zest.releaser[recommended]",
+]
+
+[project.scripts]
+pyroma = "pyroma:main"
+
+[project.entry-points."zest.releaser.prereleaser.before"]
+pyroma = "pyroma:zester"
+
+[tool.setuptools.packages.find]
+include = ["pyroma"]
+
+[tool.pytest.ini_options]
+testpaths = ["pyroma/tests.py"]
+
+[tool.check-manifest]
+ignore = [".pre-commit-hooks.yaml"]
+
+[tool.zest-releaser]
+create-wheel = true
+
 [tool.ruff]
 line-length = 120
 extend-exclude = ["pyroma/testdata"]
@@ -41,10 +114,11 @@ check_untyped_defs = true
 module = [
     "build.*",
     "check_manifest",
-    "distutils.*",
     "docutils.*",
-    "setuptools.*",
+    "pyproject_hooks",
+    "tomli",
     "trove_classifiers",
+    "validate_pyproject.*",
     "zest.releaser.*",
 ]
 ignore_missing_imports = true
