@@ -4,7 +4,61 @@ Changelog
 5.1b3 (unreleased)
 ------------------
 
-- Nothing changed yet.
+Breaking changes:
+
+- ``ratings.rate()`` now returns a structured ``Rating`` object (with
+  ``rating``, ``problems``, ``messages`` and ``level``) instead of a
+  ``(int, [str])`` tuple. ``pyroma.run()`` still returns the integer rating.
+
+- Report output is no longer produced through the root logger; pyroma no
+  longer calls ``logging.basicConfig()`` at import time. Diagnostics go to
+  the named ``pyroma`` logger.
+
+- Several checks are now strict about things package indices reject:
+  an unparseable version number, an invalid project name, an invalid SPDX
+  license expression, specifying both License and License-Expression, and
+  an invalid pyproject.toml are all now fatal (rating 0).
+
+- setuptools and distutils are no longer used at runtime, and setuptools
+  was dropped from the dependencies. pyproject.toml validation now uses
+  validate-pyproject, and the legacy setup.cfg-only fallback is read with
+  the standard library (plain values, dangling lists and simple ``file:``
+  directives only).
+
+New features:
+
+- New ``--format json`` option for machine-readable output, for example
+  in CI pipelines.
+
+- New checks: Metadata-Version validity, project name format,
+  canonical/local/epoch version forms, SPDX license expression validity
+  and canonical form, Description-Content-Type validity, dependency
+  specifier (Requires-Dist) validity, and well-known project URL labels
+  with their 32-character limit (PEP 753).
+
+- Official support for uv's ``uv_build`` backend, with a test fixture and
+  CI coverage. Any standards-compliant PEP 517 backend is supported.
+
+- Type hints throughout, with a ``py.typed`` marker.
+
+Other changes:
+
+- All network requests now have a timeout, with clear error messages for
+  timeouts and connection failures.
+
+- The sdist downloaded from PyPI is now always cleaned up.
+
+- pyroma's own metadata moved from setup.cfg to ``[project]`` in
+  pyproject.toml; pyroma rates itself 10/10. The long description no
+  longer includes CHANGES.txt.
+
+- Replaced the deprecated ``build.util.project_wheel_metadata()`` with an
+  equivalent based on ``build.ProjectBuilder``.
+
+- Development tooling: black and flake8 replaced by Ruff, mypy runs in CI,
+  and test coverage is measured in tox.
+
+- Documented the exit codes in the README.
 
 
 5.1b2 (2026-06-14)
