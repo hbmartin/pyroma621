@@ -1,12 +1,13 @@
 [build-system]
-requires = ["uv_build>=0.8.0,<1.0"]
+requires = ["uv_build"]
 build-backend = "uv_build"
 
 [project]
-name = "pyroma_uv_build_test_pkg"
+name = "pyroma-uv-test-pkg"
 version = "1.0"
 description = "This is a test package for pyroma"
 readme = "README.txt"
+license = "MIT"
 authors = [{name = "Lennart Regebro", email = "regebro@gmail.com"}]
 classifiers = [
     "Development Status :: 6 - Mature",
@@ -14,14 +15,12 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 keywords = [
     "pypi",
     "quality",
     "example",
 ]
-license = "MIT"
+urls = {Homepage = "https://github.com/regebro/pyroma", Source = "https://github.com/regebro/pyroma"}
 requires-python = ">=3.10"
-
-[project.urls]
-Homepage = "https://github.com/regebro/pyroma"
