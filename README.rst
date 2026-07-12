@@ -33,6 +33,10 @@ If you use an internal PyPI-compatible package index, specify it with
 Giving it a name on CheeseShop is the most extensive test, as it will
 test for several things isn't otherwise tested.
 
+Pyroma extracts the metadata by asking the project's own PEP 517 build
+backend for it, so every standards-compliant build backend is supported:
+setuptools, hatchling, flit-core, uv_build, poetry-core and so on.
+
 In all cases the output is similar::
 
     ------------------------------

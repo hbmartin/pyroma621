@@ -54,6 +54,7 @@ test = [
     "setuptools>=77",
     "tox",
     "types-requests",
+    "uv_build>=0.11",
     "zest.releaser[recommended]",
 ]
 

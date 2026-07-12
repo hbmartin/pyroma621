@@ -131,9 +131,10 @@ class RatingsTest(unittest.TestCase):
                 8,
                 [
                     "Your project does not have a pyproject.toml file, which is highly recommended.\n"
-                    "You probably want to create one with the following configuration:\n\n"
+                    "You probably want to create one with at least a build-system table. Any PEP 517\n"
+                    "build backend works, for example setuptools, hatchling, flit-core or uv_build:\n\n"
                     "    [build-system]\n"
-                    '    requires = ["setuptools>=42"]\n'
+                    '    requires = ["setuptools"]\n'
                     '    build-backend = "setuptools.build_meta"\n'
                     "See https://packaging.python.org for more information on how to package your project.",
                     "Using license classifiers is deprecated in favour of the license-expression field.",
@@ -158,9 +159,10 @@ class RatingsTest(unittest.TestCase):
                     "See https://packaging.python.org for more information on how to package your project.",
                     "Your project does not have a pyproject.toml file, which is highly "
                     "recommended.\n"
-                    "You probably want to create one with the following configuration:\n\n"
+                    "You probably want to create one with at least a build-system table. Any PEP 517\n"
+                    "build backend works, for example setuptools, hatchling, flit-core or uv_build:\n\n"
                     "    [build-system]\n"
-                    '    requires = ["setuptools>=42"]\n'
+                    '    requires = ["setuptools"]\n'
                     '    build-backend = "setuptools.build_meta"\n'
                     "See https://packaging.python.org for more information on how to package your project.",
                     "Specifying both a License-Expression and license classifiers is ambiguous, "
@@ -189,6 +191,11 @@ class RatingsTest(unittest.TestCase):
 
     def test_pep621(self):
         rating = self._get_file_rating("pep621")
+        self.assertGreaterEqual(rating.rating, 9)
+
+    def test_uv_build(self):
+        # uv's native PEP 517 build backend works like any other backend.
+        rating = self._get_file_rating("uv_build")
         self.assertGreaterEqual(rating.rating, 9)
 
     def test_minimal(self):
@@ -228,9 +235,10 @@ class RatingsTest(unittest.TestCase):
                 0,
                 [
                     "Your project does not have a pyproject.toml file, which is highly recommended.\n"
-                    "You probably want to create one with the following configuration:\n\n"
+                    "You probably want to create one with at least a build-system table. Any PEP 517\n"
+                    "build backend works, for example setuptools, hatchling, flit-core or uv_build:\n\n"
                     "    [build-system]\n"
-                    '    requires = ["setuptools>=42"]\n'
+                    '    requires = ["setuptools"]\n'
                     '    build-backend = "setuptools.build_meta"\n'
                     "See https://packaging.python.org for more information on how to package your project.",
                     "The package had no Summary!",
