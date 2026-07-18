@@ -2,6 +2,18 @@
 
 ## 5.1b3 (unreleased)
 
+- Pyroma itself is now built by the native `uv_build` backend. Its flat
+  `pyroma` module and source-distribution extras are declared directly in
+  `pyproject.toml`; the Setuptools-only root configuration and `MANIFEST.in`
+  are gone. Setuptools-based test fixtures remain for compatibility coverage.
+- Hypothesis now fuzzes bounded metadata dictionaries and verifies that rating
+  is deterministic, non-mutating and structurally valid. This found and fixed
+  a crash on malformed single-component Python classifiers.
+- CI now runs Pyroma on itself at a required 10/10, enforces Lizard's strict
+  complexity threshold, and checks dependency declarations with deptry.
+  GitHub releases build distributions in an unprivileged job and publish the
+  resulting artifact to the `pyroma621` PyPI project through Trusted
+  Publishing.
 - Rating tests are now stateless: each test returns a `TestResult`
   instead of mutating shared test instances, and the new
   `ratings.rate_project()` returns a structured `RatedProject`

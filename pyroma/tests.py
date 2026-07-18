@@ -1,3 +1,4 @@
+import copy
 import contextlib
 import io
 import json
@@ -9,6 +10,9 @@ import unittest
 import unittest.mock
 from pathlib import Path
 from xmlrpc import client as xmlrpclib
+
+from hypothesis import example, given, settings
+from hypothesis import strategies as st
 
 import pyroma
 from pyroma import distributiondata, projectdata, pypidata, ratings, report
@@ -47,6 +51,91 @@ COMPLETE = {
     "license-expression": "MIT",
     "license-file": "LICENSE.txt",
 }
+
+
+_METADATA_TEXT = st.text(
+    alphabet=st.characters(blacklist_categories=("Cc", "Cs")),
+    max_size=80,
+)
+_CLASSIFIER_TEXT = st.one_of(
+    st.sampled_from(
+        (
+            "Development Status",
+            "Programming Language",
+            "Programming Language :: Python",
+            "Programming Language :: Python :: 3",
+            "Programming Language :: Python :: 3.14",
+        )
+    ),
+    _METADATA_TEXT,
+)
+_STRING_OR_LIST = st.one_of(_METADATA_TEXT, st.lists(_METADATA_TEXT, max_size=4))
+
+
+def _metadata_strategy():
+    return st.fixed_dictionaries(
+        {},
+        optional={
+            "metadata-version": _METADATA_TEXT,
+            "name": _METADATA_TEXT,
+            "version": st.one_of(_METADATA_TEXT, st.integers(), st.none()),
+            "summary": _METADATA_TEXT,
+            "description": _METADATA_TEXT,
+            "description-content-type": _METADATA_TEXT,
+            "classifier": st.lists(_CLASSIFIER_TEXT, max_size=4),
+            "keywords": _STRING_OR_LIST,
+            "author": _METADATA_TEXT,
+            "author-email": _METADATA_TEXT,
+            "maintainer": _METADATA_TEXT,
+            "maintainer-email": _METADATA_TEXT,
+            "home-page": _METADATA_TEXT,
+            "download-url": _METADATA_TEXT,
+            "project-url": st.one_of(
+                st.lists(_METADATA_TEXT, max_size=4),
+                st.dictionaries(_METADATA_TEXT, _METADATA_TEXT, max_size=4),
+            ),
+            "requires-dist": st.one_of(_METADATA_TEXT, st.lists(_METADATA_TEXT, max_size=4), st.none()),
+            "requires-python": _METADATA_TEXT,
+            "requires": _STRING_OR_LIST,
+            "provides": _STRING_OR_LIST,
+            "obsoletes": _STRING_OR_LIST,
+            "license": _METADATA_TEXT,
+            "license-expression": _METADATA_TEXT,
+            "license-file": _STRING_OR_LIST,
+            "dynamic": _STRING_OR_LIST,
+            "platform": _STRING_OR_LIST,
+            "_sdist": st.booleans(),
+            "_owners": st.lists(_METADATA_TEXT, max_size=4),
+            "_wheel_build_failed": st.booleans(),
+            "_missing_pyproject_toml": st.booleans(),
+            "_missing_build_system": st.booleans(),
+            "_no_config_found": st.booleans(),
+            "_has_sdist": st.booleans(),
+        },
+    )
+
+
+class MetadataPropertyTest(unittest.TestCase):
+    @settings(deadline=None)
+    @given(_metadata_strategy())
+    @example({"classifier": ["Programming Language"]})
+    def test_rate_project_is_total_deterministic_and_non_mutating(self, testdata):
+        original = copy.deepcopy(testdata)
+
+        first = ratings.rate_project(testdata)
+        second = ratings.rate_project(testdata)
+
+        self.assertEqual(testdata, original)
+        self.assertEqual(first, second)
+        self.assertEqual(first.name, testdata.get("name"))
+        self.assertGreaterEqual(first.rating, 0)
+        self.assertLessEqual(first.rating, 10)
+        self.assertEqual(first.level, ratings.LEVELS[first.rating])
+        for problem in first.problems:
+            self.assertTrue(problem.test)
+            self.assertTrue(problem.message)
+            self.assertGreaterEqual(problem.weight, 0)
+            self.assertIsInstance(problem.fatal, bool)
 
 
 class RatingsTest(unittest.TestCase):

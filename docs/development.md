@@ -6,6 +6,9 @@ Run the test suite with pytest:
 $ python -m pytest
 ```
 
+The test extra includes Hypothesis. Its generated metadata cases run as part
+of the normal pytest and tox suites, including the cross-platform CI matrix.
+
 or across all supported Python versions:
 
 ```console
@@ -32,6 +35,26 @@ Or simply run all the pre-commit hooks:
 $ pre-commit run --all-files
 ```
 
+## Packaging and quality checks
+
+Build the wheel and source distribution with uv:
+
+```console
+$ uv build
+```
+
+Run the same self-rating, complexity, and dependency checks used in CI:
+
+```console
+$ uv run --no-default-groups --extra test pyroma --min 10 .
+$ uv run --only-group quality lizard pyroma --exclude "pyroma/testdata/*" --warnings_only
+$ uv run --no-default-groups --group quality deptry . --github-output
+```
+
+Lizard uses its default strict threshold of 15 and must report no warnings.
+Deptry excludes bundled compatibility fixtures and has narrow exceptions for
+optional or indirectly loaded dependencies documented in `pyproject.toml`.
+
 ## Test data
 
 The "complete" package in `pyroma/testdata` is designed to score the
@@ -44,6 +67,14 @@ $ make generate
 
 which rebuilds `pyroma/testdata/distributions/complete-1.0.dev1.*`
 from the `pyroma/testdata/complete` directory.
+
+## Publishing
+
+Creating a GitHub release starts `.github/workflows/publish.yml`. The workflow
+builds the distributions without OIDC credentials, then publishes the
+uploaded artifact from the protected `pypi` environment using PyPI Trusted
+Publishing. PyPI must have a trusted publisher configured for this repository,
+the `publish.yml` workflow, and the `pypi` environment.
 
 ## Future ideas
 

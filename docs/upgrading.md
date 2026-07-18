@@ -616,8 +616,9 @@ where possible.
 
 Pyroma's own package metadata moved from `setup.cfg` to PEP 621 and PEP 639
 tables in `pyproject.toml`. `setup.py` and `setup.cfg` were removed.
-The setuptools build backend remains in use for pyroma itself with
-`setuptools>=77`.
+Pyroma itself now uses `uv_build>=0.11.28,<0.12` with an explicit flat-layout
+module configuration. Setuptools remains a test-only dependency because the
+compatibility fixtures intentionally exercise Setuptools projects.
 
 Runtime dependency changes:
 
@@ -631,12 +632,15 @@ Runtime dependency changes:
 Test/development dependency changes:
 
 - added `check-manifest` explicitly to the test extra;
+- added Hypothesis metadata fuzzing;
 - added `pytest-cov`;
 - raised test-time setuptools to `>=77`;
 - added `uv_build>=0.8.0,<1.0`; and
-- defined uv dependency groups for lint and type-check tools.
+- defined uv dependency groups for lint, type-check and quality tools.
 
-The source distribution explicitly includes `pyroma/py.typed`. Generated
+The uv build configuration includes the complete `pyroma` module (including
+`pyroma/py.typed` and compatibility fixtures) plus the documentation and
+development files needed in the source distribution. Generated Hypothesis,
 coverage, pytest, Ruff, mypy, uv lock, and virtual-environment artifacts are
 ignored.
 

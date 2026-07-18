@@ -15,6 +15,7 @@ py3*
 .venv
 .env
 .coverage
+.hypothesis
 .mypy_cache
 .pytest_cache
 .ruff_cache

@@ -277,7 +277,7 @@ class PythonClassifierVersion(BaseTest):
         classifiers = data.get("classifier", [])
         for classifier in classifiers:
             parts = [p.strip() for p in classifier.split("::")]
-            if parts[0] == "Programming Language" and parts[1] == "Python":
+            if len(parts) >= 2 and parts[0] == "Programming Language" and parts[1] == "Python":
                 if len(parts) == 2:
                     # Specified Python, but no version.
                     continue
@@ -608,70 +608,81 @@ class DependencySpecifiers(BaseTest):
         return self._passed(weight=20)
 
 
+def _load_project_table(data: Metadata) -> "dict[str, Any] | None":
+    if "_path" not in data:
+        return None
+    if "_missing_pyproject_toml" in data or "_missing_build_system" in data:
+        return None
+
+    pyproject_path = os.path.join(data["_path"], "pyproject.toml")
+    try:
+        with open(pyproject_path, "rb") as pyproject_file:
+            config = tomllib.load(pyproject_file)
+    except (OSError, tomllib.TOMLDecodeError):
+        # PyprojectTomlValid reports unreadable/unparseable files.
+        return None
+
+    project = config.get("project")
+    if not isinstance(project, dict):
+        # No [project] table; the metadata comes from somewhere else.
+        return None
+    return cast("dict[str, Any]", project)
+
+
+def _table_defines_file_and_text(value: Any) -> bool:
+    return isinstance(value, dict) and "file" in value and "text" in value
+
+
+def _project_table_errors(project: "dict[str, Any]") -> "list[str]":
+    errors = []
+    dynamic = project.get("dynamic", [])
+    if not isinstance(dynamic, list):
+        # PyprojectTomlValid reports the schema violation.
+        dynamic = []
+
+    if "name" in dynamic:
+        errors.append("The 'name' key must be static, it must never be listed in 'dynamic'.")
+    if "version" not in project and "version" not in dynamic:
+        errors.append("The 'version' key must either be set statically or be listed in 'dynamic'.")
+
+    for table_name in ("readme", "license"):
+        if _table_defines_file_and_text(project.get(table_name)):
+            errors.append(f"The '{table_name}' table must not specify both 'file' and 'text'.")
+
+    entry_points = project.get("entry-points", {})
+    if not isinstance(entry_points, dict):
+        return errors
+    for group in ("console_scripts", "gui_scripts"):
+        if group in entry_points:
+            errors.append(
+                f"Console and GUI scripts must be defined in [project.scripts] and "
+                f"[project.gui-scripts], not [project.entry-points.{group}]."
+            )
+    return errors
+
+
 class PyProjectProjectTable(BaseTest):
     """Spot violations of the pyproject.toml specification's [project] table
     rules that validate-pyproject's schemas do not catch."""
 
     def test(self, data: Metadata) -> TestResult:
-        if "_path" not in data:
+        project = _load_project_table(data)
+        if project is None:
             return self._skipped()
 
-        if "_missing_pyproject_toml" in data or "_missing_build_system" in data:
-            return self._skipped()
+        errors = _project_table_errors(project)
+        if not errors:
+            # Like the other build system tests, this gives no positive rating.
+            return self._passed(weight=0)
 
-        pyproject_path = os.path.join(data["_path"], "pyproject.toml")
-        try:
-            with open(pyproject_path, "rb") as pyproject_file:
-                config = tomllib.load(pyproject_file)
-        except (OSError, tomllib.TOMLDecodeError):
-            # PyprojectTomlValid reports unreadable/unparseable files.
-            return self._skipped()
-
-        project = config.get("project")
-        if not isinstance(project, dict):
-            # No [project] table; the metadata comes from somewhere else.
-            return self._skipped()
-
-        errors = []
-        dynamic = project.get("dynamic", [])
-        if not isinstance(dynamic, list):
-            # PyprojectTomlValid reports the schema violation.
-            dynamic = []
-
-        if "name" in dynamic:
-            errors.append("The 'name' key must be static, it must never be listed in 'dynamic'.")
-
-        if "version" not in project and "version" not in dynamic:
-            errors.append("The 'version' key must either be set statically or be listed in 'dynamic'.")
-
-        readme = project.get("readme")
-        if isinstance(readme, dict) and "file" in readme and "text" in readme:
-            errors.append("The 'readme' table must not specify both 'file' and 'text'.")
-
-        license_config = project.get("license")
-        if isinstance(license_config, dict) and "file" in license_config and "text" in license_config:
-            errors.append("The 'license' table must not specify both 'file' and 'text'.")
-
-        entry_points = project.get("entry-points", {})
-        if isinstance(entry_points, dict):
-            for group in ("console_scripts", "gui_scripts"):
-                if group in entry_points:
-                    errors.append(
-                        f"Console and GUI scripts must be defined in [project.scripts] and "
-                        f"[project.gui-scripts], not [project.entry-points.{group}]."
-                    )
-
-        if errors:
-            # These are all MUST rules in the pyproject.toml specification;
-            # build backends are required to raise errors for them.
-            return self._failed(
-                "Your pyproject.toml [project] table violates the pyproject.toml specification:\n"
-                + "\n".join(errors)
-                + "\nSee https://packaging.python.org/en/latest/specifications/pyproject-toml/",
-                fatal=True,
-            )
-        # Like the other build system tests, this gives no positive rating.
-        return self._passed(weight=0)
+        # These are all MUST rules in the pyproject.toml specification;
+        # build backends are required to raise errors for them.
+        return self._failed(
+            "Your pyproject.toml [project] table violates the pyproject.toml specification:\n"
+            + "\n".join(errors)
+            + "\nSee https://packaging.python.org/en/latest/specifications/pyproject-toml/",
+            fatal=True,
+        )
 
 
 class DevStatusClassifier(BaseTest):
@@ -939,36 +950,35 @@ except ImportError:
     pass
 
 
-def rate_project(data: Metadata, skip_tests: "list[str] | str | None" = None) -> RatedProject:
-    """Rate a package, returning a structured RatedProject result."""
+def _no_config_result(data: Metadata) -> "RatedProject | None":
+    if any(not key.startswith("_") for key in data) or "_no_config_found" not in data:
+        return None
+
+    return RatedProject(
+        name=data.get("name"),
+        rating=0,
+        level=LEVELS[0],
+        problems=[
+            Problem(
+                test="NoConfigFound",
+                message="I couldn't find any package data. Are you checking the correct directory or file?",
+                weight=0,
+                fatal=True,
+            )
+        ],
+    )
+
+
+def _initial_rating_state(data: Metadata) -> "tuple[list[BaseTest], list[Problem], bool]":
     problems = []
-    good = 0
-    bad = 0
     fatality = False
     test_list = ALL_TESTS
-    name = data.get("name")
 
-    if len([key for key in data if not key.startswith("_")]) == 0:
-        if "_no_config_found" in data:
-            # Are you in the correct directory?:
-            return RatedProject(
-                name=name,
-                rating=0,
-                level=LEVELS[0],
-                problems=[
-                    Problem(
-                        test="NoConfigFound",
-                        message="I couldn't find any package data. Are you checking the correct directory or file?",
-                        weight=0,
-                        fatal=True,
-                    )
-                ],
-            )
-        if "_missing_build_system" in data:
-            # There is no way to build the package, so no metadata could be
-            # extracted. Only report the build-system problems; complaining
-            # about each missing metadata field would just be noise.
-            test_list = BUILD_SYSTEM_TESTS
+    if not any(not key.startswith("_") for key in data) and "_missing_build_system" in data:
+        # There is no way to build the package, so no metadata could be
+        # extracted. Only report the build-system problems; complaining
+        # about each missing metadata field would just be noise.
+        test_list = BUILD_SYSTEM_TESTS
 
     if "_wheel_build_failed" in data:
         problems.append(
@@ -985,14 +995,28 @@ def rate_project(data: Metadata, skip_tests: "list[str] | str | None" = None) ->
         )
         fatality = True
         test_list = BUILD_SYSTEM_TESTS
+    return test_list, problems, fatality
 
+
+def _normalized_skip_tests(skip_tests: "list[str] | str | None") -> "set[str]":
     if skip_tests is None:
-        skip_tests = []
-    elif isinstance(skip_tests, str):
+        return set()
+    if isinstance(skip_tests, str):
         # A single test name; a plain `in` check against the string would
         # match substrings (e.g. "Name" in "NameFormat").
-        skip_tests = [skip_tests]
+        return {skip_tests}
+    return set(skip_tests)
 
+
+def _evaluate_rating_tests(
+    data: Metadata,
+    test_list: "list[BaseTest]",
+    skip_tests: "set[str]",
+    problems: "list[Problem]",
+) -> "tuple[int, int, bool]":
+    good = 0
+    bad = 0
+    fatality = False
     for test in test_list:
         test_name = test.__class__.__name__
         if test_name in skip_tests:
@@ -1008,21 +1032,38 @@ def rate_project(data: Metadata, skip_tests: "list[str] | str | None" = None) ->
             if not result.fatal:
                 good += result.weight
         # If the outcome is None, it's ignored.
+    return good, bad, fatality
 
+
+def _calculate_rating(good: int, bad: int, fatality: bool) -> int:
     if fatality:
         # A fatal test failed. That means we give a 0 rating:
-        rating = 0
-    else:
-        if good + bad == 0:
-            raise ConfigurationError(
-                "The configuration skips all tests that contribute to the rating, so no rating can be calculated."
-            )
-        # Multiply good by 9, and add 1 to get a rating between
-        # 1: All non-fatal tests failed.
-        # 10: All tests succeeded.
-        rating = (good * 9) // (good + bad) + 1
+        return 0
+    if good + bad == 0:
+        raise ConfigurationError(
+            "The configuration skips all tests that contribute to the rating, so no rating can be calculated."
+        )
+    # Multiply good by 9, and add 1 to get a rating between
+    # 1: All non-fatal tests failed.
+    # 10: All tests succeeded.
+    return (good * 9) // (good + bad) + 1
 
-    return RatedProject(name=name, rating=rating, level=LEVELS[rating], problems=problems)
+
+def rate_project(data: Metadata, skip_tests: "list[str] | str | None" = None) -> RatedProject:
+    """Rate a package, returning a structured RatedProject result."""
+    no_config = _no_config_result(data)
+    if no_config is not None:
+        return no_config
+
+    test_list, problems, initial_fatality = _initial_rating_state(data)
+    good, bad, test_fatality = _evaluate_rating_tests(
+        data,
+        test_list,
+        _normalized_skip_tests(skip_tests),
+        problems,
+    )
+    rating = _calculate_rating(good, bad, initial_fatality or test_fatality)
+    return RatedProject(name=data.get("name"), rating=rating, level=LEVELS[rating], problems=problems)
 
 
 def rate(data: Metadata, skip_tests: "list[str] | str | None" = None) -> "tuple[int, list[str]]":
