@@ -109,38 +109,7 @@ class Rating:
         }
 
 
-@dataclass(frozen=True)
-class TestResult:
-    """The outcome of running a single rating test."""
-
-    outcome: bool | None
-    weight: int
-    fatal: bool
-    message: str
-
-
-@dataclass(frozen=True)
-class Problem:
-    """A single problem found while rating a package."""
-
-    test: str
-    message: str
-    weight: int
-    fatal: bool
-
-
-@dataclass(frozen=True)
-class RatedProject:
-    """The full, structured result of rating a package."""
-
-    name: str | None
-    rating: int
-    level: str
-    problems: list[Problem]
-
-
 class BaseTest:
-    weight = 0
     fatal = False
     weight = 0
 
@@ -167,23 +136,6 @@ class BaseTest:
 
     def _skipped(self) -> TestResult:
         return TestResult(outcome=None, weight=0)
-
-    def test(self, data: Metadata) -> TestResult:
-        raise NotImplementedError
-
-    def _passed(self, weight: "int | None" = None) -> TestResult:
-        return TestResult(True, self.weight if weight is None else weight, self.fatal, "")
-
-    def _failed(self, message: str, weight: "int | None" = None, fatal: "bool | None" = None) -> TestResult:
-        return TestResult(
-            False,
-            self.weight if weight is None else weight,
-            self.fatal if fatal is None else fatal,
-            message,
-        )
-
-    def _skipped(self) -> TestResult:
-        return TestResult(None, 0, False, "")
 
 
 class FieldTest(BaseTest):
@@ -461,7 +413,6 @@ class PythonRequiresVersion(BaseTest):
         # https://github.com/regebro/pyroma/pull/83#discussion_r955611236
         python_requires = data.get("requires-python", None)
 
-        message = "You should specify what Python versions you support with the 'Requires-Python' metadata."
         if not python_requires:
             return self._failed(self._message)
 
@@ -705,7 +656,6 @@ class ValidREST(BaseTest):
         stream = io.StringIO()
         settings = {"warning_stream": stream}
 
-        message = ""
         try:
             publish_parts(source=source, writer="html4css1", settings_overrides=settings)
         except SystemMessage:
@@ -846,7 +796,6 @@ ALL_TESTS: list[BaseTest] = [
     MissingBuildSystem(),
     MissingPyProjectToml(),
     PyprojectTomlValid(),
-    PyProjectProjectTable(),
     Name(),
     NameFormat(),
     Version(),
@@ -866,8 +815,6 @@ ALL_TESTS: list[BaseTest] = [
     AuthorEmail(),
     Url(),
     Licensing(),
-    DescriptionContentType(),
-    DependencySpecifiers(),
     SDist(),
     ValidREST(),
     BusFactor(),
@@ -908,7 +855,6 @@ def rate(data: Metadata, skip_tests: Sequence[str] | None = None) -> Rating:
     bad = 0
     fatality = False
     test_list = ALL_TESTS
-    name = data.get("name")
 
     if len([key for key in data if not key.startswith("_")]) == 0:
         if "_no_config_found" in data:

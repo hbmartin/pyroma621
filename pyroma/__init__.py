@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 from argparse import ArgumentParser, ArgumentTypeError
@@ -44,8 +45,8 @@ def zester(data: dict) -> None:
 def min_argument(arg: str) -> int:
     try:
         f = int(arg)
-    except ValueError as e:
-        raise ArgumentTypeError("Must be an integer between 1 and 10") from e
+    except ValueError:
+        raise ArgumentTypeError("Must be an integer between 1 and 10")
     if f < 0:
         raise ArgumentTypeError("Oh, it's not THAT bad, trust me.")
     if f < 1:
@@ -147,13 +148,6 @@ def main() -> None:
         action="store_true",
         default=False,
         help="Output only the rating",
-    )
-    parser.add_argument(
-        "--format",
-        dest="output_format",
-        choices=report.FORMATS,
-        default="text",
-        help="Output format (default: text)",
     )
     parser.add_argument(
         "--skip-tests",

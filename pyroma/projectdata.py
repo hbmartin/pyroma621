@@ -2,6 +2,7 @@
 import configparser
 import importlib.metadata
 import os
+import pathlib
 import re
 import tempfile
 from email.message import Message
@@ -13,10 +14,16 @@ import pyproject_hooks
 
 from pyroma._types import Metadata
 
-import build
-from pyroma.metadata import Metadata
-
-Pathish = Union[str, "os.PathLike[str]"]
+# MAP from old setup.py type keys to Core Metadata keys
+METADATA_MAP = {
+    "description": "summary",
+    "classifiers": "classifier",
+    "project-urls": "project-url",
+    "url": "home-page",
+    "long-description": "description",
+    "long-description-content-type": "description-content-type",
+    "python-requires": "requires-python",
+}
 
 
 def normalize(name: str) -> str:
@@ -99,7 +106,7 @@ def build_metadata(path: "os.PathLike[str] | str", isolated: bool | None = None)
         description = cast(str, metadata.get_payload()).strip()
         if description:
             data["description"] = description + "\n"
-    return cast(Metadata, data)
+    return data
 
 
 def get_build_data(path: "os.PathLike[str] | str", isolated: bool | None = None) -> Metadata:

@@ -90,9 +90,6 @@ def _get_owners(project: str, index_url: str | None = None) -> list[str] | None:
 def get_data(project: str, index_url: str | None = None) -> Metadata:
     # Pick the latest release.
     project_data = _get_project_data(project, index_url=index_url)
-    # The `releases` key is deprecated on PyPI, but there is no JSON API
-    # replacement for listing the files of the latest release, so we keep
-    # using it while it lasts.
     releases = project_data["releases"]
     data: Metadata = {}
 
@@ -137,10 +134,9 @@ def get_data(project: str, index_url: str | None = None) -> Metadata:
                 ddata = distributiondata.get_data(tmp)
 
             # Combine them, with the PyPI data winning:
-            ddata_dict = cast("dict[str, Any]", ddata)
-            ddata_dict.update(data)
-            data = ddata_dict
+            ddata.update(data)
+            data = ddata
             data["_source_download"] = True
             break
 
-    return cast(Metadata, data)
+    return data

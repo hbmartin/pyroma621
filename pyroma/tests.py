@@ -144,15 +144,14 @@ class RatingsTest(unittest.TestCase):
         )
 
     def test_only_config(self):
-        # There is no legacy setup.py, nor a modern pyproject.toml, so there
-        # is no way to build this project and no metadata to extract. Only
-        # the build system problems are reported.
+        # In version 5, this is now an error, as there is no legacy setup.py,
+        # nor a modern pyproject.toml.
         rating = self._get_file_rating("only_config")
 
         self.assertEqual(
             astuple(rating),
             (
-                1,
+                5,
                 [
                     "You seem to neither have a setup.py, nor a pyproject.toml, only setup.cfg.\n"
                     "This makes it unclear how your project should be built, and some packaging "
@@ -166,6 +165,10 @@ class RatingsTest(unittest.TestCase):
                     '    requires = ["setuptools"]\n'
                     '    build-backend = "setuptools.build_meta"\n'
                     "See https://packaging.python.org for more information on how to package your project.",
+                    "Specifying both a License-Expression and license classifiers is ambiguous, "
+                    "deprecated, and may be rejected by package indices.",
+                    "The metadata field 'home-page' is deprecated; use 'project-url' instead.",
+                    "Check-manifest returned errors",
                 ],
             ),
         )
@@ -522,7 +525,7 @@ class PyPITest(unittest.TestCase):
         self.assertEqual(data["_owners"], ["dev1"])
         proxymock.assert_called_once_with("https://packages.example.com/pypi")
 
-    @unittest.mock.patch("pyroma.ratings.rate_project")
+    @unittest.mock.patch("pyroma.ratings.rate")
     @unittest.mock.patch("pyroma.pypidata.get_data")
     def test_run_forwards_custom_index_url(self, datamock, ratemock):
         datamock.return_value = {"name": "internalpkg"}
