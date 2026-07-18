@@ -1,6 +1,9 @@
+import contextlib
 import io
 import json
 import os
+import shutil
+import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -43,63 +46,6 @@ COMPLETE = {
     "license-expression": "MIT",
     "license-file": "LICENSE.txt",
 }
-
-
-class ProxyStub:
-    def set_debug_context(self, dataname, real_class, developmode):
-        filename = TESTDATA_DIR / "xmlrpcdata" / dataname
-        data = {}
-        with open(filename, encoding="UTF-8") as f:
-            exec(f.read(), None, data)
-        self.args = data["args"]
-        self.kw = data["kw"]
-        self._data = data["data"]
-
-        if developmode:
-            self._real = real_class(*self.args, **self.kw)
-        else:
-            self._real = None
-
-    def __call__(self, *args, **kw):
-        assert args == self.args
-        assert kw == self.kw
-        return self
-
-    def _make_proxy(self, name):
-        def _proxy_method(*args, **kw):
-            return self._data[name][args]
-
-        return _proxy_method
-
-    def _make_unknown_proxy(self, name):
-        def _proxy_method(*args, **kw):
-            if self._real is None:
-                raise AttributeError("ProxyStub unkown method " + name)
-            print()
-            print("== ProxyStub unknown method ==")
-            print(name, ":", args, kw)
-            result = getattr(self._real, name)(*args, **kw)
-            print("Result :")
-            print(result)
-            return result
-
-        return _proxy_method
-
-    def __getattr__(self, attr):
-        if attr in ("_data", "_make_proxy", "_make_unknown_proxy"):
-            raise AttributeError("Break infinite recursion chain")
-        if attr in self._data:
-            return self._make_proxy(attr)
-        return self._make_unknown_proxy(attr)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, type, value, traceback):
-        return
-
-
-proxystub = ProxyStub()
 
 
 class RatingsTest(unittest.TestCase):
@@ -203,8 +149,9 @@ class RatingsTest(unittest.TestCase):
                     "Your package does not have keywords data.",
                     "Your package does not have author data.",
                     "Your package does not have author-email data.",
-                    "Your package should have a 'url' field with a link to the project home page, or a "
-                    "'project_urls' field, with a dictionary of links, or both.",
+                    "Your package should include links to the project home page and other resources. "
+                    "Add them to the [project.urls] table in your pyproject.toml, using well-known labels "
+                    "such as Homepage, Source, Documentation, Changelog or Issues.",
                     "You should specify a license for your package with the 'License-Expression' field. See "
                     "https://packaging.python.org/en/latest/specifications/core-metadata/#license-expression "
                     "for more information.",
@@ -239,8 +186,9 @@ class RatingsTest(unittest.TestCase):
                     "Your package does not have keywords data.",
                     "Your package does not have author data.",
                     "Your package does not have author-email data.",
-                    "Your package should have a 'url' field with a link to the project home page, or a "
-                    "'project_urls' field, with a dictionary of links, or both.",
+                    "Your package should include links to the project home page and other resources. "
+                    "Add them to the [project.urls] table in your pyproject.toml, using well-known labels "
+                    "such as Homepage, Source, Documentation, Changelog or Issues.",
                     "You should specify a license for your package with the 'License-Expression' field. See "
                     "https://packaging.python.org/en/latest/specifications/core-metadata/#license-expression "
                     "for more information.",
@@ -269,8 +217,9 @@ class RatingsTest(unittest.TestCase):
                     "Your package does not have keywords data.",
                     "Your package does not have author data.",
                     "Your package does not have author-email data.",
-                    "Your package should have a 'url' field with a link to the project home page, or a "
-                    "'project_urls' field, with a dictionary of links, or both.",
+                    "Your package should include links to the project home page and other resources. "
+                    "Add them to the [project.urls] table in your pyproject.toml, using well-known labels "
+                    "such as Homepage, Source, Documentation, Changelog or Issues.",
                     "You should specify a license for your package with the 'License-Expression' field. See "
                     "https://packaging.python.org/en/latest/specifications/core-metadata/#license-expression "
                     "for more information.",
@@ -493,6 +442,71 @@ class SpecComplianceTest(unittest.TestCase):
         )
 
 
+class BugFixTest(unittest.TestCase):
+    """Regression tests for behavior bugs found in review."""
+
+    maxDiff = None
+
+    def test_valid_rest_ignores_content_type_parameters(self):
+        # A parameterized content type such as "text/markdown; charset=UTF-8"
+        # must not fall through to ReST validation of a non-ReST description.
+        testdata = COMPLETE.copy()
+        testdata["description"] = "# Broken ReST\n\n``This is markdown, not ReST\n" + "x" * 100
+        for content_type in ("text/markdown; charset=UTF-8", "text/plain; charset=UTF-8"):
+            testdata["description-content-type"] = content_type
+            messages = rate(testdata)[1]
+            self.assertFalse(any("not valid ReST" in msg for msg in messages), content_type)
+
+    def test_valid_rest_still_checks_rst_with_parameters(self):
+        testdata = COMPLETE.copy()
+        testdata["description"] = "``broken inline literal\n" + "x" * 100
+        testdata["description-content-type"] = "text/x-rst; charset=UTF-8"
+        messages = rate(testdata)[1]
+        self.assertTrue(any("not valid ReST" in msg for msg in messages))
+
+    def test_bus_factor_zero_owners_fails(self):
+        result = ratings.BusFactor().test({"_owners": []})
+        self.assertIs(result.outcome, False)
+        self.assertEqual(result.weight, 100)
+
+    def test_skip_tests_exact_match_only(self):
+        # Skipping NameFormat must not also skip the Name test through
+        # substring matching when skip_tests is passed as a plain string.
+        testdata = COMPLETE.copy()
+        del testdata["name"]
+        for skip in (["NameFormat"], "NameFormat"):
+            rating, messages = rate(testdata, skip_tests=skip)
+            self.assertEqual(rating, 0, skip)
+            self.assertTrue(any("does not have name data" in msg for msg in messages), skip)
+
+    def test_rate_project_all_tests_skipped_raises_configuration_error(self):
+        testdata = COMPLETE.copy()
+        with self.assertRaises(ratings.ConfigurationError):
+            rate(testdata, skip_tests=pyroma.get_all_tests())
+
+    def test_check_manifest_skips_sdist(self):
+        # check-manifest needs a VCS checkout; an unpacked sdist is not one.
+        result = ratings.CheckManifest().test({"_path": ".", "_sdist": True})
+        self.assertIsNone(result.outcome)
+
+    def test_parse_tests_trailing_separator(self):
+        self.assertEqual(pyroma.parse_tests("Description,"), ["Description"])
+        self.assertEqual(pyroma.parse_tests("Description, Summary;"), ["Description", "Summary"])
+
+    def test_tb2_distribution(self):
+        src = TESTDATA_DIR / "distributions" / "complete-1.0.dev1.tar.bz2"
+        with tempfile.TemporaryDirectory() as tmp:
+            tb2 = Path(tmp) / "complete-1.0.dev1.tb2"
+            shutil.copyfile(src, tb2)
+            data = distributiondata.get_data(tb2)
+        self.assertEqual(data.get("name"), "complete")
+
+    def test_no_config_found_in_empty_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = projectdata.get_data(tmp)
+        self.assertIn("_no_config_found", data)
+
+
 class ReportTest(unittest.TestCase):
     maxDiff = None
 
@@ -532,6 +546,17 @@ class ReportTest(unittest.TestCase):
             "------------------------------",
         )
 
+    def test_format_json_error(self):
+        error = ratings.ConfigurationError("nothing to rate")
+        document = json.loads(report.format_json_error(error, meta={"mode": "directory"}))
+        self.assertEqual(
+            document,
+            {
+                "error": {"type": "ConfigurationError", "message": "nothing to rate"},
+                "_meta": {"mode": "directory"},
+            },
+        )
+
     def test_format_json(self):
         document = json.loads(report.format_json(self._rated(), meta={"mode": "directory"}))
         self.assertEqual(
@@ -556,20 +581,25 @@ class ReportTest(unittest.TestCase):
 class PyPITest(unittest.TestCase):
     maxDiff = None
 
-    @unittest.mock.patch("xmlrpc.client.ServerProxy", proxystub)
+    @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")
     @unittest.mock.patch("pyroma.pypidata._get_project_data")
     @unittest.mock.patch("requests.get")
-    def test_complete(self, requestmock, projectdatamock):
+    def test_complete(self, requestmock, projectdatamock, proxymock):
         datafile = TESTDATA_DIR / "jsondata" / "complete.json"
         with open(datafile, encoding="UTF-8") as file:
             projectdatamock.return_value = json.load(file)
 
         srcfile = TESTDATA_DIR / "distributions" / "complete-1.0.dev1.tar.gz"
         with open(srcfile, "rb") as file:
-            requestmock.return_value = unittest.mock.Mock()
+            requestmock.return_value = unittest.mock.Mock(ok=True)
             requestmock.return_value.content = file.read()
 
-        proxystub.set_debug_context("completedata.py", xmlrpclib.ServerProxy, False)
+        proxymock.return_value.__enter__.return_value.package_roles.return_value = [
+            ["Owner", "someone"],
+            ["Owner", "me"],
+            ["Owner", "other"],
+        ]
+
         data = pypidata.get_data("complete")
         rating = rate(data)
 
@@ -616,6 +646,77 @@ class PyPITest(unittest.TestCase):
         self.assertEqual(data["_owners"], ["dev1"])
         proxymock.assert_called_once_with("https://packages.example.com/pypi")
 
+    @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")
+    @unittest.mock.patch("pyroma.pypidata._get_project_data")
+    def test_package_roles_fault_and_oserror_warn_only(self, projectdatamock, proxymock):
+        projectdatamock.return_value = {
+            "info": {"name": "example", "version": "1.0"},
+            "releases": {"1.0": []},
+        }
+        for error in (xmlrpclib.Fault(1, "package_roles is not supported"), ConnectionError("connection refused")):
+            proxymock.return_value.__enter__.return_value.package_roles.side_effect = error
+            with self.assertLogs("pyroma.pypidata", level="WARNING"):
+                data = pypidata.get_data("example")
+            self.assertNotIn("_owners", data)
+
+    @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")
+    @unittest.mock.patch("pyroma.pypidata._get_project_data")
+    def test_pypi_home_page_not_clobbered(self, projectdatamock, proxymock):
+        # The PyPI JSON API synthesizes project_url/package_url/release_url
+        # (they always point at pypi.org); they must not end up in the
+        # metadata, and in particular must not overwrite home_page.
+        projectdatamock.return_value = {
+            "info": {
+                "name": "example",
+                "version": "1.0",
+                "home_page": "https://example.com/home",
+                "project_url": "https://pypi.org/project/example/",
+                "package_url": "https://pypi.org/project/example/",
+                "release_url": "https://pypi.org/project/example/1.0/",
+                "docs_url": None,
+                "bugtrack_url": None,
+                "project_urls": {"Homepage": "https://example.com/home"},
+            },
+            "releases": {"1.0": []},
+        }
+        proxymock.return_value.__enter__.return_value.package_roles.return_value = []
+
+        data = pypidata.get_data("example")
+
+        self.assertEqual(data["home-page"], "https://example.com/home")
+        self.assertEqual(data["project-url"], {"Homepage": "https://example.com/home"})
+        for key in ("package-url", "release-url", "docs-url", "bugtrack-url"):
+            self.assertNotIn(key, data)
+
+    @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")
+    @unittest.mock.patch("pyroma.pypidata.requests.get")
+    @unittest.mock.patch("pyroma.pypidata._get_project_data")
+    def test_sdist_download_http_failure_raises_value_error(self, projectdatamock, requestmock, proxymock):
+        projectdatamock.return_value = {
+            "info": {"name": "example", "version": "1.0"},
+            "releases": {"1.0": [{"packagetype": "sdist", "url": "https://files.example.com/example-1.0.tar.gz"}]},
+        }
+        proxymock.return_value.__enter__.return_value.package_roles.return_value = []
+        requestmock.return_value = unittest.mock.Mock(ok=False, status_code=404, reason="Not Found")
+
+        with self.assertRaisesRegex(ValueError, "404"):
+            pypidata.get_data("example")
+
+    @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")
+    @unittest.mock.patch("pyroma.pypidata._get_project_data")
+    def test_missing_releases_key_skips_sdist_checks(self, projectdatamock, proxymock):
+        # Custom indexes may omit the (PyPI-deprecated) releases key, or
+        # list different versions than the info dict claims.
+        proxymock.return_value.__enter__.return_value.package_roles.return_value = []
+        for extra in ({}, {"releases": {}}, {"releases": {"0.9": []}}):
+            project_data = {"info": {"name": "example", "version": "1.0"}}
+            project_data.update(extra)
+            projectdatamock.return_value = project_data
+
+            data = pypidata.get_data("example")
+
+            self.assertNotIn("_has_sdist", data, extra)
+
     @unittest.mock.patch("pyroma.ratings.rate_project")
     @unittest.mock.patch("pyroma.pypidata.get_data")
     def test_run_forwards_custom_index_url(self, datamock, ratemock):
@@ -628,6 +729,52 @@ class PyPITest(unittest.TestCase):
 
         self.assertEqual(result, 10)
         datamock.assert_called_once_with("internalpkg", index_url="https://packages.example.com")
+
+
+class MainTest(unittest.TestCase):
+    """Tests for the command line entry point's error handling."""
+
+    def _run_main(self, argv):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            unittest.mock.patch("sys.argv", ["pyroma", *argv]),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as caught,
+        ):
+            pyroma.main()
+        return caught.exception.code, stdout.getvalue(), stderr.getvalue()
+
+    @unittest.mock.patch("pyroma.pypidata.get_data")
+    def test_main_data_error_exits_3(self, datamock):
+        datamock.side_effect = ValueError("Did not find 'nosuch' on PyPI. Did you misspell it?")
+
+        code, stdout, stderr = self._run_main(["-p", "nosuch"])
+
+        self.assertEqual(code, 3)
+        self.assertIn("Did not find 'nosuch'", stderr)
+        self.assertNotIn("Traceback", stderr)
+
+    @unittest.mock.patch("pyroma.pypidata.get_data")
+    def test_main_json_error_document(self, datamock):
+        datamock.side_effect = ValueError("Did not find 'nosuch' on PyPI. Did you misspell it?")
+
+        code, stdout, stderr = self._run_main(["--format", "json", "-p", "nosuch"])
+
+        self.assertEqual(code, 3)
+        document = json.loads(stdout)
+        self.assertEqual(document["error"]["type"], "ValueError")
+        self.assertIn("Did not find 'nosuch'", document["error"]["message"])
+        self.assertEqual(document["_meta"]["mode"], "pypi")
+
+    def test_main_all_tests_skipped_exits_3(self):
+        skip = ",".join(pyroma.get_all_tests())
+
+        code, stdout, stderr = self._run_main(["-d", "--skip-tests", skip, str(TESTDATA_DIR / "complete")])
+
+        self.assertEqual(code, 3)
+        self.assertIn("no rating can be calculated", stderr)
 
 
 class ProjectDataTest(unittest.TestCase):
@@ -651,4 +798,18 @@ class DistroDataTest(unittest.TestCase):
         for filename in os.listdir(directory):
             if filename.startswith("complete"):
                 data = distributiondata.get_data(directory / filename)
+                self.assertTrue(data.pop("_sdist"), filename)
+                self.assertTrue(os.path.isdir(data.pop("_path")), filename)
                 self.assertEqual(data, COMPLETE)
+
+    def test_distribution_data_keeps_unpacked_tree(self):
+        # The unpacked tree must stay around after get_data returns, so
+        # the pyproject.toml rating tests can inspect it.
+        src = TESTDATA_DIR / "distributions" / "complete-1.0.dev1.tar.gz"
+
+        data = distributiondata.get_data(src)
+
+        self.assertTrue(data.get("_sdist"))
+        path = data["_path"]
+        self.assertTrue(os.path.isdir(path))
+        self.assertTrue(os.path.exists(os.path.join(path, "pyproject.toml")))

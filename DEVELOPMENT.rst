@@ -1,35 +1,42 @@
 Testing
 =======
 
-Run tests:
+Run the test suite with pytest:
 
-    $ python -m unittest pyroma.tests
+    $ python -m pytest
 
-Some notes on developing
-========================
+or across all supported Python versions:
 
-*Note: Since pyroma no longer runs tests, this is probably no longer true.*
+    $ tox
 
-For each Python version supported by Pyroma you need to make sure the
-"complete" package that is used for testing also supports that version of
-Python. The complete data supports both Python 2 and Python 3 and depends on
-the "six" package. As such it's highly unlikely you'll have to change any
-code. However, you have to mark the package as supporting the Python
-version.
+Linting and type checking
+=========================
 
-This is most easily done by searching the code for "Python :: 3.2" and
-adding the Python version that you want to support to the lists of
-Python versions that appear in several places in this package.
+Ruff, ty and pyrefly run through uv, which reads the pinned tool
+versions from the ``lint`` and ``typecheck`` dependency groups in
+``pyproject.toml`` — the same pins that CI and pre-commit use, so
+versions never drift between environments:
 
-Otherwise Pyroma will not run the complete-packages tests with your Python
-version, and you'll get errors when running Pyroma's test-suite.
+    $ uv run --only-group lint ruff check --force-exclude .
+    $ uv run --only-group lint ruff format --force-exclude .
+    $ uv run --extra test --group typecheck ty check
+    $ uv run --extra test --group typecheck pyrefly check
 
-You also have to make new test-distributions with the updated data.
-You do it this way:
+Or simply run all the pre-commit hooks:
 
-    $ cd pyroma/testdata/complete
-    $ python setup.py sdist --formats=bztar,gztar,tar,zip
-    $ cp dist/complete-1.0.dev1.* ../distributions/
+    $ pre-commit run --all-files
+
+Test data
+=========
+
+The "complete" package in ``pyroma/testdata`` is designed to score the
+maximum rating. If you change it, regenerate the distribution files the
+tests unpack:
+
+    $ make generate
+
+which rebuilds ``pyroma/testdata/distributions/complete-1.0.dev1.*``
+from the ``pyroma/testdata/complete`` directory.
 
 Future ideas
 ------------

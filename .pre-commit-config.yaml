@@ -9,11 +9,22 @@ repos:
       - id: end-of-file-fixer
       - id: trailing-whitespace
 
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.0
+  # Ruff runs through uv so the pinned version in pyproject.toml's
+  # [dependency-groups] is the single source of truth, shared with CI.
+  - repo: local
     hooks:
       - id: ruff-check
+        name: ruff check
+        entry: uv run --only-group lint ruff check --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
       - id: ruff-format
+        name: ruff format
+        entry: uv run --only-group lint ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
 
   - repo: https://github.com/regebro/pyroma
     rev: '5.0b2'

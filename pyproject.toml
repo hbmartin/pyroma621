@@ -14,7 +14,6 @@ classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -26,20 +25,20 @@ classifiers = [
 keywords = ["pypi", "quality", "testing"]
 license = "MIT"
 license-files = ["LICENSE.txt"]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "build>=0.7.0",
     "docutils>=0.22",
     "packaging>=24.2",
     "pygments",
     "requests",
-    "tomli>=1.2.3; python_version < '3.11'",
     "trove-classifiers>=2022.6.26",
     "validate-pyproject>=0.16",
 ]
 
 [project.optional-dependencies]
 test = [
+    "check-manifest",
     "pytest",
     "pytest-cov",
     "setuptools>=77",
@@ -48,6 +47,10 @@ test = [
     "uv_build>=0.8.0,<1.0",
     "tox",
 ]
+
+[dependency-groups]
+lint = ["ruff==0.15.22"]
+typecheck = ["ty==0.0.61", "pyrefly==1.1.1", "types-docutils"]
 
 [project.urls]
 Homepage = "https://github.com/regebro/pyroma"
@@ -78,15 +81,18 @@ ignore = [".pre-commit-hooks.yaml"]
 [tool.zest-releaser]
 create-wheel = true
 
-[tool.mypy]
-files = ["pyroma"]
-exclude = ["pyroma/testdata/", "pyroma/tests\\.py"]
-check_untyped_defs = true
-warn_unused_ignores = true
+[tool.ty.src]
+include = ["pyroma"]
+exclude = ["pyroma/testdata", "pyroma/tests.py"]
 
-[[tool.mypy.overrides]]
-module = ["trove_classifiers", "check_manifest", "zest.releaser.*"]
-ignore_missing_imports = true
+[tool.pyrefly]
+project-includes = ["pyroma"]
+project-excludes = ["pyroma/testdata/**", "pyroma/tests.py"]
+
+[tool.pyrefly.errors]
+# The str() calls on metadata values are deliberate runtime defenses:
+# the Metadata TypedDict is aspirational for JSON-sourced data.
+unnecessary-type-conversion = false
 
 [tool.ruff]
 line-length = 120

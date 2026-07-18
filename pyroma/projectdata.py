@@ -1,18 +1,13 @@
 # Extracts information from a project
 import os
-import re
 from typing import Any, Union, cast
 
 import build.util
 
 import build
-from pyroma.metadata import Metadata
+from pyroma.metadata import Metadata, normalize
 
 Pathish = Union[str, "os.PathLike[str]"]
-
-
-def normalize(name: str) -> str:
-    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 def wheel_metadata(path: Pathish, isolated: "bool | None" = None) -> Any:
@@ -80,22 +75,18 @@ def get_data(path: Pathish) -> Metadata:
 
 
 def _get_data(path: Pathish) -> Metadata:
-    try:
-        return get_build_data(path)
-    except build.BuildException as e:
-        if "no pyproject.toml or setup.py" in e.args[0]:
-            # It couldn't build the package, because there is no setup.py or
-            # pyproject.toml. Let's see if there is a setup.cfg:
-            if os.path.exists(os.path.join(path, "setup.cfg")):
-                # There is only a setup.cfg. Pyroma accepted this earlier,
-                # because it worked, and at some point the idea was that
-                # setup.cfg should replace setup.py. But that never happened,
-                # and instead pyproject.toml arrived. No standard tool can
-                # build such a project, so there is no metadata to extract;
-                # we just flag the broken build system.
-                return {"_missing_build_system": True}
-            # There is no setup.cfg either, so this isn't a python package at all
-            return {"_no_config_found": True}
-        else:
-            # There's something else wrong
-            raise e
+    listing = os.listdir(path)
+    if "pyproject.toml" not in listing and "setup.py" not in listing:
+        # No standard tool can build the package without a pyproject.toml
+        # or a setup.py. Let's see if there is a setup.cfg:
+        if "setup.cfg" in listing:
+            # There is only a setup.cfg. Pyroma accepted this earlier,
+            # because it worked, and at some point the idea was that
+            # setup.cfg should replace setup.py. But that never happened,
+            # and instead pyproject.toml arrived. No standard tool can
+            # build such a project, so there is no metadata to extract;
+            # we just flag the broken build system.
+            return {"_missing_build_system": True}
+        # There is no setup.cfg either, so this isn't a python package at all
+        return {"_no_config_found": True}
+    return get_build_data(path)

@@ -33,6 +33,11 @@ If you use an internal PyPI-compatible package index, specify it with
 Giving it a name on CheeseShop is the most extensive test, as it will
 test for several things isn't otherwise tested.
 
+Note that pyroma extracts metadata by asking the project's build
+backend for it, which — like installing the package with pip — can
+execute code shipped with the package. Be as careful about running
+pyroma on an untrusted package as you would be about installing it.
+
 In all cases the output is similar::
 
     ------------------------------
@@ -56,6 +61,11 @@ Exit codes
 * ``2``: The package rated below the ``--min`` rating.
 * ``1``: Used by the ``zest.releaser`` integration when you choose to abort
   the release after a low rating.
+* ``3``: An error prevented rating the package: it could not be found or
+  downloaded, or the configuration (for example a ``--skip-tests`` value
+  that skips every rated test) made rating impossible. With
+  ``--format json`` the error is reported as a JSON document with an
+  ``error`` key.
 
 
 Tests
@@ -139,7 +149,7 @@ commit your work by adding the following to your ``.pre-commit-config.yaml``:
 
     repos:
     -   repo: https://github.com/regebro/pyroma
-        rev: "3.2"
+        rev: "5.0b2"
         hooks:
         -   id: pyroma
 

@@ -1,6 +1,5 @@
 import logging
 import os
-import re
 import tempfile
 import xmlrpc.client
 from typing import Any, cast
@@ -8,7 +7,7 @@ from typing import Any, cast
 import requests
 
 from pyroma import distributiondata
-from pyroma.metadata import Metadata
+from pyroma.metadata import Metadata, normalize
 
 # Genuine diagnostics go to a named logger; program output is handled by
 # pyroma.report.
@@ -18,17 +17,23 @@ logger = logging.getLogger(__name__)
 INFO_MAP = {
     "classifiers": "classifier",
     "project-urls": "project-url",
-    "project-url": "home-page",
+}
+
+# Keys (normalized) that the PyPI JSON API synthesizes itself — they always
+# point at the index, not at anything the project declared, so folding them
+# into the metadata would fabricate fields the package does not have.
+SYNTHESIZED_INFO_KEYS = {
+    "project-url",
+    "package-url",
+    "release-url",
+    "docs-url",
+    "bugtrack-url",
 }
 
 DEFAULT_PYPI_BASE_API_URL = "https://pypi.org/pypi"
 
 # Seconds before a network request is aborted.
 REQUEST_TIMEOUT = 30
-
-
-def normalize(name: str) -> str:
-    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 def _get_base_api_url(index_url: "str | None" = None) -> str:
@@ -69,14 +74,12 @@ def _get_project_data(project: str, index_url: "str | None" = None) -> "dict[str
 def get_data(project: str, index_url: "str | None" = None) -> Metadata:
     # Pick the latest release.
     project_data = _get_project_data(project, index_url=index_url)
-    # The `releases` key is deprecated on PyPI, but there is no JSON API
-    # replacement for listing the files of the latest release, so we keep
-    # using it while it lasts.
-    releases = project_data["releases"]
     data: dict[str, Any] = {}
 
     for key, value in project_data["info"].items():
         key = normalize(key)
+        if key in SYNTHESIZED_INFO_KEYS:
+            continue
         if key in INFO_MAP:
             key = INFO_MAP[key]
         data[key] = value
@@ -90,38 +93,41 @@ def get_data(project: str, index_url: "str | None" = None) -> Metadata:
         with xmlrpc.client.ServerProxy(_get_base_api_url(index_url)) as xmlrpc_client:
             roles = cast("list[tuple[str, str]]", xmlrpc_client.package_roles(project))
             data["_owners"] = [user for (role, user) in roles if role == "Owner"]
-    except xmlrpc.client.ProtocolError:
+    except (xmlrpc.client.Error, OSError):
         logger.warning(
             "Could not get package roles from XMLRPC API. Not all custom indexes "
             "support this, and some may have it disabled. Skipping role checks."
         )
 
-    # Get download_urls:
-    urls = releases[release]
-    data["_pypi_downloads"] = bool(urls)
+    # The `releases` key is deprecated on PyPI, but there is no JSON API
+    # replacement for listing the files of the latest release, so we keep
+    # using it while it lasts. Custom indexes may not provide it at all;
+    # without it we cannot know whether an sdist was uploaded.
+    urls = project_data.get("releases", {}).get(release)
 
-    # If there is a source download, download it, and get that data.
-    # This is done mostly to do the imports check.
-    data["_source_download"] = False
-    data["_has_sdist"] = False
+    if urls is not None:
+        # If there is a source download, download it, and get that data.
+        data["_has_sdist"] = False
 
-    for download in urls:
-        if download["packagetype"] == "sdist":
-            # Found a source distribution. Download and analyze it.
-            data["_has_sdist"] = True
-            filename = download["url"].split("/")[-1]
-            logger.debug(f"Downloading {filename} to verify distribution")
-            with tempfile.TemporaryDirectory(prefix="pyroma-") as tempdir:
-                tmp = os.path.join(tempdir, filename)
-                with open(tmp, "wb") as outfile:
-                    outfile.write(_http_get(download["url"]).content)
-                ddata = distributiondata.get_data(tmp)
+        for download in urls:
+            if download["packagetype"] == "sdist":
+                # Found a source distribution. Download and analyze it.
+                data["_has_sdist"] = True
+                filename = download["url"].split("/")[-1]
+                logger.debug(f"Downloading {filename} to verify distribution")
+                response = _http_get(download["url"])
+                if not response.ok:
+                    raise ValueError(f"Could not download {download['url']}: {response.status_code} {response.reason}")
+                with tempfile.TemporaryDirectory(prefix="pyroma-") as tempdir:
+                    tmp = os.path.join(tempdir, filename)
+                    with open(tmp, "wb") as outfile:
+                        outfile.write(response.content)
+                    ddata = distributiondata.get_data(tmp)
 
-            # Combine them, with the PyPI data winning:
-            ddata_dict = cast("dict[str, Any]", ddata)
-            ddata_dict.update(data)
-            data = ddata_dict
-            data["_source_download"] = True
-            break
+                # Combine them, with the PyPI data winning:
+                ddata_dict = cast("dict[str, Any]", ddata)
+                ddata_dict.update(data)
+                data = ddata_dict
+                break
 
     return cast(Metadata, data)
