@@ -65,7 +65,7 @@ dev = [
     "ty>=0.0.61",
 ]
 lint = ["ruff==0.15.22"]
-quality = ["deptry>=0.25.1", "lizard>=1.23.0"]
+quality = ["deptry>=0.25.1", "lizard>=1.23.0", "semgrep==1.170.0"]
 typecheck = ["pyrefly>=1.1.1", "ty>=0.0.61", "types-docutils"]
 
 [tool.uv.build-backend]
@@ -89,7 +89,7 @@ pyroma = "pyroma:zester"
 testpaths = ["pyroma/tests.py"]
 
 [tool.check-manifest]
-ignore = [".pre-commit-config.yaml", ".pre-commit-hooks.yaml"]
+ignore = [".pre-commit-config.yaml", ".pre-commit-hooks.yaml", ".semgrep.yml"]
 
 [tool.deptry]
 extend_exclude = ["pyroma/testdata", "pyroma/tests.py"]

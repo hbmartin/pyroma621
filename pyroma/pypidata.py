@@ -92,12 +92,12 @@ def _get_base_api_url(index_url: "str | None" = None) -> str:
 def _http_get(url: str) -> requests.Response:
     try:
         return requests.get(url, timeout=REQUEST_TIMEOUT)
-    except requests.exceptions.Timeout as e:
-        message = f"Timed out after {REQUEST_TIMEOUT} seconds while fetching {url}."
-        raise ValueError(message) from e
-    except requests.exceptions.ConnectionError as e:
-        message = f"Could not connect to {url}: {e}"
-        raise ValueError(message) from e
+    except requests.exceptions.Timeout:
+        message = f"Timed out after {REQUEST_TIMEOUT} seconds while fetching package data."
+        raise ValueError(message) from None
+    except requests.exceptions.ConnectionError:
+        message = "Could not connect to the package index."
+        raise ValueError(message) from None
 
 
 def _get_project_data(project: str, index_url: "str | None" = None) -> "dict[str, Any]":
@@ -108,7 +108,7 @@ def _get_project_data(project: str, index_url: "str | None" = None) -> "dict[str
         if base_api_url == DEFAULT_PYPI_BASE_API_URL:
             message = f"Did not find '{project}' on PyPI. Did you misspell it?"
             raise ValueError(message)
-        message = f"Did not find '{project}' on package index {base_api_url}."
+        message = f"Did not find '{project}' on the configured package index."
         raise ValueError(message)
     if not response.ok:
         message = f"Unknown http error: {response.status_code} {response.reason}"
@@ -123,7 +123,18 @@ def get_data(project: str, index_url: "str | None" = None) -> Metadata:
     project_data = _get_project_data(project, index_url=index_url)
     data: dict[str, Any] = {}
 
-    for raw_key, value in project_data["info"].items():
+    if not isinstance(project_data, dict):
+        message = f"Invalid metadata format received from package index for '{project}'."
+        # Invalid external JSON is a value error, not a caller type error.
+        raise ValueError(message)  # noqa: TRY004
+
+    info = project_data.get("info")
+    if not isinstance(info, dict):
+        message = f"Invalid metadata format received from package index for '{project}'."
+        # Invalid external JSON is a value error, not a caller type error.
+        raise ValueError(message)  # noqa: TRY004
+
+    for raw_key, value in info.items():
         key = normalize(raw_key)
         if key in SYNTHESIZED_INFO_KEYS:
             continue
@@ -165,7 +176,7 @@ def get_data(project: str, index_url: "str | None" = None) -> Metadata:
                 logger.debug("Downloading %s to verify distribution", filename)
                 response = _http_get(download["url"])
                 if not response.ok:
-                    message = f"Could not download {download['url']}: {response.status_code} {response.reason}"
+                    message = f"Could not download source distribution: {response.status_code} {response.reason}"
                     raise ValueError(message)
                 with tempfile.TemporaryDirectory(prefix="pyroma-") as tempdir:
                     tmp = Path(tempdir) / filename

@@ -1,0 +1,18 @@
+rules:
+  - id: pyroma.no-url-in-user-facing-exception
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Do not interpolate URL-bearing values into exceptions because credentials
+      and signed query parameters can leak into CLI output or CI logs.
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern: $MESSAGE = f"...{$URL}..."
+              - metavariable-regex:
+                  metavariable: $MESSAGE
+                  regex: (?i).*(message|error|detail).*
+          - pattern: raise $EXCEPTION(f"...{$URL}...")
+      - metavariable-regex:
+          metavariable: $URL
+          regex: (?i).*(url|uri).*

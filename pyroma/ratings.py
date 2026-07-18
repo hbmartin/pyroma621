@@ -124,7 +124,8 @@ class FieldTest(BaseTest):
         """Check that the configured metadata field is present and truthy."""
         if bool(cast("dict[str, Any]", data).get(self.field)):
             return self._passed()
-        return self._failed(f"Your package does not have {self.field} data" + ((self.fatal and "!") or "."))
+        suffix = "!" if self.fatal else "."
+        return self._failed(f"Your package does not have {self.field} data{suffix}")
 
 
 class Name(FieldTest):

@@ -4,6 +4,10 @@ on:
   release:
     types: [created]
 
+concurrency:
+  group: publish-${{ github.event.release.id }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -23,10 +27,8 @@ jobs:
           python-version: "3.12"
       - name: Set up uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-      - name: Create uv environment
-        run: uv venv
-      - name: Install dependencies
-        run: uv sync --all-groups
+        with:
+          enable-cache: false
       - name: Build release distributions
         run: uv build
       - name: Upload release distributions
@@ -44,9 +46,8 @@ jobs:
       name: pypi
       url: https://pypi.org/p/pyroma621
     permissions:
-      actions: read
-      contents: read
-      id-token: write
+      actions: read # Required to download the build artifact.
+      id-token: write # Required for PyPI Trusted Publishing.
 
     steps:
       - name: Download release distributions
