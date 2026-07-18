@@ -56,6 +56,8 @@ def parse_tests(arg: str) -> "list[str] | None":
         for t in names:
             skips.extend(t.split(sep))
         names = skips
+    # Trailing or doubled separators leave empty tokens behind.
+    names = [name for name in names if name]
 
     tests = get_all_tests()
     for skip in names:
@@ -79,7 +81,8 @@ def skip_tests(arg: str) -> "list[str]":
 
 def main() -> None:
     parser = ArgumentParser()
-    parser.color = True  # type: ignore[attr-defined]
+    # argparse only grew the color attribute in Python 3.14.
+    parser.color = True  # type: ignore
     parser.add_argument(
         "package",
         help="A python package, can be a directory, a distribution file or a PyPI package name.",
@@ -163,10 +166,26 @@ def main() -> None:
         else:
             mode = "pypi"
 
-    rating = run(mode, args.package, args.quiet, args.skip_tests, args.index_url, args.output_format)
+    try:
+        rating = run(mode, args.package, args.quiet, args.skip_tests, args.index_url, args.output_format)
+    except (ratings.ConfigurationError, ValueError) as e:
+        if args.output_format == "json":
+            print(report.format_json_error(e, _json_meta(mode, args.package)))
+        else:
+            print(f"Error: {e}", file=sys.stderr)
+        sys.exit(3)
     if rating < args.min:
         sys.exit(2)
     sys.exit(0)
+
+
+def _json_meta(mode: str, argument: str) -> "dict[str, str]":
+    meta = {"package": argument, "mode": mode}
+    try:
+        meta["pyroma"] = package_version("pyroma")
+    except PackageNotFoundError:
+        pass
+    return meta
 
 
 def _get_data(mode: str, argument: str, index_url: "str | None" = None) -> metadata_types.Metadata:
@@ -201,12 +220,7 @@ def run(
     rated = ratings.rate_project(data, skip_tests)
 
     if output_format == "json":
-        meta = {"package": argument, "mode": mode}
-        try:
-            meta["pyroma"] = package_version("pyroma")
-        except PackageNotFoundError:
-            pass
-        print(report.format_json(rated, meta))
+        print(report.format_json(rated, _json_meta(mode, argument)))
     elif quiet:
         print(rated.rating)
     else:

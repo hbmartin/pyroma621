@@ -8,7 +8,14 @@ fields.
 """
 
 import os
+import re
 from typing import Any, TypedDict, Union
+
+
+def normalize(name: str) -> str:
+    """Normalize a field or project name as the packaging specifications do."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
 
 # total=False: every key is optional; which ones are present depends on the
 # package being rated and on the data source.
@@ -45,14 +52,13 @@ Metadata = TypedDict(
         "platform": str,
         # Pyroma-internal sentinels.
         "_path": Union[str, "os.PathLike[str]"],
+        "_sdist": bool,
         "_owners": "list[str]",
         "_wheel_build_failed": bool,
         "_missing_pyproject_toml": bool,
         "_missing_build_system": bool,
         "_no_config_found": bool,
         "_has_sdist": bool,
-        "_source_download": bool,
-        "_pypi_downloads": bool,
     },
     total=False,
 )

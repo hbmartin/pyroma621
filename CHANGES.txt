@@ -47,11 +47,47 @@ Changelog
 
 - Exit codes are now documented in the README.
 
+- Bug fixes found by review: descriptions with a parameterized
+  ``Description-Content-Type`` (for example ``text/markdown;
+  charset=UTF-8``) are no longer validated as ReStructuredText; the
+  BusFactor test no longer passes for packages with zero owners;
+  ``--skip-tests`` names are matched exactly instead of by substring,
+  and trailing separators no longer reject the whole list; ``.tb2``
+  archives are recognized; tar archives are extracted with the "data"
+  filter, which also protects against symlink attacks.
+
+- More robust index handling: XML-RPC faults and network errors while
+  fetching package roles are now warnings instead of crashes, a failed
+  sdist download raises a clear error, and index data without a
+  ``releases`` listing no longer crashes. Keys the PyPI JSON API
+  synthesizes itself (``project_url``, ``package_url``, ``release_url``
+  and friends) are no longer folded into the metadata, so they cannot
+  clobber the real ``Home-page`` or hide a missing project URL.
+
+- Rating a distribution file or PyPI package now keeps the unpacked
+  sdist around for the duration of the run, so the pyproject.toml
+  validation tests run in those modes too. The check-manifest test
+  still requires a VCS checkout and is skipped for sdists.
+
+- A configuration that skips every rated test now raises a
+  ``ConfigurationError``. The command line reports errors (bad
+  configuration, package not found, network problems) cleanly on
+  stderr — or as a JSON error document with ``--format json`` — and
+  exits with the new exit code 3.
+
+- Python 3.11 or later is now required; the ``tomli`` fallback
+  dependency is gone.
+
+- Ruff is pinned in one place (the ``lint`` dependency group) and run
+  through uv both in CI and in pre-commit. mypy has been replaced by
+  the ty and pyrefly type checkers, run the same way through the
+  ``typecheck`` dependency group.
+
 
 5.1b2 (2026-06-14)
 ------------------
 
-- Added depracation warnings for deprecated metadata.
+- Added deprecation warnings for deprecated metadata.
 
 
 5.1b1 (2026-06-14)

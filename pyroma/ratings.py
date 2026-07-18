@@ -18,13 +18,9 @@ import io
 import os
 import re
 import string
+import tomllib
 from dataclasses import dataclass
 from typing import Any, cast
-
-try:
-    import tomllib
-except ImportError:  # Python < 3.11
-    import tomli as tomllib  # type: ignore[import-not-found, no-redef]
 
 from docutils.core import publish_parts
 from docutils.utils import SystemMessage
@@ -52,6 +48,10 @@ LEVELS = [
     "Cottage Cheese",
     "Your cheese is so fresh most people think it's a cream: Mascarpone",
 ]
+
+
+class ConfigurationError(Exception):
+    """Raised when pyroma is configured so that no rating can be calculated."""
 
 
 @dataclass(frozen=True)
@@ -418,9 +418,9 @@ class Url(BaseTest):
 
         if not urls and not has_homepage:
             return self._failed(
-                "Your package should have a 'url' field with a link to the "
-                "project home page, or a 'project_urls' field, with a "
-                "dictionary of links, or both."
+                "Your package should include links to the project home page and other resources. "
+                "Add them to the [project.urls] table in your pyproject.toml, using well-known labels "
+                "such as Homepage, Source, Documentation, Changelog or Issues."
             )
 
         too_long = [label for label, _ in urls if len(label) > 32]
@@ -703,7 +703,10 @@ class ValidREST(BaseTest):
     weight = 50
 
     def test(self, data: Metadata) -> TestResult:
-        content_type = data.get("description-content-type", None)
+        # Only the media type matters here; parameters such as charset are
+        # validated by DescriptionContentType.
+        raw = data.get("description-content-type") or ""
+        content_type = str(raw).split(";")[0].strip().lower()
         if content_type in ("text/plain", "text/markdown"):
             # These can't fail. Markdown will just assume everything
             # it doesn't understand is plain text.
@@ -732,15 +735,16 @@ class BusFactor(BaseTest):
         if "_owners" not in data:
             return self._skipped()
 
+        owners = len(data.get("_owners", []))
+        if owners >= 3:
+            # Three or more, that's good.
+            return self._passed(weight=100)
+
         message = "You should have three or more owners of the project on PyPI."
-        if len(data.get("_owners", [])) == 1:
-            return self._failed(message, weight=100)
-
-        if len(data.get("_owners", [])) == 2:
+        if owners == 2:
             return self._failed(message, weight=50)
-
-        # Three or more, that's good.
-        return self._passed(weight=100)
+        # One owner, or none at all.
+        return self._failed(message, weight=100)
 
 
 class MissingBuildSystem(BaseTest):
@@ -859,13 +863,15 @@ class DeprecatedMetadataFields(BaseTest):
         return self._passed()
 
 
-BUILD_SYSTEM_TESTS = [MissingBuildSystem(), MissingPyProjectToml(), PyprojectTomlValid(), PyProjectProjectTable()]
-
-ALL_TESTS = [
+BUILD_SYSTEM_TESTS: "list[BaseTest]" = [
     MissingBuildSystem(),
     MissingPyProjectToml(),
     PyprojectTomlValid(),
     PyProjectProjectTable(),
+]
+
+ALL_TESTS: "list[BaseTest]" = [
+    *BUILD_SYSTEM_TESTS,
     Name(),
     NameFormat(),
     MetadataVersion(),
@@ -899,6 +905,11 @@ try:
     class CheckManifest(BaseTest):
         def test(self, data: Metadata) -> TestResult:
             if "_path" not in data:
+                return self._skipped()
+
+            if "_sdist" in data:
+                # An unpacked sdist is not the VCS checkout that
+                # check-manifest needs to compare against.
                 return self._skipped()
 
             # A quiet UI, so check-manifest doesn't write to stdout and
@@ -970,6 +981,10 @@ def rate_project(data: Metadata, skip_tests: "list[str] | str | None" = None) ->
 
     if skip_tests is None:
         skip_tests = []
+    elif isinstance(skip_tests, str):
+        # A single test name; a plain `in` check against the string would
+        # match substrings (e.g. "Name" in "NameFormat").
+        skip_tests = [skip_tests]
 
     for test in test_list:
         test_name = test.__class__.__name__
@@ -991,6 +1006,10 @@ def rate_project(data: Metadata, skip_tests: "list[str] | str | None" = None) ->
         # A fatal test failed. That means we give a 0 rating:
         rating = 0
     else:
+        if good + bad == 0:
+            raise ConfigurationError(
+                "The configuration skips all tests that contribute to the rating, so no rating can be calculated."
+            )
         # Multiply good by 9, and add 1 to get a rating between
         # 1: All non-fatal tests failed.
         # 10: All tests succeeded.

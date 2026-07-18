@@ -15,7 +15,7 @@ _DIVIDER = "-" * 30
 
 def format_text(rated: RatedProject) -> str:
     """Format the rating result the way pyroma traditionally prints it."""
-    lines = [_DIVIDER]
+    lines: list[str] = [_DIVIDER]
     for problem in rated.problems:
         lines.append(problem.message)
     if rated.problems:
@@ -33,6 +33,19 @@ def format_json(rated: RatedProject, meta: dict[str, str] | None = None) -> str:
         "rating": rated.rating,
         "level": rated.level,
         "problems": [dataclasses.asdict(problem) for problem in rated.problems],
+        "_meta": meta or {},
+    }
+    return json.dumps(document, indent=2)
+
+
+def format_json_error(error: Exception, meta: dict[str, str] | None = None) -> str:
+    """Format a fatal error as a machine-readable JSON document.
+
+    The document has an "error" key instead of a "rating" key, so consumers
+    can tell the two document kinds apart.
+    """
+    document = {
+        "error": {"type": type(error).__name__, "message": str(error)},
         "_meta": meta or {},
     }
     return json.dumps(document, indent=2)
