@@ -1,16 +1,25 @@
-import os
+"""Rate Python packages for packaging best practices."""
+
 import sys
 from argparse import ArgumentParser, ArgumentTypeError
+from contextlib import suppress
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 from pyroma import distributiondata, projectdata, pypidata, ratings, report
 from pyroma import metadata as metadata_types
 
+_MIN_RATING = 1
+_MAX_RATING = 10
+_RELEASE_MIN_RATING = 8
+
 
 def zester(data: "dict[str, Any]") -> None:
-    main_files = set(os.listdir(data["workingdir"]))
+    """Run Pyroma from the optional zest.releaser prerelease hook."""
+    working_directory = Path(data["workingdir"])
+    main_files = {entry.name for entry in working_directory.iterdir()}
     config_files = {"setup.py", "setup.cfg", "pyproject.toml"}
 
     # If there are no standard Python config files in the main files
@@ -18,34 +27,41 @@ def zester(data: "dict[str, Any]") -> None:
     if not config_files & main_files:
         return
 
-    from zest.releaser.utils import ask
+    # zest.releaser is an optional integration imported only for its hook.
+    from zest.releaser.utils import ask  # noqa: PLC0415
 
     if ask("Run pyroma on the package before tagging?"):
-        rating = run("directory", os.path.abspath(data["workingdir"]), skip_tests="CheckManifest")
-        if rating < 8:
-            if not ask("Continue?"):
-                sys.exit(1)
+        rating = run("directory", str(working_directory.resolve()), skip_tests="CheckManifest")
+        if rating < _RELEASE_MIN_RATING and not ask("Continue?"):
+            sys.exit(1)
 
 
 def min_argument(arg: str) -> int:
+    """Parse and validate the CLI's minimum-rating argument."""
     try:
         f = int(arg)
     except ValueError as e:
-        raise ArgumentTypeError("Must be an integer between 1 and 10") from e
+        message = "Must be an integer between 1 and 10"
+        raise ArgumentTypeError(message) from e
     if f < 0:
-        raise ArgumentTypeError("Oh, it's not THAT bad, trust me.")
-    if f < 1:
-        raise ArgumentTypeError("Why run pyroma if you intend it to always pass?")
-    if f > 10:
-        raise ArgumentTypeError("Why run pyroma if you intend it to never pass?")
+        message = "Oh, it's not THAT bad, trust me."
+        raise ArgumentTypeError(message)
+    if f < _MIN_RATING:
+        message = "Why run pyroma if you intend it to always pass?"
+        raise ArgumentTypeError(message)
+    if f > _MAX_RATING:
+        message = "Why run pyroma if you intend it to never pass?"
+        raise ArgumentTypeError(message)
     return f
 
 
 def get_all_tests() -> "list[str]":
+    """Return the names of every registered rating test."""
     return [x.__class__.__name__ for x in ratings.ALL_TESTS]
 
 
 def parse_tests(arg: str) -> "list[str] | None":
+    """Parse a separated list of rating-test names."""
     if not arg:
         return None
 
@@ -69,6 +85,7 @@ def parse_tests(arg: str) -> "list[str] | None":
 
 
 def skip_tests(arg: str) -> "list[str]":
+    """Parse skipped tests or raise an argparse validation error."""
     test_to_skip = parse_tests(arg)
     if test_to_skip:
         return test_to_skip
@@ -80,9 +97,11 @@ def skip_tests(arg: str) -> "list[str]":
 
 
 def main() -> None:
+    """Run the command-line interface."""
     parser = ArgumentParser()
     # argparse only grew the color attribute in Python 3.14.
-    parser.color = True  # type: ignore
+    cast_parser = cast("Any", parser)
+    cast_parser.color = True
     parser.add_argument(
         "package",
         help="A python package, can be a directory, a distribution file or a PyPI package name.",
@@ -159,9 +178,10 @@ def main() -> None:
 
     mode = args.mode
     if args.mode is None or args.mode == "auto":
-        if os.path.isdir(args.package):
+        package_path = Path(args.package)
+        if package_path.is_dir():
             mode = "directory"
-        elif os.path.isfile(args.package):
+        elif package_path.is_file():
             mode = "file"
         else:
             mode = "pypi"
@@ -181,26 +201,24 @@ def main() -> None:
 
 def _json_meta(mode: str, argument: str) -> "dict[str, str]":
     meta = {"package": argument, "mode": mode}
-    try:
+    with suppress(PackageNotFoundError):
         meta["pyroma"] = package_version("pyroma")
-    except PackageNotFoundError:
-        pass
     return meta
 
 
 def _get_data(mode: str, argument: str, index_url: "str | None" = None) -> metadata_types.Metadata:
     if mode == "directory":
-        return projectdata.get_data(os.path.abspath(argument))
+        return projectdata.get_data(str(Path(argument).resolve()))
     if mode == "file":
-        return distributiondata.get_data(os.path.abspath(argument))
+        return distributiondata.get_data(str(Path(argument).resolve()))
     # It's probably a package name
     return pypidata.get_data(argument, index_url=index_url)
 
 
-def run(
+def run(  # noqa: PLR0913 - The positional API is retained for compatibility.
     mode: str,
     argument: str,
-    quiet: bool = False,
+    quiet: bool = False,  # noqa: FBT001, FBT002 - Public compatibility.
     skip_tests: "list[str] | str | None" = None,
     index_url: "str | None" = None,
     output_format: str = "text",

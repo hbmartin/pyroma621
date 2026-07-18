@@ -1,5 +1,9 @@
-# Extracts information from a project
-import os
+"""Extract and normalize package metadata from a local project directory."""
+
+# Kept at runtime so the public Pathish alias resolves through get_type_hints.
+import os  # noqa: TC003
+from email.message import Message
+from pathlib import Path
 from typing import Any, Union, cast
 
 import build.util
@@ -10,20 +14,22 @@ from pyroma.metadata import Metadata, normalize
 Pathish = Union[str, "os.PathLike[str]"]
 
 
-def wheel_metadata(path: Pathish, isolated: "bool | None" = None) -> Any:
+def wheel_metadata(path: Pathish, isolated: "bool | None" = None) -> Message:
+    """Return wheel metadata, retrying in isolation when necessary."""
     # If explictly specified whether to use isolation, pass it directly
     if isolated is not None:
-        return build.util.project_wheel_metadata(path, isolated=isolated)
+        return cast("Message", build.util.project_wheel_metadata(path, isolated=isolated))
 
     # Otherwise, try without build isolation first for efficiency
     try:
-        return build.util.project_wheel_metadata(path, isolated=False)
+        return cast("Message", build.util.project_wheel_metadata(path, isolated=False))
     # If building with build isolation fails, e.g. missing build deps, try with it
     except (build.BuildException, build.BuildBackendException):
-        return build.util.project_wheel_metadata(path, isolated=True)
+        return cast("Message", build.util.project_wheel_metadata(path, isolated=True))
 
 
 def build_metadata(path: Pathish, isolated: "bool | None" = None) -> Metadata:
+    """Build and normalize the Core Metadata for a project."""
     try:
         metadata = wheel_metadata(path, isolated)
     except build.BuildBackendException:
@@ -37,36 +43,39 @@ def build_metadata(path: Pathish, isolated: "bool | None" = None) -> Metadata:
     # so we do it here. Definitely most builders do not lower case them, which
     # Core Metadata Specs recommend.
     data: dict[str, Any] = {}
-    for key in set(metadata.keys()):
-        value = metadata.get_all(key)
-        key = normalize(key)
+    for raw_key in set(metadata.keys()):
+        value = metadata.get_all(raw_key) or []
+        key = normalize(raw_key)
 
         if len(value) == 1:
             value = value[0]
             if value.strip() == "UNKNOWN":
-                # XXX This is also old behavior that may not happen any more.
+                # Legacy metadata uses UNKNOWN as an empty-value marker.
                 continue
 
         data[key] = value
 
-    if "description" not in data.keys():
-        # XXX I *think* having the description as a payload doesn't happen anymore, but I haven't checked.
-        # Having the description as a payload tends to add two newlines, we clean that up here:
-        description = metadata.get_payload().strip()
+    if "description" not in data:
+        # Legacy email metadata can store the description in the payload.
+        # Payload descriptions tend to add two newlines, which we normalize.
+        payload = metadata.get_payload()
+        description = payload.strip() if isinstance(payload, str) else ""
         if description:
             data["description"] = description + "\n"
-    return cast(Metadata, data)
+    return cast("Metadata", data)
 
 
 def get_build_data(path: Pathish, isolated: "bool | None" = None) -> Metadata:
+    """Return built metadata plus project build-system sentinels."""
     metadata = build_metadata(path, isolated=isolated)
     # Check if there is a pyproject_toml
-    if "pyproject.toml" not in os.listdir(path):
+    if "pyproject.toml" not in {entry.name for entry in Path(path).iterdir()}:
         metadata["_missing_pyproject_toml"] = True
     return metadata
 
 
 def get_data(path: Pathish) -> Metadata:
+    """Return metadata for a project directory and retain its source path."""
     data = _get_data(path)
     if data:
         # We got something, add the path to it.
@@ -75,7 +84,7 @@ def get_data(path: Pathish) -> Metadata:
 
 
 def _get_data(path: Pathish) -> Metadata:
-    listing = os.listdir(path)
+    listing = {entry.name for entry in Path(path).iterdir()}
     if "pyproject.toml" not in listing and "setup.py" not in listing:
         # No standard tool can build the package without a pyproject.toml
         # or a setup.py. Let's see if there is a setup.cfg:

@@ -1,8 +1,11 @@
+"""Retrieve and normalize project metadata from a Python package index."""
+
 import logging
-import os
 import tempfile
 import xmlrpc.client
+from http import HTTPStatus
 from http.client import HTTPConnection, HTTPSConnection
+from pathlib import Path
 from typing import Any, cast
 from urllib.parse import unquote, urlsplit
 
@@ -67,9 +70,10 @@ def _xmlrpc_transport(url: str) -> xmlrpc.client.Transport:
 
 
 def _download_filename(url: str) -> str:
-    filename = os.path.basename(unquote(urlsplit(url).path))
+    filename = Path(unquote(urlsplit(url).path)).name
     if not filename:
-        raise ValueError("Source distribution URL has no filename in its path.")
+        message = "Source distribution URL has no filename in its path."
+        raise ValueError(message)
     return filename
 
 
@@ -89,40 +93,45 @@ def _http_get(url: str) -> requests.Response:
     try:
         return requests.get(url, timeout=REQUEST_TIMEOUT)
     except requests.exceptions.Timeout as e:
-        raise ValueError(f"Timed out after {REQUEST_TIMEOUT} seconds while fetching {url}.") from e
+        message = f"Timed out after {REQUEST_TIMEOUT} seconds while fetching {url}."
+        raise ValueError(message) from e
     except requests.exceptions.ConnectionError as e:
-        raise ValueError(f"Could not connect to {url}: {e}") from e
+        message = f"Could not connect to {url}: {e}"
+        raise ValueError(message) from e
 
 
 def _get_project_data(project: str, index_url: "str | None" = None) -> "dict[str, Any]":
     # This uses the JSON REST API, not the (deprecated) XML-RPC API.
     base_api_url = _get_base_api_url(index_url)
     response = _http_get(f"{base_api_url}/{project}/json")
-    if response.status_code == 404:
+    if response.status_code == HTTPStatus.NOT_FOUND:
         if base_api_url == DEFAULT_PYPI_BASE_API_URL:
-            raise ValueError(f"Did not find '{project}' on PyPI. Did you misspell it?")
-        raise ValueError(f"Did not find '{project}' on package index {base_api_url}.")
+            message = f"Did not find '{project}' on PyPI. Did you misspell it?"
+            raise ValueError(message)
+        message = f"Did not find '{project}' on package index {base_api_url}."
+        raise ValueError(message)
     if not response.ok:
-        raise ValueError(f"Unknown http error: {response.status_code} {response.reason}")
+        message = f"Unknown http error: {response.status_code} {response.reason}"
+        raise ValueError(message)
 
     return response.json()
 
 
 def get_data(project: str, index_url: "str | None" = None) -> Metadata:
+    """Return normalized metadata for the latest release of a project."""
     # Pick the latest release.
     project_data = _get_project_data(project, index_url=index_url)
     data: dict[str, Any] = {}
 
-    for key, value in project_data["info"].items():
-        key = normalize(key)
+    for raw_key, value in project_data["info"].items():
+        key = normalize(raw_key)
         if key in SYNTHESIZED_INFO_KEYS:
             continue
-        if key in INFO_MAP:
-            key = INFO_MAP[key]
-        data[key] = value
+        metadata_key = INFO_MAP.get(key, key)
+        data[metadata_key] = value
 
     release = data["version"]
-    logger.debug(f"Found {project} version {release}")
+    logger.debug("Found %s version %s", project, release)
 
     try:
         # PyPI has deprecated the XML-RPC API, but package_roles (which the
@@ -153,13 +162,14 @@ def get_data(project: str, index_url: "str | None" = None) -> Metadata:
                 # Found a source distribution. Download and analyze it.
                 data["_has_sdist"] = True
                 filename = _download_filename(download["url"])
-                logger.debug(f"Downloading {filename} to verify distribution")
+                logger.debug("Downloading %s to verify distribution", filename)
                 response = _http_get(download["url"])
                 if not response.ok:
-                    raise ValueError(f"Could not download {download['url']}: {response.status_code} {response.reason}")
+                    message = f"Could not download {download['url']}: {response.status_code} {response.reason}"
+                    raise ValueError(message)
                 with tempfile.TemporaryDirectory(prefix="pyroma-") as tempdir:
-                    tmp = os.path.join(tempdir, filename)
-                    with open(tmp, "wb") as outfile:
+                    tmp = Path(tempdir) / filename
+                    with tmp.open("wb") as outfile:
                         outfile.write(response.content)
                     ddata = distributiondata.get_data(tmp)
 
@@ -169,4 +179,4 @@ def get_data(project: str, index_url: "str | None" = None) -> Metadata:
                 data = ddata_dict
                 break
 
-    return cast(Metadata, data)
+    return cast("Metadata", data)

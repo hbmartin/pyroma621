@@ -1,17 +1,22 @@
 import contextlib
+import copy
 import io
 import json
-import os
 import shutil
 import tarfile
 import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
+from typing import Never
 from xmlrpc import client as xmlrpclib
+
+from hypothesis import example, given, settings
+from hypothesis import strategies as st
 
 import pyroma
 from pyroma import distributiondata, projectdata, pypidata, ratings, report
+from pyroma.metadata import Metadata
 from pyroma.ratings import rate
 
 TESTDATA_DIR = Path(__file__).parent / "testdata"
@@ -49,21 +54,110 @@ COMPLETE = {
 }
 
 
+_METADATA_TEXT = st.text(
+    alphabet=st.characters(blacklist_categories=("Cc", "Cs")),
+    max_size=80,
+)
+_CLASSIFIER_TEXT = st.one_of(
+    st.sampled_from(
+        (
+            "Development Status",
+            "Programming Language",
+            "Programming Language :: Python",
+            "Programming Language :: Python :: 3",
+            "Programming Language :: Python :: 3.14",
+        )
+    ),
+    _METADATA_TEXT,
+)
+_STRING_OR_LIST = st.one_of(_METADATA_TEXT, st.lists(_METADATA_TEXT, max_size=4))
+
+
+def _metadata_strategy():
+    return st.fixed_dictionaries(
+        {},
+        optional={
+            "metadata-version": _METADATA_TEXT,
+            "name": _METADATA_TEXT,
+            "version": st.one_of(_METADATA_TEXT, st.integers(), st.none()),
+            "summary": _METADATA_TEXT,
+            "description": _METADATA_TEXT,
+            "description-content-type": _METADATA_TEXT,
+            "classifier": st.lists(_CLASSIFIER_TEXT, max_size=4),
+            "keywords": _STRING_OR_LIST,
+            "author": _METADATA_TEXT,
+            "author-email": _METADATA_TEXT,
+            "maintainer": _METADATA_TEXT,
+            "maintainer-email": _METADATA_TEXT,
+            "home-page": _METADATA_TEXT,
+            "download-url": _METADATA_TEXT,
+            "project-url": st.one_of(
+                st.lists(_METADATA_TEXT, max_size=4),
+                st.dictionaries(_METADATA_TEXT, _METADATA_TEXT, max_size=4),
+            ),
+            "requires-dist": st.one_of(_METADATA_TEXT, st.lists(_METADATA_TEXT, max_size=4), st.none()),
+            "requires-python": _METADATA_TEXT,
+            "requires": _STRING_OR_LIST,
+            "provides": _STRING_OR_LIST,
+            "obsoletes": _STRING_OR_LIST,
+            "license": _METADATA_TEXT,
+            "license-expression": _METADATA_TEXT,
+            "license-file": _STRING_OR_LIST,
+            "dynamic": _STRING_OR_LIST,
+            "platform": _STRING_OR_LIST,
+            "_sdist": st.booleans(),
+            "_owners": st.lists(_METADATA_TEXT, max_size=4),
+            "_wheel_build_failed": st.booleans(),
+            "_missing_pyproject_toml": st.booleans(),
+            "_missing_build_system": st.booleans(),
+            "_no_config_found": st.booleans(),
+            "_has_sdist": st.booleans(),
+        },
+    )
+
+
+class MetadataPropertyTest(unittest.TestCase):
+    @settings(deadline=None)
+    @given(_metadata_strategy())
+    @example({"classifier": ["Programming Language"]})
+    def test_rate_project_is_total_deterministic_and_non_mutating(self, testdata: Metadata) -> None:
+        original = copy.deepcopy(testdata)
+
+        first = ratings.rate_project(testdata)
+        second = ratings.rate_project(testdata)
+
+        self.assertEqual(testdata, original)
+        self.assertEqual(first, second)
+        self.assertEqual(first.name, testdata.get("name"))
+        self.assertGreaterEqual(first.rating, 0)
+        self.assertLessEqual(first.rating, 10)
+        self.assertEqual(first.level, ratings.LEVELS[first.rating])
+        for problem in first.problems:
+            self.assertTrue(problem.test)
+            self.assertTrue(problem.message)
+            self.assertGreaterEqual(problem.weight, 0)
+            self.assertIsInstance(problem.fatal, bool)
+
+
 class RatingsTest(unittest.TestCase):
     maxDiff = None
 
-    def _get_file_rating(self, dirname, skip_tests=None):
+    def _get_file_rating(
+        self,
+        dirname: str,
+        skip_tests: "list[str] | str | None" = None,
+    ) -> "tuple[int, list[str]]":
         directory = TESTDATA_DIR / dirname
         data = projectdata.get_data(directory)
         return rate(data, skip_tests)
 
-    def test_complete(self):
+    def test_complete(self) -> None:
         data = projectdata.get_data(TESTDATA_DIR / "complete")
         rating = rate(data)
         # Should have a perfect score
         self.assertEqual(rating, (10, []))
 
-    def test_setup_config(self):
+    def test_setup_config(self) -> None:
         rating = self._get_file_rating("setup_config")
         self.assertEqual(
             rating,
@@ -83,7 +177,7 @@ class RatingsTest(unittest.TestCase):
             ),
         )
 
-    def test_only_config(self):
+    def test_only_config(self) -> None:
         # There is no legacy setup.py, nor a modern pyproject.toml, so there
         # is no way to build this project and no metadata to extract. Only
         # the build system problems are reported.
@@ -110,7 +204,7 @@ class RatingsTest(unittest.TestCase):
             ),
         )
 
-    def test_skip_tests(self):
+    def test_skip_tests(self) -> None:
         # Find all errors
         all_errors = self._get_file_rating("lacking")[1]
 
@@ -122,19 +216,19 @@ class RatingsTest(unittest.TestCase):
         # Errors have been skipped!
         self.assertEqual(len(fewer_errors), 9)
 
-    def test_pep517(self):
+    def test_pep517(self) -> None:
         rating = self._get_file_rating("pep517")
         self.assertGreaterEqual(rating[0], 9)
 
-    def test_pep621(self):
+    def test_pep621(self) -> None:
         rating = self._get_file_rating("pep621")
         self.assertGreaterEqual(rating[0], 9)
 
-    def test_uv_build(self):
+    def test_uv_build(self) -> None:
         rating = self._get_file_rating("uv_build")
         self.assertGreaterEqual(rating[0], 9)
 
-    def test_minimal(self):
+    def test_minimal(self) -> None:
         rating = self._get_file_rating("minimal")
         self.assertEqual(
             rating,
@@ -163,7 +257,7 @@ class RatingsTest(unittest.TestCase):
             ),
         )
 
-    def test_lacking(self):
+    def test_lacking(self) -> None:
         rating = self._get_file_rating("lacking")
 
         self.assertEqual(
@@ -201,7 +295,7 @@ class RatingsTest(unittest.TestCase):
             ),
         )
 
-    def test_custom_test(self):
+    def test_custom_test(self) -> None:
         rating = self._get_file_rating("custom_test")
 
         self.assertEqual(
@@ -230,11 +324,11 @@ class RatingsTest(unittest.TestCase):
             ),
         )
 
-    def test_private_classifier(self):
+    def test_private_classifier(self) -> None:
         rating = self._get_file_rating("private_classifier")
         self.assertGreaterEqual(rating[0], 9)
 
-    def test_invalid_pyproject(self):
+    def test_invalid_pyproject(self) -> None:
         # Use valid metadata so we exercise the rating check itself,
         # then point _path to a fixture with an invalid pyproject.toml.
         testdata = COMPLETE.copy()
@@ -244,7 +338,7 @@ class RatingsTest(unittest.TestCase):
         self.assertLess(rating[0], 10)
         self.assertTrue(any("pyproject.toml is invalid" in msg for msg in rating[1]))
 
-    def test_markdown(self):
+    def test_markdown(self) -> None:
         # Markdown and text shouldn't get ReST errors
         testdata = COMPLETE.copy()
         testdata["description"] = "# Broken ReST\n\n``Valid  Markdown\n"
@@ -257,7 +351,7 @@ class RatingsTest(unittest.TestCase):
         rating = rate(testdata)
         self.assertEqual(rating, (9, ["The package's Description is quite short."]))
 
-    def test_deprecated_metadata_field_warning(self):
+    def test_deprecated_metadata_field_warning(self) -> None:
         testdata = COMPLETE.copy()
         testdata.pop("project-url", None)
         testdata["home-page"] = "https://example.com"
@@ -268,7 +362,7 @@ class RatingsTest(unittest.TestCase):
             any("The metadata field 'home-page' is deprecated; use 'project-url' instead." in msg for msg in rating[1])
         )
 
-    def test_deprecated_license_warning_respects_metadata_version(self):
+    def test_deprecated_license_warning_respects_metadata_version(self) -> None:
         old_metadata = COMPLETE.copy()
         old_metadata["metadata-version"] = "2.3"
         old_metadata["license"] = "MIT"
@@ -291,10 +385,10 @@ class SpecComplianceTest(unittest.TestCase):
 
     maxDiff = None
 
-    def _messages(self, testdata):
+    def _messages(self, testdata: Metadata) -> "list[str]":
         return rate(testdata)[1]
 
-    def test_invalid_version(self):
+    def test_invalid_version(self) -> None:
         testdata = COMPLETE.copy()
         testdata["version"] = "1.0-foo"
 
@@ -302,14 +396,14 @@ class SpecComplianceTest(unittest.TestCase):
         self.assertLess(rating[0], 10)
         self.assertTrue(any("'1.0-foo' is not a valid version" in msg for msg in rating[1]))
 
-    def test_noncanonical_version(self):
+    def test_noncanonical_version(self) -> None:
         testdata = COMPLETE.copy()
         testdata["version"] = "1.0.DEV1"
 
         messages = self._messages(testdata)
         self.assertTrue(any("not in canonical form; it should be written as '1.0.dev1'" in msg for msg in messages))
 
-    def test_version_epoch_and_local_segment(self):
+    def test_version_epoch_and_local_segment(self) -> None:
         testdata = COMPLETE.copy()
         testdata["version"] = "1!1.0+ubuntu1"
 
@@ -317,14 +411,14 @@ class SpecComplianceTest(unittest.TestCase):
         self.assertTrue(any("uses a version epoch" in msg for msg in messages))
         self.assertTrue(any("contains a local version segment" in msg for msg in messages))
 
-    def test_invalid_metadata_version(self):
+    def test_invalid_metadata_version(self) -> None:
         testdata = COMPLETE.copy()
         testdata["metadata-version"] = "2.0"
 
         messages = self._messages(testdata)
         self.assertTrue(any("'2.0' is not a valid Metadata-Version" in msg for msg in messages))
 
-    def test_invalid_name_is_fatal(self):
+    def test_invalid_name_is_fatal(self) -> None:
         testdata = COMPLETE.copy()
         testdata["name"] = "-not-valid-"
 
@@ -332,7 +426,7 @@ class SpecComplianceTest(unittest.TestCase):
         self.assertEqual(rating[0], 0)
         self.assertTrue(any("'-not-valid-' is not a valid project name" in msg for msg in rating[1]))
 
-    def test_license_and_license_expression_is_fatal(self):
+    def test_license_and_license_expression_is_fatal(self) -> None:
         testdata = COMPLETE.copy()
         testdata["license"] = "MIT"
 
@@ -342,7 +436,7 @@ class SpecComplianceTest(unittest.TestCase):
             any("Specifying both a License and a License-Expression is forbidden" in msg for msg in rating[1])
         )
 
-    def test_invalid_license_expression_is_fatal(self):
+    def test_invalid_license_expression_is_fatal(self) -> None:
         testdata = COMPLETE.copy()
         testdata["license-expression"] = "Bogus-License"
 
@@ -350,14 +444,14 @@ class SpecComplianceTest(unittest.TestCase):
         self.assertEqual(rating[0], 0)
         self.assertTrue(any("'Bogus-License' is not a valid SPDX license expression" in msg for msg in rating[1]))
 
-    def test_invalid_description_content_type(self):
+    def test_invalid_description_content_type(self) -> None:
         testdata = COMPLETE.copy()
         testdata["description-content-type"] = "text/html"
 
         messages = self._messages(testdata)
         self.assertTrue(any("The content type should be one of" in msg for msg in messages))
 
-    def test_description_content_type_parameters(self):
+    def test_description_content_type_parameters(self) -> None:
         testdata = COMPLETE.copy()
         testdata["description-content-type"] = "text/plain; charset=latin-1; variant=GFM"
 
@@ -366,7 +460,7 @@ class SpecComplianceTest(unittest.TestCase):
         self.assertIn("The only accepted charset is UTF-8, not 'latin-1'.", message)
         self.assertIn("The 'variant' parameter is only valid for text/markdown.", message)
 
-    def test_markdown_variant(self):
+    def test_markdown_variant(self) -> None:
         testdata = COMPLETE.copy()
         testdata["description-content-type"] = "text/markdown; variant=GFM"
         self.assertFalse(any("Description-Content-Type" in msg for msg in self._messages(testdata)))
@@ -377,14 +471,14 @@ class SpecComplianceTest(unittest.TestCase):
             any("The markdown variant should be GFM or CommonMark, not 'Pandoc'." in msg for msg in messages)
         )
 
-    def test_invalid_requires_dist(self):
+    def test_invalid_requires_dist(self) -> None:
         testdata = COMPLETE.copy()
         testdata["requires-dist"] = ["zope.event", "broken =="]
 
         messages = self._messages(testdata)
         self.assertTrue(any("'broken ==' is not a valid dependency specifier" in msg for msg in messages))
 
-    def test_requires_dist_style_warnings(self):
+    def test_requires_dist_style_warnings(self) -> None:
         testdata = COMPLETE.copy()
         testdata["requires-dist"] = [
             "zope.event (>=4.0)",
@@ -396,7 +490,7 @@ class SpecComplianceTest(unittest.TestCase):
         self.assertIn("puts the version specifier in parentheses", message)
         self.assertIn("ordered comparison on the 'sys_platform' environment marker", message)
 
-    def test_url_label_too_long_is_fatal(self):
+    def test_url_label_too_long_is_fatal(self) -> None:
         testdata = COMPLETE.copy()
         testdata["project-url"] = ["this label is far too long to be legal, https://example.com"]
 
@@ -404,14 +498,14 @@ class SpecComplianceTest(unittest.TestCase):
         self.assertEqual(rating[0], 0)
         self.assertTrue(any("Project-URL labels are limited to 32 characters" in msg for msg in rating[1]))
 
-    def test_url_no_well_known_labels(self):
+    def test_url_no_well_known_labels(self) -> None:
         testdata = COMPLETE.copy()
         testdata["project-url"] = ["weird stuff, https://example.com"]
 
         messages = self._messages(testdata)
         self.assertTrue(any("None of your Project-URL labels match the well-known labels" in msg for msg in messages))
 
-    def test_console_scripts_in_entry_points_is_fatal(self):
+    def test_console_scripts_in_entry_points_is_fatal(self) -> None:
         testdata = COMPLETE.copy()
         testdata["_path"] = TESTDATA_DIR / "bad_console_scripts"
 
@@ -419,7 +513,7 @@ class SpecComplianceTest(unittest.TestCase):
         self.assertEqual(rating[0], 0)
         self.assertTrue(any("Console and GUI scripts must be defined in [project.scripts]" in msg for msg in rating[1]))
 
-    def test_readme_both_file_and_text_is_fatal(self):
+    def test_readme_both_file_and_text_is_fatal(self) -> None:
         testdata = COMPLETE.copy()
         testdata["_path"] = TESTDATA_DIR / "readme_both"
 
@@ -427,7 +521,7 @@ class SpecComplianceTest(unittest.TestCase):
         self.assertEqual(rating[0], 0)
         self.assertTrue(any("The 'readme' table must not specify both 'file' and 'text'." in msg for msg in rating[1]))
 
-    def test_dynamic_name_is_fatal(self):
+    def test_dynamic_name_is_fatal(self) -> None:
         testdata = COMPLETE.copy()
         testdata["_path"] = TESTDATA_DIR / "dynamic_name"
 
@@ -448,7 +542,7 @@ class BugFixTest(unittest.TestCase):
 
     maxDiff = None
 
-    def test_valid_rest_ignores_content_type_parameters(self):
+    def test_valid_rest_ignores_content_type_parameters(self) -> None:
         # A parameterized content type such as "text/markdown; charset=UTF-8"
         # must not fall through to ReST validation of a non-ReST description.
         testdata = COMPLETE.copy()
@@ -458,7 +552,7 @@ class BugFixTest(unittest.TestCase):
             messages = rate(testdata)[1]
             self.assertFalse(any("not valid ReST" in msg for msg in messages), content_type)
 
-    def test_valid_rest_still_checks_rst_with_parameters(self):
+    def test_valid_rest_still_checks_rst_with_parameters(self) -> None:
         testdata = COMPLETE.copy()
         testdata["description"] = "``broken inline literal\n" + "x" * 100
         testdata["description-content-type"] = "text/x-rst; charset=UTF-8"
@@ -466,7 +560,10 @@ class BugFixTest(unittest.TestCase):
         self.assertTrue(any("not valid ReST" in msg for msg in messages))
 
     @unittest.mock.patch("pyroma.ratings.publish_parts")
-    def test_valid_rest_fails_on_system_message_without_warning_output(self, publishmock):
+    def test_valid_rest_fails_on_system_message_without_warning_output(
+        self,
+        publishmock: unittest.mock.Mock,
+    ) -> None:
         system_message = unittest.mock.Mock()
         system_message.astext.return_value = "severe parsing failure"
         publishmock.side_effect = ratings.SystemMessage(system_message, 4)
@@ -481,12 +578,12 @@ class BugFixTest(unittest.TestCase):
         self.assertIs(result.outcome, False)
         self.assertIn("severe parsing failure", result.message)
 
-    def test_bus_factor_zero_owners_fails(self):
+    def test_bus_factor_zero_owners_fails(self) -> None:
         result = ratings.BusFactor().test({"_owners": []})
         self.assertIs(result.outcome, False)
         self.assertEqual(result.weight, 100)
 
-    def test_skip_tests_exact_match_only(self):
+    def test_skip_tests_exact_match_only(self) -> None:
         # Skipping NameFormat must not also skip the Name test through
         # substring matching when skip_tests is passed as a plain string.
         testdata = COMPLETE.copy()
@@ -496,21 +593,21 @@ class BugFixTest(unittest.TestCase):
             self.assertEqual(rating, 0, skip)
             self.assertTrue(any("does not have name data" in msg for msg in messages), skip)
 
-    def test_rate_project_all_tests_skipped_raises_configuration_error(self):
+    def test_rate_project_all_tests_skipped_raises_configuration_error(self) -> None:
         testdata = COMPLETE.copy()
         with self.assertRaises(ratings.ConfigurationError):
             rate(testdata, skip_tests=pyroma.get_all_tests())
 
-    def test_check_manifest_skips_sdist(self):
+    def test_check_manifest_skips_sdist(self) -> None:
         # check-manifest needs a VCS checkout; an unpacked sdist is not one.
         result = ratings.CheckManifest().test({"_path": ".", "_sdist": True})
         self.assertIsNone(result.outcome)
 
-    def test_parse_tests_trailing_separator(self):
+    def test_parse_tests_trailing_separator(self) -> None:
         self.assertEqual(pyroma.parse_tests("Description,"), ["Description"])
         self.assertEqual(pyroma.parse_tests("Description, Summary;"), ["Description", "Summary"])
 
-    def test_tb2_distribution(self):
+    def test_tb2_distribution(self) -> None:
         src = TESTDATA_DIR / "distributions" / "complete-1.0.dev1.tar.bz2"
         with tempfile.TemporaryDirectory() as tmp:
             tb2 = Path(tmp) / "complete-1.0.dev1.tb2"
@@ -521,12 +618,12 @@ class BugFixTest(unittest.TestCase):
         finally:
             distributiondata.cleanup(data)
 
-    def test_no_config_found_in_empty_directory(self):
+    def test_no_config_found_in_empty_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data = projectdata.get_data(tmp)
         self.assertIn("_no_config_found", data)
 
-    def test_malformed_dynamic_value_returns_validation_result(self):
+    def test_malformed_dynamic_value_returns_validation_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, "pyproject.toml").write_text(
                 '[project]\nname = "example"\nversion = "1.0"\ndynamic = 42\n',
@@ -539,7 +636,7 @@ class BugFixTest(unittest.TestCase):
 
         self.assertTrue(any("pyproject.toml is invalid" in message for message in messages))
 
-    def test_user_facing_diagnostics_have_word_boundaries(self):
+    def test_user_facing_diagnostics_have_word_boundaries(self) -> None:
         major_only = ratings.PythonClassifierVersion().test({"classifier": ["Programming Language :: Python :: 3"]})
         no_python = ratings.PythonClassifierVersion().test({"classifier": []})
         missing_build = ratings.MissingBuildSystem().test({"_missing_build_system": True})
@@ -569,7 +666,7 @@ class ReportTest(unittest.TestCase):
             ],
         )
 
-    def test_format_text(self):
+    def test_format_text(self) -> None:
         self.assertEqual(
             report.format_text(self._rated()),
             "------------------------------\n"
@@ -580,7 +677,7 @@ class ReportTest(unittest.TestCase):
             "------------------------------",
         )
 
-    def test_format_text_no_problems(self):
+    def test_format_text_no_problems(self) -> None:
         rated = ratings.RatedProject(name="example", rating=10, level=ratings.LEVELS[10], problems=[])
         self.assertEqual(
             report.format_text(rated),
@@ -590,7 +687,7 @@ class ReportTest(unittest.TestCase):
             "------------------------------",
         )
 
-    def test_format_json_error(self):
+    def test_format_json_error(self) -> None:
         error = ratings.ConfigurationError("nothing to rate")
         document = json.loads(report.format_json_error(error, meta={"mode": "directory"}))
         self.assertEqual(
@@ -601,7 +698,7 @@ class ReportTest(unittest.TestCase):
             },
         )
 
-    def test_format_json(self):
+    def test_format_json(self) -> None:
         document = json.loads(report.format_json(self._rated(), meta={"mode": "directory"}))
         self.assertEqual(
             document,
@@ -628,13 +725,18 @@ class PyPITest(unittest.TestCase):
     @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")
     @unittest.mock.patch("pyroma.pypidata._get_project_data")
     @unittest.mock.patch("requests.get")
-    def test_complete(self, requestmock, projectdatamock, proxymock):
+    def test_complete(
+        self,
+        requestmock: unittest.mock.Mock,
+        projectdatamock: unittest.mock.Mock,
+        proxymock: unittest.mock.Mock,
+    ) -> None:
         datafile = TESTDATA_DIR / "jsondata" / "complete.json"
-        with open(datafile, encoding="UTF-8") as file:
+        with datafile.open(encoding="UTF-8") as file:
             projectdatamock.return_value = json.load(file)
 
         srcfile = TESTDATA_DIR / "distributions" / "complete-1.0.dev1.tar.gz"
-        with open(srcfile, "rb") as file:
+        with srcfile.open("rb") as file:
             requestmock.return_value = unittest.mock.Mock(ok=True)
             requestmock.return_value.content = file.read()
 
@@ -649,12 +751,12 @@ class PyPITest(unittest.TestCase):
 
         self.assertEqual(rating, (10, []))
         extracted_path = data["_path"]
-        self.assertTrue(os.path.isdir(extracted_path))
+        self.assertTrue(Path(extracted_path).is_dir())
         distributiondata.cleanup(data)
-        self.assertFalse(os.path.exists(extracted_path))
+        self.assertFalse(Path(extracted_path).exists())
 
     @unittest.mock.patch("pyroma.pypidata.requests.get")
-    def test_get_project_data_custom_index_url(self, requestmock):
+    def test_get_project_data_custom_index_url(self, requestmock: unittest.mock.Mock) -> None:
         requestmock.return_value = unittest.mock.Mock()
         requestmock.return_value.ok = True
         requestmock.return_value.status_code = 200
@@ -667,7 +769,7 @@ class PyPITest(unittest.TestCase):
         )
 
     @unittest.mock.patch("pyroma.pypidata.requests.get")
-    def test_get_project_data_custom_index_url_with_pypi_path(self, requestmock):
+    def test_get_project_data_custom_index_url_with_pypi_path(self, requestmock: unittest.mock.Mock) -> None:
         requestmock.return_value = unittest.mock.Mock()
         requestmock.return_value.ok = True
         requestmock.return_value.status_code = 200
@@ -681,7 +783,11 @@ class PyPITest(unittest.TestCase):
 
     @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")
     @unittest.mock.patch("pyroma.pypidata._get_project_data")
-    def test_get_data_custom_index_url_uses_xmlrpc_endpoint(self, projectdatamock, proxymock):
+    def test_get_data_custom_index_url_uses_xmlrpc_endpoint(
+        self,
+        projectdatamock: unittest.mock.Mock,
+        proxymock: unittest.mock.Mock,
+    ) -> None:
         projectdatamock.return_value = {
             "info": {"name": "internalpkg", "version": "1.2.3"},
             "releases": {"1.2.3": []},
@@ -698,7 +804,7 @@ class PyPITest(unittest.TestCase):
         self.assertIsInstance(kwargs["transport"], pypidata._TimeoutSafeTransport)
         self.assertEqual(kwargs["transport"].timeout, pypidata.REQUEST_TIMEOUT)
 
-    def test_xmlrpc_transports_apply_timeout_to_connections(self):
+    def test_xmlrpc_transports_apply_timeout_to_connections(self) -> None:
         variants = (
             (pypidata._TimeoutTransport, xmlrpclib.Transport),
             (pypidata._TimeoutSafeTransport, xmlrpclib.SafeTransport),
@@ -721,7 +827,11 @@ class PyPITest(unittest.TestCase):
 
     @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")
     @unittest.mock.patch("pyroma.pypidata._get_project_data")
-    def test_package_roles_fault_and_oserror_warn_only(self, projectdatamock, proxymock):
+    def test_package_roles_fault_and_oserror_warn_only(
+        self,
+        projectdatamock: unittest.mock.Mock,
+        proxymock: unittest.mock.Mock,
+    ) -> None:
         projectdatamock.return_value = {
             "info": {"name": "example", "version": "1.0"},
             "releases": {"1.0": []},
@@ -734,7 +844,11 @@ class PyPITest(unittest.TestCase):
 
     @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")
     @unittest.mock.patch("pyroma.pypidata._get_project_data")
-    def test_pypi_home_page_not_clobbered(self, projectdatamock, proxymock):
+    def test_pypi_home_page_not_clobbered(
+        self,
+        projectdatamock: unittest.mock.Mock,
+        proxymock: unittest.mock.Mock,
+    ) -> None:
         # The PyPI JSON API synthesizes project_url/package_url/release_url
         # (they always point at pypi.org); they must not end up in the
         # metadata, and in particular must not overwrite home_page.
@@ -764,7 +878,12 @@ class PyPITest(unittest.TestCase):
     @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")
     @unittest.mock.patch("pyroma.pypidata.requests.get")
     @unittest.mock.patch("pyroma.pypidata._get_project_data")
-    def test_sdist_download_http_failure_raises_value_error(self, projectdatamock, requestmock, proxymock):
+    def test_sdist_download_http_failure_raises_value_error(
+        self,
+        projectdatamock: unittest.mock.Mock,
+        requestmock: unittest.mock.Mock,
+        proxymock: unittest.mock.Mock,
+    ) -> None:
         projectdatamock.return_value = {
             "info": {"name": "example", "version": "1.0"},
             "releases": {"1.0": [{"packagetype": "sdist", "url": "https://files.example.com/example-1.0.tar.gz"}]},
@@ -780,8 +899,12 @@ class PyPITest(unittest.TestCase):
     @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")
     @unittest.mock.patch("pyroma.pypidata._get_project_data")
     def test_signed_sdist_url_uses_decoded_path_basename(
-        self, projectdatamock, proxymock, requestmock, distributionmock
-    ):
+        self,
+        projectdatamock: unittest.mock.Mock,
+        proxymock: unittest.mock.Mock,
+        requestmock: unittest.mock.Mock,
+        distributionmock: unittest.mock.Mock,
+    ) -> None:
         projectdatamock.return_value = {
             "info": {"name": "example", "version": "1.0"},
             "releases": {
@@ -800,13 +923,17 @@ class PyPITest(unittest.TestCase):
         pypidata.get_data("example")
 
         downloaded_path = distributionmock.call_args.args[0]
-        self.assertEqual(os.path.basename(downloaded_path), "example-1.0.tar.gz")
+        self.assertEqual(Path(downloaded_path).name, "example-1.0.tar.gz")
         with self.assertRaisesRegex(ValueError, "no filename"):
             pypidata._download_filename("https://files.example.com/")
 
     @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")
     @unittest.mock.patch("pyroma.pypidata._get_project_data")
-    def test_missing_releases_key_skips_sdist_checks(self, projectdatamock, proxymock):
+    def test_missing_releases_key_skips_sdist_checks(
+        self,
+        projectdatamock: unittest.mock.Mock,
+        proxymock: unittest.mock.Mock,
+    ) -> None:
         # Custom indexes may omit the (PyPI-deprecated) releases key, or
         # list different versions than the info dict claims.
         proxymock.return_value.__enter__.return_value.package_roles.return_value = []
@@ -821,7 +948,11 @@ class PyPITest(unittest.TestCase):
 
     @unittest.mock.patch("pyroma.ratings.rate_project")
     @unittest.mock.patch("pyroma.pypidata.get_data")
-    def test_run_forwards_custom_index_url(self, datamock, ratemock):
+    def test_run_forwards_custom_index_url(
+        self,
+        datamock: unittest.mock.Mock,
+        ratemock: unittest.mock.Mock,
+    ) -> None:
         datamock.return_value = {"name": "internalpkg"}
         ratemock.return_value = ratings.RatedProject(
             name="internalpkg", rating=10, level=ratings.LEVELS[10], problems=[]
@@ -836,7 +967,7 @@ class PyPITest(unittest.TestCase):
 class MainTest(unittest.TestCase):
     """Tests for the command line entry point's error handling."""
 
-    def _run_main(self, argv):
+    def _run_main(self, argv: "list[str]") -> "tuple[int | str | None, str, str]":
         stdout = io.StringIO()
         stderr = io.StringIO()
         with (
@@ -849,7 +980,7 @@ class MainTest(unittest.TestCase):
         return caught.exception.code, stdout.getvalue(), stderr.getvalue()
 
     @unittest.mock.patch("pyroma.pypidata.get_data")
-    def test_main_data_error_exits_3(self, datamock):
+    def test_main_data_error_exits_3(self, datamock: unittest.mock.Mock) -> None:
         datamock.side_effect = ValueError("Did not find 'nosuch' on PyPI. Did you misspell it?")
 
         code, stdout, stderr = self._run_main(["-p", "nosuch"])
@@ -859,7 +990,7 @@ class MainTest(unittest.TestCase):
         self.assertNotIn("Traceback", stderr)
 
     @unittest.mock.patch("pyroma.pypidata.get_data")
-    def test_main_json_error_document(self, datamock):
+    def test_main_json_error_document(self, datamock: unittest.mock.Mock) -> None:
         datamock.side_effect = ValueError("Did not find 'nosuch' on PyPI. Did you misspell it?")
 
         code, stdout, stderr = self._run_main(["--format", "json", "-p", "nosuch"])
@@ -870,7 +1001,7 @@ class MainTest(unittest.TestCase):
         self.assertIn("Did not find 'nosuch'", document["error"]["message"])
         self.assertEqual(document["_meta"]["mode"], "pypi")
 
-    def test_main_all_tests_skipped_exits_3(self):
+    def test_main_all_tests_skipped_exits_3(self) -> None:
         skip = ",".join(pyroma.get_all_tests())
 
         code, stdout, stderr = self._run_main(["-d", "--skip-tests", skip, str(TESTDATA_DIR / "complete")])
@@ -878,7 +1009,7 @@ class MainTest(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertIn("no rating can be calculated", stderr)
 
-    def test_main_missing_distribution_exits_3(self):
+    def test_main_missing_distribution_exits_3(self) -> None:
         missing = TESTDATA_DIR / "distributions" / "does-not-exist.tar.gz"
 
         code, _stdout, stderr = self._run_main(["-f", str(missing)])
@@ -891,7 +1022,7 @@ class MainTest(unittest.TestCase):
 class ProjectDataTest(unittest.TestCase):
     maxDiff = None
 
-    def test_complete(self):
+    def test_complete(self) -> None:
         directory = TESTDATA_DIR / "complete"
 
         data = projectdata.get_data(directory)
@@ -903,20 +1034,20 @@ class ProjectDataTest(unittest.TestCase):
 class DistroDataTest(unittest.TestCase):
     maxDiff = None
 
-    def test_complete(self):
+    def test_complete(self) -> None:
         directory = TESTDATA_DIR / "distributions"
 
-        for filename in os.listdir(directory):
-            if filename.startswith("complete"):
-                data = distributiondata.get_data(directory / filename)
+        for distribution_path in directory.iterdir():
+            if distribution_path.name.startswith("complete"):
+                data = distributiondata.get_data(distribution_path)
                 try:
-                    self.assertTrue(data.pop("_sdist"), filename)
-                    self.assertTrue(os.path.isdir(data.pop("_path")), filename)
+                    self.assertTrue(data.pop("_sdist"), distribution_path.name)
+                    self.assertTrue(Path(data.pop("_path")).is_dir(), distribution_path.name)
                     self.assertEqual(data, COMPLETE)
                 finally:
                     distributiondata.cleanup(data)
 
-    def test_distribution_data_keeps_unpacked_tree(self):
+    def test_distribution_data_keeps_unpacked_tree(self) -> None:
         # The unpacked tree must stay around after get_data returns, so
         # the pyproject.toml rating tests can inspect it.
         src = TESTDATA_DIR / "distributions" / "complete-1.0.dev1.tar.gz"
@@ -925,18 +1056,21 @@ class DistroDataTest(unittest.TestCase):
 
         self.assertTrue(data.get("_sdist"))
         path = data["_path"]
-        self.assertTrue(os.path.isdir(path))
-        self.assertTrue(os.path.exists(os.path.join(path, "pyproject.toml")))
+        self.assertTrue(Path(path).is_dir())
+        self.assertTrue((Path(path) / "pyproject.toml").exists())
         distributiondata.cleanup(data)
-        self.assertFalse(os.path.exists(path))
+        self.assertFalse(Path(path).exists())
 
-    def test_run_cleans_distribution_after_rating(self):
+    def test_run_cleans_distribution_after_rating(self) -> None:
         src = TESTDATA_DIR / "distributions" / "complete-1.0.dev1.tar.gz"
         extracted_paths = []
 
-        def rate_project(data, skip_tests):
+        def rate_project(
+            data: Metadata,
+            _skip_tests: "list[str] | str | None",
+        ) -> ratings.RatedProject:
             extracted_paths.append(data["_path"])
-            self.assertTrue(os.path.isdir(data["_path"]))
+            self.assertTrue(Path(data["_path"]).is_dir())
             return ratings.RatedProject(name="complete", rating=10, level=ratings.LEVELS[10], problems=[])
 
         with (
@@ -947,16 +1081,20 @@ class DistroDataTest(unittest.TestCase):
 
         self.assertEqual(results, [10, 10, 10])
         self.assertEqual(len(extracted_paths), 3)
-        self.assertTrue(all(not os.path.exists(path) for path in extracted_paths))
+        self.assertTrue(all(not Path(path).exists() for path in extracted_paths))
 
-    def test_run_cleans_distribution_when_rating_fails(self):
+    def test_run_cleans_distribution_when_rating_fails(self) -> None:
         src = TESTDATA_DIR / "distributions" / "complete-1.0.dev1.tar.gz"
         extracted_paths = []
 
-        def fail_rating(data, skip_tests):
+        def fail_rating(
+            data: Metadata,
+            _skip_tests: "list[str] | str | None",
+        ) -> Never:
             extracted_paths.append(data["_path"])
-            self.assertTrue(os.path.isdir(data["_path"]))
-            raise ValueError("rating failed")
+            self.assertTrue(Path(data["_path"]).is_dir())
+            message = "rating failed"
+            raise ValueError(message)
 
         with (
             unittest.mock.patch("pyroma.ratings.rate_project", side_effect=fail_rating),
@@ -965,9 +1103,9 @@ class DistroDataTest(unittest.TestCase):
             pyroma.run("file", str(src), quiet=True)
 
         self.assertEqual(len(extracted_paths), 1)
-        self.assertFalse(os.path.exists(extracted_paths[0]))
+        self.assertFalse(Path(extracted_paths[0]).exists())
 
-    def test_fallback_tar_extractor_rejects_links_and_devices(self):
+    def test_fallback_tar_extractor_rejects_links_and_devices(self) -> None:
         unsafe_types = (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.CHRTYPE, tarfile.BLKTYPE, tarfile.FIFOTYPE)
 
         for member_type in unsafe_types:
@@ -984,7 +1122,7 @@ class DistroDataTest(unittest.TestCase):
 
                 archive.extractall.assert_not_called()
 
-    def test_fallback_tar_extractor_preserves_regular_files(self):
+    def test_fallback_tar_extractor_preserves_regular_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             member = tarfile.TarInfo("package/data.txt")
             archive = unittest.mock.Mock(name="safe.tar")
