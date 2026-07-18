@@ -4,6 +4,7 @@ prune pyroma/testdata/complete/*.egg
 graft pyroma/testdata/distributions
 include tox.ini
 include DEVELOPMENT.rst
+include UPGRADING.rst
 include Makefile
 exclude .pre-commit-config.yaml
 include pyroma/py.typed
