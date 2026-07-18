@@ -168,7 +168,7 @@ def main() -> None:
 
     try:
         rating = run(mode, args.package, args.quiet, args.skip_tests, args.index_url, args.output_format)
-    except (ratings.ConfigurationError, ValueError) as e:
+    except (OSError, ratings.ConfigurationError, ValueError) as e:
         if args.output_format == "json":
             print(report.format_json_error(e, _json_meta(mode, args.package)))
         else:
@@ -213,17 +213,19 @@ def run(
         print("Checking " + argument)
 
     data = _get_data(mode, argument, index_url=index_url)
+    try:
+        if verbose:
+            print("Found " + (data.get("name") or "nothing"))
 
-    if verbose:
-        print("Found " + (data.get("name") or "nothing"))
+        rated = ratings.rate_project(data, skip_tests)
 
-    rated = ratings.rate_project(data, skip_tests)
+        if output_format == "json":
+            print(report.format_json(rated, _json_meta(mode, argument)))
+        elif quiet:
+            print(rated.rating)
+        else:
+            print(report.format_text(rated))
 
-    if output_format == "json":
-        print(report.format_json(rated, _json_meta(mode, argument)))
-    elif quiet:
-        print(rated.rating)
-    else:
-        print(report.format_text(rated))
-
-    return rated.rating
+        return rated.rating
+    finally:
+        distributiondata.cleanup(data)

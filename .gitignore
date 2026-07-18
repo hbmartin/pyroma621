@@ -19,3 +19,4 @@ py3*
 .pytest_cache
 .ruff_cache
 uv.lock
+site/

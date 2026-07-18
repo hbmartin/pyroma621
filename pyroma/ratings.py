@@ -92,18 +92,23 @@ class BaseTest:
         raise NotImplementedError
 
     def _passed(self, weight: "int | None" = None) -> TestResult:
-        return TestResult(True, self.weight if weight is None else weight, self.fatal, "")
+        return TestResult(
+            outcome=True,
+            weight=self.weight if weight is None else weight,
+            fatal=self.fatal,
+            message="",
+        )
 
     def _failed(self, message: str, weight: "int | None" = None, fatal: "bool | None" = None) -> TestResult:
         return TestResult(
-            False,
-            self.weight if weight is None else weight,
-            self.fatal if fatal is None else fatal,
-            message,
+            outcome=False,
+            weight=self.weight if weight is None else weight,
+            fatal=self.fatal if fatal is None else fatal,
+            message=message,
         )
 
     def _skipped(self) -> TestResult:
-        return TestResult(None, 0, False, "")
+        return TestResult(outcome=None, weight=0, fatal=False, message="")
 
 
 class FieldTest(BaseTest):
@@ -298,14 +303,14 @@ class PythonClassifierVersion(BaseTest):
             # Python 2 or 3 was specified but no more detail than that:
             return self._failed(
                 "The classifiers should specify what minor versions of "
-                "Python you support as well as what major version."
+                "Python you support as well as what major version. "
                 "You can find the list of standard classifiers here: "
                 "https://pypi.org/classifiers/",
                 weight=25,
             )
         # No Python version specified at all:
         return self._failed(
-            "The classifiers should specify what Python versions you support."
+            "The classifiers should specify what Python versions you support. "
             "You can find the list of standard classifiers here: "
             "https://pypi.org/classifiers/",
             weight=100,
@@ -449,19 +454,19 @@ class Licensing(BaseTest):
     weight = 50
 
     def test(self, data: Metadata) -> TestResult:
-        license = data.get("license")
+        license_value = data.get("license")
         license_expression = data.get("license-expression")
         classifiers = data.get("classifier", [])
         has_license_classifier = any(c.startswith("License") for c in classifiers)
 
-        if not license and not license_expression and not has_license_classifier:
+        if not license_value and not license_expression and not has_license_classifier:
             return self._failed(
                 "You should specify a license for your package with the 'License-Expression' field. "
                 "See https://packaging.python.org/en/latest/specifications/core-metadata/#license-expression "
                 "for more information."
             )
 
-        if license and license_expression:
+        if license_value and license_expression:
             # The Core Metadata specification forbids this, and PyPI rejects
             # such uploads.
             return self._failed(
@@ -629,6 +634,9 @@ class PyProjectProjectTable(BaseTest):
 
         errors = []
         dynamic = project.get("dynamic", [])
+        if not isinstance(dynamic, list):
+            # PyprojectTomlValid reports the schema violation.
+            dynamic = []
 
         if "name" in dynamic:
             errors.append("The 'name' key must be static, it must never be listed in 'dynamic'.")
@@ -640,8 +648,8 @@ class PyProjectProjectTable(BaseTest):
         if isinstance(readme, dict) and "file" in readme and "text" in readme:
             errors.append("The 'readme' table must not specify both 'file' and 'text'.")
 
-        license = project.get("license")
-        if isinstance(license, dict) and "file" in license and "text" in license:
+        license_config = project.get("license")
+        if isinstance(license_config, dict) and "file" in license_config and "text" in license_config:
             errors.append("The 'license' table must not specify both 'file' and 'text'.")
 
         entry_points = project.get("entry-points", {})
@@ -717,17 +725,16 @@ class ValidREST(BaseTest):
         stream = io.StringIO()
         settings = {"warning_stream": stream}
 
-        message = ""
+        caught_message = ""
         try:
             publish_parts(source=source, writer="html4css1", settings_overrides=settings)
         except SystemMessage as e:
-            message = e.args[0]
-        errors = stream.getvalue().strip()
+            caught_message = str(e)
+        errors = stream.getvalue().strip() or caught_message
         if not errors:
             return self._passed()
 
-        message = "\n" + errors
-        return self._failed("Your Description is not valid ReST: " + message)
+        return self._failed("Your Description is not valid ReST: \n" + errors)
 
 
 class BusFactor(BaseTest):
@@ -755,7 +762,7 @@ class MissingBuildSystem(BaseTest):
             # but failing them should give you a worse rating.
             return self._failed(
                 "You seem to neither have a setup.py, nor a pyproject.toml, only setup.cfg.\n"
-                "This makes it unclear how your project should be built, and some packaging tools may fail."
+                "This makes it unclear how your project should be built, and some packaging tools may fail.\n"
                 "See https://packaging.python.org for more information on how to package your project.",
                 weight=400,
             )
@@ -951,7 +958,7 @@ def rate_project(data: Metadata, skip_tests: "list[str] | str | None" = None) ->
                 problems=[
                     Problem(
                         test="NoConfigFound",
-                        message="I couldn't find any package data. Are checking the correct directory or file?",
+                        message="I couldn't find any package data. Are you checking the correct directory or file?",
                         weight=0,
                         fatal=True,
                     )

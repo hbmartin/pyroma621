@@ -3,6 +3,7 @@ import io
 import json
 import os
 import shutil
+import tarfile
 import tempfile
 import unittest
 import unittest.mock
@@ -95,7 +96,7 @@ class RatingsTest(unittest.TestCase):
                 [
                     "You seem to neither have a setup.py, nor a pyproject.toml, only setup.cfg.\n"
                     "This makes it unclear how your project should be built, and some packaging "
-                    "tools may fail."
+                    "tools may fail.\n"
                     "See https://packaging.python.org for more information on how to package your project.",
                     "Your project does not have a pyproject.toml file, which is highly "
                     "recommended.\n"
@@ -143,7 +144,7 @@ class RatingsTest(unittest.TestCase):
                     "The package's Summary should be longer than 10 characters.",
                     "The package's Description is quite short.",
                     "Your package does not have classifier data.",
-                    "The classifiers should specify what Python versions you support."
+                    "The classifiers should specify what Python versions you support. "
                     "You can find the list of standard classifiers here: https://pypi.org/classifiers/",
                     "You should specify what Python versions you support with the 'Requires-Python' metadata.",
                     "Your package does not have keywords data.",
@@ -180,7 +181,7 @@ class RatingsTest(unittest.TestCase):
                     "The package had no Summary!",
                     "The package's Description is quite short.",
                     "Your package does not have classifier data.",
-                    "The classifiers should specify what Python versions you support."
+                    "The classifiers should specify what Python versions you support. "
                     "You can find the list of standard classifiers here: https://pypi.org/classifiers/",
                     "You should specify what Python versions you support with the 'Requires-Python' metadata.",
                     "Your package does not have keywords data.",
@@ -211,7 +212,7 @@ class RatingsTest(unittest.TestCase):
                     "The package's Summary should be longer than 10 characters.",
                     "The package's Description is quite short.",
                     "Your package does not have classifier data.",
-                    "The classifiers should specify what Python versions you support."
+                    "The classifiers should specify what Python versions you support. "
                     "You can find the list of standard classifiers here: https://pypi.org/classifiers/",
                     "You should specify what Python versions you support with the 'Requires-Python' metadata.",
                     "Your package does not have keywords data.",
@@ -464,6 +465,22 @@ class BugFixTest(unittest.TestCase):
         messages = rate(testdata)[1]
         self.assertTrue(any("not valid ReST" in msg for msg in messages))
 
+    @unittest.mock.patch("pyroma.ratings.publish_parts")
+    def test_valid_rest_fails_on_system_message_without_warning_output(self, publishmock):
+        system_message = unittest.mock.Mock()
+        system_message.astext.return_value = "severe parsing failure"
+        publishmock.side_effect = ratings.SystemMessage(system_message, 4)
+
+        result = ratings.ValidREST().test(
+            {
+                "description": "broken",
+                "description-content-type": "text/x-rst",
+            }
+        )
+
+        self.assertIs(result.outcome, False)
+        self.assertIn("severe parsing failure", result.message)
+
     def test_bus_factor_zero_owners_fails(self):
         result = ratings.BusFactor().test({"_owners": []})
         self.assertIs(result.outcome, False)
@@ -499,12 +516,39 @@ class BugFixTest(unittest.TestCase):
             tb2 = Path(tmp) / "complete-1.0.dev1.tb2"
             shutil.copyfile(src, tb2)
             data = distributiondata.get_data(tb2)
-        self.assertEqual(data.get("name"), "complete")
+        try:
+            self.assertEqual(data.get("name"), "complete")
+        finally:
+            distributiondata.cleanup(data)
 
     def test_no_config_found_in_empty_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             data = projectdata.get_data(tmp)
         self.assertIn("_no_config_found", data)
+
+    def test_malformed_dynamic_value_returns_validation_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "pyproject.toml").write_text(
+                '[project]\nname = "example"\nversion = "1.0"\ndynamic = 42\n',
+                encoding="UTF-8",
+            )
+            testdata = COMPLETE.copy()
+            testdata["_path"] = tmp
+
+            messages = rate(testdata)[1]
+
+        self.assertTrue(any("pyproject.toml is invalid" in message for message in messages))
+
+    def test_user_facing_diagnostics_have_word_boundaries(self):
+        major_only = ratings.PythonClassifierVersion().test({"classifier": ["Programming Language :: Python :: 3"]})
+        no_python = ratings.PythonClassifierVersion().test({"classifier": []})
+        missing_build = ratings.MissingBuildSystem().test({"_missing_build_system": True})
+        no_config = ratings.rate_project({"_no_config_found": True})
+
+        self.assertIn("major version. You", major_only.message)
+        self.assertIn("support. You", no_python.message)
+        self.assertIn("may fail.\nSee", missing_build.message)
+        self.assertIn("Are you checking", no_config.problems[0].message)
 
 
 class ReportTest(unittest.TestCase):
@@ -604,6 +648,10 @@ class PyPITest(unittest.TestCase):
         rating = rate(data)
 
         self.assertEqual(rating, (10, []))
+        extracted_path = data["_path"]
+        self.assertTrue(os.path.isdir(extracted_path))
+        distributiondata.cleanup(data)
+        self.assertFalse(os.path.exists(extracted_path))
 
     @unittest.mock.patch("pyroma.pypidata.requests.get")
     def test_get_project_data_custom_index_url(self, requestmock):
@@ -644,7 +692,32 @@ class PyPITest(unittest.TestCase):
         data = pypidata.get_data("internalpkg", index_url="https://packages.example.com")
 
         self.assertEqual(data["_owners"], ["dev1"])
-        proxymock.assert_called_once_with("https://packages.example.com/pypi")
+        proxymock.assert_called_once()
+        args, kwargs = proxymock.call_args
+        self.assertEqual(args, ("https://packages.example.com/pypi",))
+        self.assertIsInstance(kwargs["transport"], pypidata._TimeoutSafeTransport)
+        self.assertEqual(kwargs["transport"].timeout, pypidata.REQUEST_TIMEOUT)
+
+    def test_xmlrpc_transports_apply_timeout_to_connections(self):
+        variants = (
+            (pypidata._TimeoutTransport, xmlrpclib.Transport),
+            (pypidata._TimeoutSafeTransport, xmlrpclib.SafeTransport),
+        )
+
+        for transport_class, base_class in variants:
+            with self.subTest(transport=transport_class.__name__):
+                connection = unittest.mock.Mock()
+                with unittest.mock.patch.object(base_class, "make_connection", return_value=connection):
+                    transport = transport_class(pypidata.REQUEST_TIMEOUT)
+                    result = transport.make_connection("packages.example.com")
+
+                self.assertIs(result, connection)
+                self.assertEqual(connection.timeout, pypidata.REQUEST_TIMEOUT)
+
+        self.assertIsInstance(pypidata._xmlrpc_transport("http://packages.example.com"), pypidata._TimeoutTransport)
+        self.assertIsInstance(
+            pypidata._xmlrpc_transport("https://packages.example.com"), pypidata._TimeoutSafeTransport
+        )
 
     @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")
     @unittest.mock.patch("pyroma.pypidata._get_project_data")
@@ -701,6 +774,35 @@ class PyPITest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "404"):
             pypidata.get_data("example")
+
+    @unittest.mock.patch("pyroma.pypidata.distributiondata.get_data")
+    @unittest.mock.patch("pyroma.pypidata.requests.get")
+    @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")
+    @unittest.mock.patch("pyroma.pypidata._get_project_data")
+    def test_signed_sdist_url_uses_decoded_path_basename(
+        self, projectdatamock, proxymock, requestmock, distributionmock
+    ):
+        projectdatamock.return_value = {
+            "info": {"name": "example", "version": "1.0"},
+            "releases": {
+                "1.0": [
+                    {
+                        "packagetype": "sdist",
+                        "url": "https://files.example.com/example%2D1.0.tar.gz?token=secret",
+                    }
+                ]
+            },
+        }
+        proxymock.return_value.__enter__.return_value.package_roles.return_value = []
+        requestmock.return_value = unittest.mock.Mock(ok=True, content=b"archive")
+        distributionmock.return_value = {}
+
+        pypidata.get_data("example")
+
+        downloaded_path = distributionmock.call_args.args[0]
+        self.assertEqual(os.path.basename(downloaded_path), "example-1.0.tar.gz")
+        with self.assertRaisesRegex(ValueError, "no filename"):
+            pypidata._download_filename("https://files.example.com/")
 
     @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")
     @unittest.mock.patch("pyroma.pypidata._get_project_data")
@@ -776,6 +878,15 @@ class MainTest(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertIn("no rating can be calculated", stderr)
 
+    def test_main_missing_distribution_exits_3(self):
+        missing = TESTDATA_DIR / "distributions" / "does-not-exist.tar.gz"
+
+        code, _stdout, stderr = self._run_main(["-f", str(missing)])
+
+        self.assertEqual(code, 3)
+        self.assertIn("does-not-exist.tar.gz", stderr)
+        self.assertNotIn("Traceback", stderr)
+
 
 class ProjectDataTest(unittest.TestCase):
     maxDiff = None
@@ -798,9 +909,12 @@ class DistroDataTest(unittest.TestCase):
         for filename in os.listdir(directory):
             if filename.startswith("complete"):
                 data = distributiondata.get_data(directory / filename)
-                self.assertTrue(data.pop("_sdist"), filename)
-                self.assertTrue(os.path.isdir(data.pop("_path")), filename)
-                self.assertEqual(data, COMPLETE)
+                try:
+                    self.assertTrue(data.pop("_sdist"), filename)
+                    self.assertTrue(os.path.isdir(data.pop("_path")), filename)
+                    self.assertEqual(data, COMPLETE)
+                finally:
+                    distributiondata.cleanup(data)
 
     def test_distribution_data_keeps_unpacked_tree(self):
         # The unpacked tree must stay around after get_data returns, so
@@ -813,3 +927,69 @@ class DistroDataTest(unittest.TestCase):
         path = data["_path"]
         self.assertTrue(os.path.isdir(path))
         self.assertTrue(os.path.exists(os.path.join(path, "pyproject.toml")))
+        distributiondata.cleanup(data)
+        self.assertFalse(os.path.exists(path))
+
+    def test_run_cleans_distribution_after_rating(self):
+        src = TESTDATA_DIR / "distributions" / "complete-1.0.dev1.tar.gz"
+        extracted_paths = []
+
+        def rate_project(data, skip_tests):
+            extracted_paths.append(data["_path"])
+            self.assertTrue(os.path.isdir(data["_path"]))
+            return ratings.RatedProject(name="complete", rating=10, level=ratings.LEVELS[10], problems=[])
+
+        with (
+            unittest.mock.patch("pyroma.ratings.rate_project", side_effect=rate_project),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            results = [pyroma.run("file", str(src), quiet=True) for _ in range(3)]
+
+        self.assertEqual(results, [10, 10, 10])
+        self.assertEqual(len(extracted_paths), 3)
+        self.assertTrue(all(not os.path.exists(path) for path in extracted_paths))
+
+    def test_run_cleans_distribution_when_rating_fails(self):
+        src = TESTDATA_DIR / "distributions" / "complete-1.0.dev1.tar.gz"
+        extracted_paths = []
+
+        def fail_rating(data, skip_tests):
+            extracted_paths.append(data["_path"])
+            self.assertTrue(os.path.isdir(data["_path"]))
+            raise ValueError("rating failed")
+
+        with (
+            unittest.mock.patch("pyroma.ratings.rate_project", side_effect=fail_rating),
+            self.assertRaisesRegex(ValueError, "rating failed"),
+        ):
+            pyroma.run("file", str(src), quiet=True)
+
+        self.assertEqual(len(extracted_paths), 1)
+        self.assertFalse(os.path.exists(extracted_paths[0]))
+
+    def test_fallback_tar_extractor_rejects_links_and_devices(self):
+        unsafe_types = (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.CHRTYPE, tarfile.BLKTYPE, tarfile.FIFOTYPE)
+
+        for member_type in unsafe_types:
+            with self.subTest(member_type=member_type), tempfile.TemporaryDirectory() as tmp:
+                member = tarfile.TarInfo("package/unsafe")
+                member.type = member_type
+                member.linkname = "../../outside"
+                archive = unittest.mock.Mock(name="unsafe.tar")
+                archive.name = "unsafe.tar"
+                archive.getmembers.return_value = [member]
+
+                with self.assertRaisesRegex(ValueError, "Unsafe member"):
+                    distributiondata._safe_extract_tar(archive, tmp)
+
+                archive.extractall.assert_not_called()
+
+    def test_fallback_tar_extractor_preserves_regular_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            member = tarfile.TarInfo("package/data.txt")
+            archive = unittest.mock.Mock(name="safe.tar")
+            archive.getmembers.return_value = [member]
+
+            distributiondata._safe_extract_tar(archive, tmp)
+
+            archive.extractall.assert_called_once_with(tmp)

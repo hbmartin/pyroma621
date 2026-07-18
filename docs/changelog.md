@@ -1,244 +1,173 @@
-Changelog
-=========
+# Changelog
 
-5.1b3 (unreleased)
-------------------
+## 5.1b3 (unreleased)
 
-- Rating tests are now stateless: each test returns a ``TestResult``
+- Rating tests are now stateless: each test returns a `TestResult`
   instead of mutating shared test instances, and the new
-  ``ratings.rate_project()`` returns a structured ``RatedProject``
-  with per-test problems. ``ratings.rate()`` keeps its old
-  ``(rating, messages)`` return value.
-
-- Added a ``--format json`` option for machine-readable output.
+  `ratings.rate_project()` returns a structured `RatedProject`
+  with per-test problems. `ratings.rate()` keeps its old
+  `(rating, messages)` return value.
+- Added a `--format json` option for machine-readable output.
   Program output no longer goes through the root logger, and
-  ``--quiet`` simply prints the rating.
-
+  `--quiet` simply prints the rating.
 - pyroma no longer depends on setuptools or distutils at runtime.
-  pyproject.toml validation now uses ``validate-pyproject``, and
-  pyroma's own metadata lives in ``pyproject.toml``.
-
+  pyproject.toml validation now uses `validate-pyproject`, and
+  pyroma's own metadata lives in `pyproject.toml`.
 - setup.cfg-only projects (no setup.py, no pyproject.toml) are now
   rated 1 on their build-system problems alone, since no standard tool
   can build them and no metadata can be extracted.
-
 - New and stricter checks based on the packaging specifications:
-  version numbers are validated with ``packaging.version`` (warning
+  version numbers are validated with `packaging.version` (warning
   about non-canonical forms, epochs and local version segments),
-  ``Metadata-Version`` must be a legal value, project names must match
-  the packaging name format (fatal), ``License-Expression`` must be
-  valid SPDX (fatal, as is combining it with ``License``),
-  ``Description-Content-Type`` and every ``Requires-Dist`` entry are
-  validated, the pyproject.toml ``[project]`` table MUST-rules are
-  enforced (fatal), and ``Project-URL`` labels are checked against the
+  `Metadata-Version` must be a legal value, project names must match
+  the packaging name format (fatal), `License-Expression` must be
+  valid SPDX (fatal, as is combining it with `License`),
+  `Description-Content-Type` and every `Requires-Dist` entry are
+  validated, the pyproject.toml `[project]` table MUST-rules are
+  enforced (fatal), and `Project-URL` labels are checked against the
   well-known labels (with the 32 character limit fatal).
-
-- Official support for the ``uv_build`` backend, and backend-neutral
+- Official support for the `uv_build` backend, and backend-neutral
   advice when pyproject.toml is missing.
-
 - PyPI requests now use timeouts and clear error messages, and
   downloaded sdists are always cleaned up.
-
-- All code is now type-annotated and checked with mypy; a
-  ``py.typed`` marker ships with the package.
-
+- All code is now type-annotated and checked with ty and pyrefly; a
+  `py.typed` marker ships with the package.
 - Linting moved from black + flake8 to Ruff; the test suite runs with
   a coverage gate.
-
 - Exit codes are now documented in the README.
-
 - Bug fixes found by review: descriptions with a parameterized
-  ``Description-Content-Type`` (for example ``text/markdown;
-  charset=UTF-8``) are no longer validated as ReStructuredText; the
+  `Description-Content-Type` (for example `text/markdown; charset=UTF-8`) are no longer validated as ReStructuredText; the
   BusFactor test no longer passes for packages with zero owners;
-  ``--skip-tests`` names are matched exactly instead of by substring,
-  and trailing separators no longer reject the whole list; ``.tb2``
+  `--skip-tests` names are matched exactly instead of by substring,
+  and trailing separators no longer reject the whole list; `.tb2`
   archives are recognized; tar archives are extracted with the "data"
   filter, which also protects against symlink attacks.
-
 - More robust index handling: XML-RPC faults and network errors while
   fetching package roles are now warnings instead of crashes, a failed
   sdist download raises a clear error, and index data without a
-  ``releases`` listing no longer crashes. Keys the PyPI JSON API
-  synthesizes itself (``project_url``, ``package_url``, ``release_url``
+  `releases` listing no longer crashes. Keys the PyPI JSON API
+  synthesizes itself (`project_url`, `package_url`, `release_url`
   and friends) are no longer folded into the metadata, so they cannot
-  clobber the real ``Home-page`` or hide a missing project URL.
-
+  clobber the real `Home-page` or hide a missing project URL.
 - Rating a distribution file or PyPI package now keeps the unpacked
   sdist around for the duration of the run, so the pyproject.toml
   validation tests run in those modes too. The check-manifest test
   still requires a VCS checkout and is skipped for sdists.
-
 - A configuration that skips every rated test now raises a
-  ``ConfigurationError``. The command line reports errors (bad
+  `ConfigurationError`. The command line reports errors (bad
   configuration, package not found, network problems) cleanly on
-  stderr — or as a JSON error document with ``--format json`` — and
+  stderr — or as a JSON error document with `--format json` — and
   exits with the new exit code 3.
-
-- Python 3.11 or later is now required; the ``tomli`` fallback
+- Python 3.11 or later is now required; the `tomli` fallback
   dependency is gone.
-
-- Ruff is pinned in one place (the ``lint`` dependency group) and run
+- Ruff is pinned in one place (the `lint` dependency group) and run
   through uv both in CI and in pre-commit. mypy has been replaced by
   the ty and pyrefly type checkers, run the same way through the
-  ``typecheck`` dependency group.
+  `typecheck` dependency group.
 
-
-5.1b2 (2026-06-14)
-------------------
+## 5.1b2 (2026-06-14)
 
 - Added deprecation warnings for deprecated metadata.
 
-
-5.1b1 (2026-06-14)
-------------------
+## 5.1b1 (2026-06-14)
 
 - Adds a rating that verifies pyproject.toml data with setuptools.
-
 - Added helpful links to some error messages.
-
 - Added support for checking packages on a custom PyPI-compatible index with
-  the ``--index-url`` option.
+  the `--index-url` option.
 
-
-5.0.1 (2025-12-09)
-------------------
+## 5.0.1 (2025-12-09)
 
 - check-manifest was missing from the requirements list.
+- Passing in multiple tests to be skipped now actually works. \[Matt Norton\]
 
-- Passing in multiple tests to be skipped now actually works. [Matt Norton]
-
-
-5.0 (2025-07-15)
-----------------
+## 5.0 (2025-07-15)
 
 - Re-releasing as final.
 
-
-5.0b2 (2025-07-10)
-------------------
+## 5.0b2 (2025-07-10)
 
 - Fixed a bug that failed to find license-expression fields.
 
-
-5.0b1 (2025-07-04)
-------------------
+## 5.0b1 (2025-07-04)
 
 - Changed the internal metadata names to match Core Metadata. This brings
   less confusion, especially since setuptools and PyPI aren't exactly the
   same either, so let's pick the offical standard and run with it.
-
 - Added a rating for if the wheel fails to build. Unfortunately it's
   impossible to get a proper error out of it, so the message tells
   you to run python -m build.
 
-
-5.0a1 (2025-07-02)
-------------------
+## 5.0a1 (2025-07-02)
 
 - Removed support for fetching data via monkey-patching setup.py.
-
 - Added a warning if you have only a setup.cfg, something that is
   working with some tools, but is not officially supported.
-
 - Some general cleanups and simplifications thanks to those changes.
 
-
-4.3.3 (2025-07-03)
-------------------
+## 4.3.3 (2025-07-03)
 
 - Licensing specifications are less flexible than I thought.
   Updated to reflect that.
 
-
-4.3.2 (2025-07-02)
-------------------
+## 4.3.2 (2025-07-02)
 
 - Added support for License-Expression as per PEP 639.
 
-
-4.3.1 (2025-07-01)
-------------------
+## 4.3.1 (2025-07-01)
 
 - Deprecation warnings? For the packaging configuration? What was I thinking?
   I'm instead adding a rating telling people that they should add a
   pyproject.toml. Much nicer.
 
-
-4.3 (2025-07-01)
-----------------
+## 4.3 (2025-07-01)
 
 - Added a --skip-tests parameter to allow skipping of certain tests.
   You shouldn't skip tests, of course, but now you can. This is actually
   only implemented so that I can add a test using check-manifest and
   skip it when run from the zest.releaser hook.
-
 - If you also have check-manifest installed, pyroma will run that as a test.
   No longer do you need to call it separately! However, if Pyroma is invoked
   from zest.releaser, it will not be run, because check-manifest has a separate
   hook for zest.releaser, so that would run it twice.
-
-- Allow private classifiers [hugovk]
-
-- Using tox to run tests [hugovk]
-
+- Allow private classifiers \[hugovk\]
+- Using tox to run tests \[hugovk\]
 - Deperating the support for setup.py
 
-
-4.2 (2023-02-25)
-----------------
+## 4.2 (2023-02-25)
 
 - Fall back to installing project's build backend in an isolated environment
-  if a compatible version isn't installed in the current env [CAM-Gerlach]
+  if a compatible version isn't installed in the current env \[CAM-Gerlach\]
+- Fix metadata extraction failure when project `long_description` is included
+  as a header rather than a payload in the `METADTA` file \[CAM-Gerlach\]
+- Add a fallback to restore compatibility with Setuptools \<61 \[CAM-Gerlach\]
+- Fix tests failing due to invalid versions on Setuptools \>=66 \[CAM-Gerlach\]
+- Add `python_requires`, update classifiers, add implicit dependencies
+  and remove unused deps in Pyroma's own packaging metadata \[CAM-Gerlach\]
 
-- Fix metadata extraction failure when project ``long_description`` is included
-  as a header rather than a payload in the ``METADTA`` file [CAM-Gerlach]
-
-- Add a fallback to restore compatibility with Setuptools <61 [CAM-Gerlach]
-
-- Fix tests failing due to invalid versions on Setuptools >=66 [CAM-Gerlach]
-
-- Add ``python_requires``, update classifiers, add implicit dependencies
-  and remove unused deps in Pyroma's own packaging metadata [CAM-Gerlach]
-
-
-4.1 (2022-11-24)
-----------------
+## 4.1 (2022-11-24)
 
 - Moved from a custom trove classifiers list to using the trove-classifiers
-  package [hugovk]
-
-- Support checking the Requires-Python metadata [davidandreoletti]
-
+  package \[hugovk\]
+- Support checking the Requires-Python metadata \[davidandreoletti\]
 - Silence noisy build backend output when building metadata
-  [CAM-Gerlach, wesleybl]
-
-- Official support for Python 3.11 [hugovk, radarhere]
-
-- Some string formatting bugs [hugovk, CAM-Gerlach]
-
+  \[CAM-Gerlach, wesleybl\]
+- Official support for Python 3.11 \[hugovk, radarhere\]
+- Some string formatting bugs \[hugovk, CAM-Gerlach\]
 - Now follows black and flake8 rules
+- Check if author_email field contains author name \[bessman\]
 
-- Check if author_email field contains author name [bessman]
-
-
-4.0 (2022-04-14)
-----------------
+## 4.0 (2022-04-14)
 
 - No changes from 4.0b2.
 
-
-4.0b2 (2022-03-29)
-------------------
+## 4.0b2 (2022-03-29)
 
 - The deprecation test for test_suite is no longer needed, as the patched
   setuptools method of gathering metadata as a whole is deprecated.
-
 - `description_content_type` also needs a mapping in the metadata map.
 
-
-4.0b1 (2022-03-28)
-------------------
+## 4.0b1 (2022-03-28)
 
 - Added support for PEP517 by using `build` to build the metadata as a
   preferred build method over the old patched setuptools method.
@@ -247,328 +176,213 @@ Changelog
   Thanks to Christopher A.M. Gerlach for valuable insight into the
   modern packaging systems.
 
-
-3.3 (2022-03-28)
-----------------
+## 3.3 (2022-03-28)
 
 - Add a deprecation for `test_suite`
 
+## 3.2.1 (2022-03-27)
 
-3.2.1 (2022-03-27)
-------------------
+- Fixed \_\_getattr\_\_-related crash in tests with python3.7 \[Robert T. McGibbon\]
 
-- Fixed __getattr__-related crash in tests with python3.7 [Robert T. McGibbon]
+## 3.2 (2021-06-22)
 
-
-3.2 (2021-06-22)
-----------------
-
-- Added support for pre-commit [CAM Gerlach]
-
+- Added support for pre-commit \[CAM Gerlach\]
 - Rewrote parts of the PyPI support, to avoid using the xmlrpc API,
   since it's being heavily rate-limited at the moment. Only one call
   is using it now, which seems to work fine.
-
 - Backwards incompatible change: As a result of the above change, when
   looking for packages on PyPI, the package name must now be spelled
   exactly correct, including capitalization.
+- Some more code cleanup/modernization \[CAM Gerlach\]
+- Added --quiet option to output only the rating \[Hugo van Kemenade\]
+- Pyroma is now an executable module, and can be called with `python -m pyroma` \[RuRo\]
 
-- Some more code cleanup/modernization [CAM Gerlach]
-
-- Added --quiet option to output only the rating [Hugo van Kemenade]
-
-- Pyroma is now an executable module, and can be called with `python -m pyroma` [RuRo]
-
-
-3.1 (2021-03-06)
-----------------
+## 3.1 (2021-03-06)
 
 - Added correct detection of setup.py encoding
+- Code cleanup \[CAM Gerlach\]
 
-- Code cleanup [CAM Gerlach]
+## 3.0.1 (2021-03-02)
 
-
-3.0.1 (2021-03-02)
-------------------
-
-- Drop support for Python 2 [Florian Bruhin]
-
+- Drop support for Python 2 \[Florian Bruhin\]
 - Add back official support for Python 3.6, I didn't realize it was still officially supported
 
-
-2.6.1 (2021-02-16)
-------------------
+## 2.6.1 (2021-02-16)
 
 - Update to the current list of Trove classifiers.
-
 - Officially support Python 3.8 and 3.9
-
 - Drop official support for Python 3.5 and 3.6 (still works though).
 
-
-2.6 (2019-11-02)
-----------------
+## 2.6 (2019-11-02)
 
 - Ran flake8 and black on the code, better formatting for
   classifiers.py generation.
-
-- Support for PEP 517, setup.cfg-only packages. [Max Tyulin]
-
+- Support for PEP 517, setup.cfg-only packages. \[Max Tyulin\]
 - Adds support for Markdown long_descriptions, if you set
   long_description_content_type to 'text/markdown'
-
 - Installs Pygments to avoid an error message of you have
   syntax highlighted code in the long_description.
 
+## 2.5 (2019-06-01)
 
-2.5 (2019-06-01)
-----------------
-
-- Fixed #35: Correctly restore ``sys.argv``.  [maurits]
-
+- Fixed \#35: Correctly restore `sys.argv`. \[maurits\]
 - Added back the BusFactor test, the XMLRPC API supports it.
-
-- #26: Adding a test to check for a development status classifier.
-
-- #21: Accept the new project_urls distribution data.
-
+- \#26: Adding a test to check for a development status classifier.
+- \#21: Accept the new project_urls distribution data.
 - Now verifies that classifiers are valid, and that the license field
   and license classifiers match.
-
 - The rating now again reflects if the long_description isn't valid ReST.
+- \#38: Recommendations for the License field has changed.
 
-- #38: Recommendations for the License field has changed.
-
-
-2.4 (2018-08-15)
-----------------
+## 2.4 (2018-08-15)
 
 - Get rid of the tests that rely on HTML scraping, it's too brittle.
-
 - Update to use pypi.org instead of pypi.python.org
-  [Andreas Lutro, Lennart Regebro]
-
+  \[Andreas Lutro, Lennart Regebro\]
 - Added -n command line option to set the minimum rating needed for pyroma
   to return success, useful in scripts.
-  [Scott Colby]
+  \[Scott Colby\]
 
+## 2.3.1 (2018-05-28)
 
-2.3.1 (2018-05-28)
-------------------
+- Fixed \#12: Installation fails with a non-UTF8 locale under Python 3.
+  \[ericof, 4383, regebro\]
 
-- Fixed #12: Installation fails with a non-UTF8 locale under Python 3.
-  [ericof, 4383, regebro]
+## 2.3 (2017-11-28)
 
-
-2.3 (2017-11-28)
-----------------
-
-- Check that a classifier specifies the project license. [4383]
-
+- Check that a classifier specifies the project license. \[4383\]
 - Dropped support for Python 2.6, 3.3 and 3.4.
-
-- Fixed a unicode issue [gotcha]
-
+- Fixed a unicode issue \[gotcha\]
 - Stopped recommending places to keep documentation.
 
-
-2.2 (2016-10-26)
-----------------
+## 2.2 (2016-10-26)
 
 - Removed the TestSuite rating. I decided it was too close to looking at
   code quality. Pyroma no longer cares if you have tests or not.
+- Fixed \#36: PyPI now requires https.
 
-- Fixed #36: PyPI now requires https.
+## 2.1 (2016-10-18)
 
+- \#35: Support for PEP-440.
 
-2.1 (2016-10-18)
-----------------
+## 2.0.2 (2016-03-06)
 
-- #35: Support for PEP-440.
-
-
-2.0.2 (2016-03-06)
-------------------
-
-- Faked the __name__ variable to allow you to have a "if __name__" construct
+- Faked the \_\_name\_\_ variable to allow you to have a "if \_\_name\_\_" construct
   in the setup.py.
 
-
-2.0.1 (2016-03-06)
-------------------
+## 2.0.1 (2016-03-06)
 
 - Fixed a bug under Python 3 with certain imports.
 
-
-2.0.0 (2016-02-28)
-------------------
+## 2.0.0 (2016-02-28)
 
 - Stable release.
 
-
-2.0.0b2 (2015-11-09)
---------------------
+## 2.0.0b2 (2015-11-09)
 
 - Made it run under Python 3 again.
-
 - PEP8
 
-
-2.0.0b1 (2015-11-08)
---------------------
+## 2.0.0b1 (2015-11-08)
 
 - Big rewrite of how data is extracted from Distutils/Setuptools.
 
+## 1.8.3 (2015-11-08)
 
-1.8.3 (2015-11-08)
-------------------
+- Issue \#26: Checking a PyPI package could fail under Python 3.
 
-- Issue #26: Checking a PyPI package could fail under Python 3.
-
-1.8.2 (2015-06-14)
-------------------
+## 1.8.2 (2015-06-14)
 
 - Do not complain that the version number should be a string, when it
   is a basestring.
-  [maurits]
+  \[maurits\]
 
-
-1.8.1 (2015-04-27)
-------------------
+## 1.8.1 (2015-04-27)
 
 - This is what happens when you don't run the tests after merging.
 
+## 1.8 (2015-04-27)
 
-1.8 (2015-04-27)
-----------------
+- More robust rating. \[Jeff Quast\]
+- Closed \#24.
 
-- More robust rating. [Jeff Quast]
+## 1.7 (2014-10-19)
 
-- Closed #24.
+- Package name lookup is now case insensitive. \[Dmitry Vakhrushev\]
+- Fixed yet another error in return value. \[Dmitry Vakhrushev\]
 
+## 1.6 (2014-04-17)
 
-1.7 (2014-10-19)
-----------------
-
-- Package name lookup is now case insensitive. [Dmitry Vakhrushev]
-
-- Fixed yet another error in return value. [Dmitry Vakhrushev]
-
-
-1.6 (2014-04-17)
-----------------
-
-- Fixed issue #17: Integration with zest.releaser stopped working.
-
-- Fixed issue #18: Pyroma returns the rating as an exit code, this was a
+- Fixed issue \#17: Integration with zest.releaser stopped working.
+- Fixed issue \#18: Pyroma returns the rating as an exit code, this was a
   mistake. It now returns 0 on success, 1 on incorrect options and 2 if
   the rating is below 8.
-
-- Fixed issue #19: Implementing a custom test class counts as having tests.
-
+- Fixed issue \#19: Implementing a custom test class counts as having tests.
 - 8: Philadelphia is now considered a "success" based on practical experience.
 
+## 1.5 (2013-10-18)
 
-1.5 (2013-10-18)
-----------------
-
-- Fixed issue #13: Pyroma would fail if there was no description.
-
+- Fixed issue \#13: Pyroma would fail if there was no description.
 - Dropping support for Python 3.1. It still works, but it is unsupported.
+- Added support for command line options, implementing \#14 and \#15.
 
-- Added support for command line options, implementing #14 and #15.
+## 1.4 (2013-05-29)
 
-
-1.4 (2013-05-29)
-----------------
-
-- Issue #13: Pyroma would fail when checking a package name if no source
+- Issue \#13: Pyroma would fail when checking a package name if no source
   distribution could be found.
-
 - Added a check that the package has a source distribution on PyPI.
 
+## 1.3.1 (2013-05-29)
 
-1.3.1 (2013-05-29)
-------------------
-
-- Issue #11: pyroma would fail if long_description was a non-string.
-
+- Issue \#11: pyroma would fail if long_description was a non-string.
 - zest.releaser now only runs Pyroma on Python packages.
-
 - Because packages that use external test-runners can not get more
   that 9/10, this value is now also seen as acceptable when running
   Pyroma through zest.releaser.
 
-
-1.3 (2013-03-15)
-----------------
+## 1.3 (2013-03-15)
 
 - Added a test to make sure the version number is a string.
-
 - Made sure errors were printed also when a fatal error was encountered.
-
 - Better log messages.
-
 - The zest.releaser hook is now done before tagging, as it's more useful there.
   Especially in conjunction with check-manifest.
-
 - Having no long_description no longer causes pyroma to fail.
 
-
-1.2 (2013-03-06)
-----------------
+## 1.2 (2013-03-06)
 
 - Removed the running of tests. I always found it a bit iffy, and getting
   rid of it solved a lot of issues. Pyroma is now focused solely on
   packaging quality.
-
 - A package on PyPI with several versions will no longer return an error.
-
 - Now looks for documentation on pythonhosted.org or readthedocs.org.
-
 - Adds a hook for zest.releaser, so it can be run after doing the checkout,
   before uploading to PyPI.
 
-
-1.1 (2013-03-05)
-----------------
+## 1.1 (2013-03-05)
 
 - Better handling if there is no package data, for example if setup.py doesn't
-  call setup() unless you run it as the "__main__" script.
-
+  call setup() unless you run it as the "\_\_main\_\_" script.
 - If setup.py doesn't call setup() look for a main() script and try to run it.
 
-
-1.0 (2013-03-05)
-----------------
+## 1.0 (2013-03-05)
 
 - Support for Python 3.3
-
 - Added test for PEP 386 compliance.
 
-
-0.9.3 (2011-03-17)
-------------------
+## 0.9.3 (2011-03-17)
 
 - It's now using a ProxyStub for the PyPI xmlrpclib during tests.
-
 - Removed the Dependency rating.
-
 - Added a rating that runs tests, to see if they run. This will also take
   care of checking for dependencies.
 
-
-0.9.2 (2011-03-13)
-------------------
+## 0.9.2 (2011-03-13)
 
 - Commented out the dependency test, it was too unreliable.
-
 - Fixed the ReST.
-
 - Python 3 support.
 
-
-0.9.1 (2011-03-08)
-------------------
+## 0.9.1 (2011-03-08)
 
 - Initial release
