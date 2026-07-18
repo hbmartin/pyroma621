@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "pyroma"
 version = "5.1b3.dev0"
 description = "Test your project's packaging friendliness"
-readme = "README.rst"
+readme = "README.md"
 authors = [{name = "Lennart Regebro", email = "regebro@gmail.com"}]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -49,6 +49,7 @@ test = [
 ]
 
 [dependency-groups]
+docs = ["zensical==0.0.50"]
 lint = ["ruff==0.15.22"]
 typecheck = ["ty==0.0.61", "pyrefly==1.1.1", "types-docutils"]
 
@@ -58,6 +59,8 @@ required-version = "==0.7.13"
 [project.urls]
 Homepage = "https://github.com/regebro/pyroma"
 "Source Code" = "https://github.com/regebro/pyroma"
+Documentation = "https://hbmartin.github.io/pyroma/"
+Changelog = "https://hbmartin.github.io/pyroma/changelog/"
 
 [project.scripts]
 pyroma = "pyroma:main"
@@ -83,6 +86,8 @@ ignore = [".pre-commit-hooks.yaml"]
 
 [tool.zest-releaser]
 create-wheel = true
+history-file = "docs/changelog.md"
+history_format = "md"
 
 [tool.ty.src]
 include = ["pyroma"]
