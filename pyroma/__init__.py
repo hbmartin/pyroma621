@@ -202,7 +202,7 @@ def main() -> None:
 def _json_meta(mode: str, argument: str) -> "dict[str, str]":
     meta = {"package": argument, "mode": mode}
     with suppress(PackageNotFoundError):
-        meta["pyroma"] = package_version("pyroma")
+        meta["pyroma"] = package_version("pyroma621")
     return meta
 
 

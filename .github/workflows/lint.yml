@@ -79,7 +79,7 @@ jobs:
         run: uv run --only-group quality lizard pyroma --exclude "pyroma/testdata/*" --warnings_only
 
   dependencies:
-    name: Run deptry
+    name: Run deptry and Semgrep
 
     runs-on: ubuntu-latest
 
@@ -92,3 +92,5 @@ jobs:
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
       - name: Check dependencies
         run: uv run --no-default-groups --group quality deptry . --github-output
+      - name: Check sensitive exception data
+        run: uv run --only-group quality semgrep scan --config .semgrep.yml --error pyroma

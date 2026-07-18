@@ -44,11 +44,18 @@ def build_metadata(path: Pathish, isolated: "bool | None" = None) -> Metadata:
     # Core Metadata Specs recommend.
     data: dict[str, Any] = {}
     for raw_key in set(metadata.keys()):
-        value = metadata.get_all(raw_key) or []
+        values = metadata.get_all(raw_key) or []
         key = normalize(raw_key)
 
-        if len(value) == 1:
-            value = value[0]
+        if key == "classifier":
+            if len(values) == 1 and values[0].strip() == "UNKNOWN":
+                continue
+            data[key] = values
+            continue
+
+        value: Any = values
+        if len(values) == 1:
+            value = values[0]
             if value.strip() == "UNKNOWN":
                 # Legacy metadata uses UNKNOWN as an empty-value marker.
                 continue

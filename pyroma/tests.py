@@ -7,6 +7,7 @@ import tarfile
 import tempfile
 import unittest
 import unittest.mock
+from email.message import Message
 from pathlib import Path
 from typing import Never
 from xmlrpc import client as xmlrpclib
@@ -781,6 +782,51 @@ class PyPITest(unittest.TestCase):
             "https://packages.example.com/pypi/internalpkg/json", timeout=pypidata.REQUEST_TIMEOUT
         )
 
+    @unittest.mock.patch("pyroma.pypidata.requests.get")
+    def test_custom_index_not_found_error_omits_url_secrets(self, requestmock: unittest.mock.Mock) -> None:
+        requestmock.return_value = unittest.mock.Mock(ok=False, status_code=404)
+        index_url = "https://user:password@packages.example.com/simple?token=secret"
+
+        with self.assertRaises(ValueError) as caught:
+            pypidata._get_project_data("internalpkg", index_url=index_url)
+
+        error = str(caught.exception)
+        self.assertEqual(error, "Did not find 'internalpkg' on the configured package index.")
+        for secret in ("user", "password", "token", "secret", "packages.example.com"):
+            self.assertNotIn(secret, error)
+
+    def test_http_errors_omit_url_secrets_and_request_details(self) -> None:
+        url = "https://user:password@packages.example.com/pypi?token=secret"
+        errors = (
+            pypidata.requests.exceptions.Timeout(f"Timed out fetching {url}"),
+            pypidata.requests.exceptions.ConnectionError(f"Could not connect to {url}"),
+        )
+
+        for request_error in errors:
+            with (
+                self.subTest(error=type(request_error).__name__),
+                unittest.mock.patch("pyroma.pypidata.requests.get", side_effect=request_error),
+                self.assertRaises(ValueError) as caught,
+            ):
+                pypidata._http_get(url)
+
+            error = str(caught.exception)
+            for secret in ("user", "password", "token", "secret", "packages.example.com"):
+                self.assertNotIn(secret, error)
+            self.assertTrue(caught.exception.__suppress_context__)
+
+    @unittest.mock.patch("pyroma.pypidata._get_project_data")
+    def test_get_data_rejects_malformed_info(self, projectdatamock: unittest.mock.Mock) -> None:
+        invalid_responses = ([], {}, {"info": None}, {"info": []}, {"info": "not metadata"})
+        for invalid_response in invalid_responses:
+            with self.subTest(response=invalid_response):
+                projectdatamock.return_value = invalid_response
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Invalid metadata format received from package index",
+                ):
+                    pypidata.get_data("example")
+
     @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")
     @unittest.mock.patch("pyroma.pypidata._get_project_data")
     def test_get_data_custom_index_url_uses_xmlrpc_endpoint(
@@ -884,15 +930,21 @@ class PyPITest(unittest.TestCase):
         requestmock: unittest.mock.Mock,
         proxymock: unittest.mock.Mock,
     ) -> None:
+        download_url = "https://user:password@files.example.com/example-1.0.tar.gz?token=secret"
         projectdatamock.return_value = {
             "info": {"name": "example", "version": "1.0"},
-            "releases": {"1.0": [{"packagetype": "sdist", "url": "https://files.example.com/example-1.0.tar.gz"}]},
+            "releases": {"1.0": [{"packagetype": "sdist", "url": download_url}]},
         }
         proxymock.return_value.__enter__.return_value.package_roles.return_value = []
         requestmock.return_value = unittest.mock.Mock(ok=False, status_code=404, reason="Not Found")
 
-        with self.assertRaisesRegex(ValueError, "404"):
+        with self.assertRaises(ValueError) as caught:
             pypidata.get_data("example")
+
+        error = str(caught.exception)
+        self.assertEqual(error, "Could not download source distribution: 404 Not Found")
+        for secret in ("user", "password", "token", "secret", "files.example.com"):
+            self.assertNotIn(secret, error)
 
     @unittest.mock.patch("pyroma.pypidata.distributiondata.get_data")
     @unittest.mock.patch("pyroma.pypidata.requests.get")
@@ -1001,6 +1053,14 @@ class MainTest(unittest.TestCase):
         self.assertIn("Did not find 'nosuch'", document["error"]["message"])
         self.assertEqual(document["_meta"]["mode"], "pypi")
 
+    @unittest.mock.patch("pyroma.package_version", return_value="6.0.0")
+    def test_json_meta_uses_published_distribution_name(self, versionmock: unittest.mock.Mock) -> None:
+        self.assertEqual(
+            pyroma._json_meta("pypi", "example"),
+            {"package": "example", "mode": "pypi", "pyroma": "6.0.0"},
+        )
+        versionmock.assert_called_once_with("pyroma621")
+
     def test_main_all_tests_skipped_exits_3(self) -> None:
         skip = ",".join(pyroma.get_all_tests())
 
@@ -1029,6 +1089,20 @@ class ProjectDataTest(unittest.TestCase):
         del data["_path"]  # This changes, so I just ignore it
 
         self.assertEqual(data, COMPLETE)
+
+    @unittest.mock.patch("pyroma.projectdata.wheel_metadata")
+    def test_single_classifier_remains_a_list(self, metadatamock: unittest.mock.Mock) -> None:
+        metadata = Message()
+        metadata["Name"] = "example"
+        metadata["Version"] = "1.0"
+        metadata["Classifier"] = "Programming Language :: Python :: 3.14"
+        metadatamock.return_value = metadata
+
+        data = projectdata.build_metadata(".")
+
+        self.assertEqual(data["classifier"], ["Programming Language :: Python :: 3.14"])
+        self.assertIs(ratings.ClassifierVerification().test(data).outcome, True)
+        self.assertIs(ratings.PythonClassifierVersion().test(data).outcome, True)
 
 
 class DistroDataTest(unittest.TestCase):
