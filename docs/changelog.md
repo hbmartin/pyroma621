@@ -9,6 +9,10 @@
 - Hypothesis now fuzzes bounded metadata dictionaries and verifies that rating
   is deterministic, non-mutating and structurally valid. This found and fixed
   a crash on malformed single-component Python classifiers.
+- The package now passes Ruff's full stable rule set. Ruff is pinned for
+  reproducible CI, formatter-incompatible rules are explicitly disabled, and
+  narrow per-file exceptions preserve the unittest suite, public CLI behavior,
+  and compatibility APIs.
 - CI now runs Pyroma on itself at a required 10/10, enforces Lizard's strict
   complexity threshold, and checks dependency declarations with deptry.
   GitHub releases build distributions in an unprivileged job and publish the

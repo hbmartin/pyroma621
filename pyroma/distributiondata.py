@@ -1,17 +1,20 @@
-"""
-Extract information from a distribution file by unpacking it in a temporary
-directory and then using projectdata on that.
+"""Extract information from a distribution file.
+
+Distributions are unpacked into a temporary directory and then inspected with
+the project-data loader.
 """
 
-import os
-import pathlib
 import tarfile
 import tempfile
 import zipfile
-from typing import Any, cast
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 
 from pyroma import projectdata
 from pyroma.metadata import Metadata
+
+if TYPE_CHECKING:
+    import os
 
 
 class _ExtractedMetadata(dict[str, Any]):
@@ -36,27 +39,39 @@ def _safe_extract_tar(tar: tarfile.TarFile, path: str) -> None:
 
     Fallback for Python versions without extraction filters (< 3.11.4).
     """
-    root = pathlib.Path(path).resolve()
+    root = Path(path).resolve()
     for member in tar.getmembers():
         member_path = (root / member.name).resolve()
         if member_path != root and root not in member_path.parents:
-            raise ValueError(f"Attempted path traversal in tar file {tar.name!r}")
+            message = f"Attempted path traversal in tar file {tar.name!r}"
+            raise ValueError(message)
         if member.issym() or member.islnk() or member.isdev():
-            raise ValueError(f"Unsafe member in tar file {tar.name!r}: {member.name!r}")
-    tar.extractall(path)
+            message = f"Unsafe member in tar file {tar.name!r}: {member.name!r}"
+            raise ValueError(message)
+    # Every member path and link type is validated immediately above.
+    tar.extractall(path)  # noqa: S202
 
 
 def get_data(path: "str | os.PathLike[str]") -> Metadata:
-    filename = os.path.split(path)[-1]
-    basename, ext = os.path.splitext(filename)
+    """Extract and return metadata from a source distribution archive."""
+    archive_path = Path(path)
+    filename = archive_path.name
+    basename = Path(filename).stem
+    ext = archive_path.suffix
     if basename.endswith(".tar"):
-        basename, _ignored = os.path.splitext(basename)
+        basename = Path(basename).stem
+
+    tar_extensions = {".bz2", ".tbz", ".tb2", ".gz", ".tgz", ".tar"}
+    zip_extensions = {".zip", ".egg"}
+    if ext not in tar_extensions | zip_extensions:
+        message = f"Unknown file type: {ext}"
+        raise ValueError(message)
 
     temporary_directory = tempfile.TemporaryDirectory(prefix="pyroma-", ignore_cleanup_errors=True)
     tempdir = temporary_directory.name
 
     try:
-        if ext in (".bz2", ".tbz", ".tb2", ".gz", ".tgz", ".tar"):
+        if ext in tar_extensions:
             with tarfile.open(name=path, mode="r:*") as tar_file:
                 try:
                     # The data filter rejects absolute paths, parent-directory
@@ -65,14 +80,13 @@ def get_data(path: "str | os.PathLike[str]") -> Metadata:
                 except TypeError:
                     _safe_extract_tar(tar_file, tempdir)
 
-        elif ext in (".zip", ".egg"):
-            with zipfile.ZipFile(path, mode="r") as zip_file:
-                zip_file.extractall(tempdir)
-
         else:
-            raise ValueError("Unknown file type: " + ext)
+            with zipfile.ZipFile(path, mode="r") as zip_file:
+                # zipfile sanitizes absolute paths and parent-directory
+                # components before writing archive members.
+                zip_file.extractall(tempdir)  # noqa: S202
 
-        projectpath = os.path.join(tempdir, basename)
+        projectpath = str(Path(tempdir) / basename)
         data = projectdata.get_build_data(projectpath)
         data["_path"] = projectpath
         data["_sdist"] = True
@@ -80,4 +94,4 @@ def get_data(path: "str | os.PathLike[str]") -> Metadata:
         temporary_directory.cleanup()
         raise
 
-    return cast(Metadata, _ExtractedMetadata(data, temporary_directory))
+    return cast("Metadata", _ExtractedMetadata(data, temporary_directory))

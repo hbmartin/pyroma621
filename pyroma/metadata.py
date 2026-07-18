@@ -7,7 +7,8 @@ starting with an underscore are pyroma-internal sentinels, not metadata
 fields.
 """
 
-import os
+# Kept at runtime so Metadata's PathLike field resolves through get_type_hints.
+import os  # noqa: TC003
 import re
 from typing import Any, TypedDict, Union
 

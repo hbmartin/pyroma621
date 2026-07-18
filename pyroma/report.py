@@ -16,8 +16,7 @@ _DIVIDER = "-" * 30
 def format_text(rated: RatedProject) -> str:
     """Format the rating result the way pyroma traditionally prints it."""
     lines: list[str] = [_DIVIDER]
-    for problem in rated.problems:
-        lines.append(problem.message)
+    lines.extend(problem.message for problem in rated.problems)
     if rated.problems:
         lines.append(_DIVIDER)
     lines.append(f"Final rating: {rated.rating}/10")

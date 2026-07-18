@@ -17,10 +17,10 @@ $ tox
 
 ## Linting and type checking
 
-Ruff, ty and pyrefly run through uv, which reads the pinned tool
-versions from the `lint` and `typecheck` dependency groups in
-`pyproject.toml` — the same pins that CI and pre-commit use, so
-versions never drift between environments:
+Ruff, ty and pyrefly run through uv, which reads their constraints from the
+`lint` and `typecheck` dependency groups in `pyproject.toml`. Ruff is pinned
+exactly because the project enables every stable rule; CI and pre-commit use
+the same group:
 
 ```console
 $ uv run --only-group lint ruff check --force-exclude .
@@ -34,6 +34,12 @@ Or simply run all the pre-commit hooks:
 ```console
 $ pre-commit run --all-files
 ```
+
+Ruff is pinned and the package passes `select = ["ALL"]`. The global ignores
+only resolve formatter conflicts; per-file ignores document the deliberate
+unittest style, private test access, and CLI output. Apply safe fixes with
+`ruff check --fix`, but review unsafe fixes individually instead of enabling
+them repository-wide.
 
 ## Packaging and quality checks
 

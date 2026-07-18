@@ -61,10 +61,10 @@ dev = [
     "pyrefly>=1.1.1",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
-    "ruff>=0.15.22",
+    "ruff==0.15.22",
     "ty>=0.0.61",
 ]
-lint = ["ruff>=0.15.22"]
+lint = ["ruff==0.15.22"]
 quality = ["deptry>=0.25.1", "lizard>=1.23.0"]
 typecheck = ["pyrefly>=1.1.1", "ty>=0.0.61", "types-docutils"]
 
@@ -131,7 +131,8 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["ALL"]
-extend-select = ["A001", "ANN202", "D105", "D107", "D203", "D212", "D213", "FBT003", "PT027", "RUF059"]
+ignore = ["COM812", "D203", "D213"]
 
 [tool.ruff.lint.per-file-ignores]
-"pyroma/tests.py" = ["ANN202", "FBT003", "PT027", "RUF059"]
+"pyroma/__init__.py" = ["T201"]
+"pyroma/tests.py" = ["ANN202", "D", "FBT003", "PT009", "PT027", "RUF059", "SLF001"]
