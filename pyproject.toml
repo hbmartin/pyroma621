@@ -52,6 +52,9 @@ test = [
 lint = ["ruff==0.15.22"]
 typecheck = ["ty==0.0.61", "pyrefly==1.1.1", "types-docutils"]
 
+[tool.uv]
+required-version = "==0.7.13"
+
 [project.urls]
 Homepage = "https://github.com/regebro/pyroma"
 "Source Code" = "https://github.com/regebro/pyroma"
@@ -99,4 +102,7 @@ line-length = 120
 extend-exclude = ["pyroma/testdata"]
 
 [tool.ruff.lint]
-extend-select = ["B", "I", "UP"]
+extend-select = ["A001", "ANN202", "B", "FBT003", "I", "PT027", "RUF059", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"pyroma/tests.py" = ["ANN202", "FBT003", "PT027", "RUF059"]

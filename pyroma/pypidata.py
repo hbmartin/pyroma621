@@ -2,7 +2,9 @@ import logging
 import os
 import tempfile
 import xmlrpc.client
+from http.client import HTTPConnection, HTTPSConnection
 from typing import Any, cast
+from urllib.parse import unquote, urlsplit
 
 import requests
 
@@ -34,6 +36,41 @@ DEFAULT_PYPI_BASE_API_URL = "https://pypi.org/pypi"
 
 # Seconds before a network request is aborted.
 REQUEST_TIMEOUT = 30
+
+
+class _TimeoutTransport(xmlrpc.client.Transport):
+    def __init__(self, timeout: int) -> None:
+        super().__init__()
+        self.timeout = timeout
+
+    def make_connection(self, host: "str | tuple[str, dict[str, str]]") -> HTTPConnection:
+        connection = super().make_connection(host)
+        connection.timeout = self.timeout
+        return connection
+
+
+class _TimeoutSafeTransport(xmlrpc.client.SafeTransport):
+    def __init__(self, timeout: int) -> None:
+        super().__init__()
+        self.timeout = timeout
+
+    def make_connection(self, host: "str | tuple[str, dict[str, str]]") -> HTTPSConnection:
+        connection = super().make_connection(host)
+        connection.timeout = self.timeout
+        return connection
+
+
+def _xmlrpc_transport(url: str) -> xmlrpc.client.Transport:
+    if urlsplit(url).scheme.lower() == "https":
+        return _TimeoutSafeTransport(REQUEST_TIMEOUT)
+    return _TimeoutTransport(REQUEST_TIMEOUT)
+
+
+def _download_filename(url: str) -> str:
+    filename = os.path.basename(unquote(urlsplit(url).path))
+    if not filename:
+        raise ValueError("Source distribution URL has no filename in its path.")
+    return filename
 
 
 def _get_base_api_url(index_url: "str | None" = None) -> str:
@@ -90,7 +127,9 @@ def get_data(project: str, index_url: "str | None" = None) -> Metadata:
     try:
         # PyPI has deprecated the XML-RPC API, but package_roles (which the
         # BusFactor test needs) has no JSON API replacement yet.
-        with xmlrpc.client.ServerProxy(_get_base_api_url(index_url)) as xmlrpc_client:
+        xmlrpc_url = _get_base_api_url(index_url)
+        transport = _xmlrpc_transport(xmlrpc_url)
+        with xmlrpc.client.ServerProxy(xmlrpc_url, transport=transport) as xmlrpc_client:
             roles = cast("list[tuple[str, str]]", xmlrpc_client.package_roles(project))
             data["_owners"] = [user for (role, user) in roles if role == "Owner"]
     except (xmlrpc.client.Error, OSError):
@@ -113,7 +152,7 @@ def get_data(project: str, index_url: "str | None" = None) -> Metadata:
             if download["packagetype"] == "sdist":
                 # Found a source distribution. Download and analyze it.
                 data["_has_sdist"] = True
-                filename = download["url"].split("/")[-1]
+                filename = _download_filename(download["url"])
                 logger.debug(f"Downloading {filename} to verify distribution")
                 response = _http_get(download["url"])
                 if not response.ok:

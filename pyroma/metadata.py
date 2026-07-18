@@ -49,7 +49,7 @@ Metadata = TypedDict(
         "license-expression": str,
         "license-file": Union[str, "list[str]"],
         "dynamic": Union[str, "list[str]"],
-        "platform": str,
+        "platform": Union[str, "list[str]"],
         # Pyroma-internal sentinels.
         "_path": Union[str, "os.PathLike[str]"],
         "_sdist": bool,

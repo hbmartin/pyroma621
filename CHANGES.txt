@@ -39,7 +39,7 @@ Changelog
 - PyPI requests now use timeouts and clear error messages, and
   downloaded sdists are always cleaned up.
 
-- All code is now type-annotated and checked with mypy; a
+- All code is now type-annotated and checked with ty and pyrefly; a
   ``py.typed`` marker ships with the package.
 
 - Linting moved from black + flake8 to Ruff; the test suite runs with

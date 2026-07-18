@@ -38,6 +38,11 @@ backend for it, which — like installing the package with pip — can
 execute code shipped with the package. Be as careful about running
 pyroma on an untrusted package as you would be about installing it.
 
+The high-level ``pyroma.run()`` API cleans up extracted distributions
+after rating. If you call ``distributiondata.get_data()`` or
+``pypidata.get_data()`` directly, call ``distributiondata.cleanup(data)``
+when you no longer need the returned metadata's ``_path``.
+
 In all cases the output is similar::
 
     ------------------------------
