@@ -87,6 +87,22 @@ $ pyroma --format json .
 
 ## Tests
 
+Every check is documented, with its category and whether it is scored, in
+the [rules reference](https://hbmartin.github.io/pyroma621/rules/).
+
+Checks are either **scored** or **advisory**. Scored checks decide the
+1&ndash;10 rating. Advisory checks are reported below the rating but stay out
+of the arithmetic, so upgrading pyroma never changes your score on its own.
+Run `pyroma --strict` to score them too, or `--no-advisories` to hide them.
+
+Settings can live in the rated project's `pyproject.toml`:
+
+```toml
+[tool.pyroma]
+min-rating = 10
+skip-tests = ["practice"]
+```
+
 This is the list of checks that are currently performed:
 
 - The package should have a name, a version and a Summary.
@@ -137,6 +153,26 @@ This is the list of checks that are currently performed:
 - If you are checking on a PyPI package, and not a local directory or
   local package, pyroma will check that you have uploaded a source
   distribution, and not just binary distributions.
+
+The following are reported as advisory findings, and do not affect the
+rating unless you run with `--strict`:
+
+- Dependencies given as direct URLs, which package indices reject outright.
+- A Summary longer than 512 characters, or spanning more than one line.
+- Python classifiers that contradict `Requires-Python`, or that claim
+  support for end-of-life Python versions.
+- A Development Status classifier that contradicts the version number.
+- A build backend floor too low for the PEP 639 licensing the project uses.
+- `license-files` patterns matching no file, and a readme whose content type
+  does not match its extension.
+- A `py.typed` marker and the `Typing :: Typed` classifier disagreeing.
+- Capped, pinned or floorless runtime dependencies, and an upper bound on
+  `Requires-Python`.
+- Development dependencies published as extras rather than declared in
+  `[dependency-groups]`.
+- Relative links and images in the description, which do not resolve on PyPI.
+- Project URL labels that collapse into one link once normalized, and a
+  `[build-system]` table with no `build-backend`.
 
 ## Version control integration
 

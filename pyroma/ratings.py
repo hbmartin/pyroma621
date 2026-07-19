@@ -7,14 +7,16 @@ test does not apply. Tests are stateless and must not store per-run state on
 the shared instances.
 """
 
+import datetime
 import io
 import re
 import string
-import tomllib
-from dataclasses import dataclass
+from contextlib import suppress
+from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 from typing import Any, ClassVar, cast
+from urllib.parse import urlsplit
 
 import trove_classifiers
 from docutils.core import publish_parts
@@ -27,7 +29,8 @@ from packaging.version import Version as PackagingVersion
 from validate_pyproject import api as pyproject_api
 from validate_pyproject import errors as pyproject_errors
 
-from pyroma.metadata import Metadata
+from pyroma.metadata import Metadata, normalize
+from pyroma.rules import Category
 
 LEVELS = [
     "This cheese seems to contain no dairy products",
@@ -73,6 +76,9 @@ class Problem:
     message: str
     weight: int
     fatal: bool
+    # Defaulted: several call sites construct a Problem with four arguments,
+    # and the JSON reporter emits every field, so this has to be additive.
+    category: str = Category.INTERNAL
 
 
 @dataclass(frozen=True)
@@ -83,6 +89,11 @@ class RatedProject:
     rating: int
     level: str
     problems: list[Problem]
+    # Findings from advisory tests. These are reported but deliberately kept
+    # out of the rating arithmetic, so that adding a new advisory test never
+    # changes an existing package's score. Running in strict mode scores them
+    # like any other test, and leaves this list empty.
+    advisories: list[Problem] = field(default_factory=list)
 
 
 class BaseTest:
@@ -90,6 +101,11 @@ class BaseTest:
 
     weight = 0
     fatal = False
+    # Advisory tests are reported but never scored, unless strict mode is on.
+    advisory = False
+    # What kind of problem this test reports. Used for reporting and for
+    # skipping a whole class of checks with --skip-tests.
+    category: str = Category.METADATA
 
     def test(self, data: Metadata) -> TestResult:
         """Evaluate metadata and return this test's outcome."""
@@ -113,6 +129,81 @@ class BaseTest:
 
     def _skipped(self) -> TestResult:
         return TestResult(outcome=None, weight=0, fatal=False, message="")
+
+
+# Shared helpers for the checks below. Every one of them is total: the
+# property test in pyroma/tests.py feeds arbitrary metadata through every
+# check, so none of these may raise on a None, an int, or a string where a
+# list was expected.
+
+
+def _as_list(value: object) -> "list[str]":
+    """Coerce a metadata field that may be a string, a list, or absent."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    return []
+
+
+def _parse_specifier_set(value: object) -> "SpecifierSet | None":
+    """Parse a version specifier set, returning None when it is unusable."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        return SpecifierSet(value)
+    except InvalidSpecifier:
+        return None
+
+
+# "==" and "~=" both cap the version from above; "==" pins it outright.
+_UPPER_BOUND_OPERATORS = ("<", "<=", "~=", "==", "===")
+_LOWER_BOUND_OPERATORS = (">=", ">", "==", "===", "~=")
+
+
+def _specifier_has_upper_bound(specifiers: SpecifierSet) -> bool:
+    """Report whether a specifier set caps the version from above."""
+    return any(specifier.operator in _UPPER_BOUND_OPERATORS for specifier in specifiers)
+
+
+def _specifier_lower_bound(specifiers: SpecifierSet) -> "PackagingVersion | None":
+    """Return the highest lower bound a specifier set imposes, if any."""
+    bounds = []
+    for specifier in specifiers:
+        if specifier.operator not in _LOWER_BOUND_OPERATORS:
+            continue
+        try:
+            # A wildcard release such as "==1.2.*" still floors the version.
+            bounds.append(PackagingVersion(specifier.version.rstrip(".*")))
+        except InvalidVersion:
+            continue
+    return max(bounds) if bounds else None
+
+
+# Anchored, so that "Python :: 3", "Python :: 3 :: Only" and
+# "Python :: Implementation :: CPython" are all correctly ignored.
+_PYTHON_CLASSIFIER_RE = re.compile(r"^Programming Language :: Python :: (\d+)\.(\d+)$")
+
+
+def _classifier_python_versions(classifiers: object) -> "list[tuple[int, int]]":
+    """Extract the (major, minor) Python versions named by the classifiers."""
+    versions = set()
+    for classifier in _as_list(classifiers):
+        match = _PYTHON_CLASSIFIER_RE.match(classifier.strip())
+        if match:
+            versions.add((int(match.group(1)), int(match.group(2))))
+    return sorted(versions)
+
+
+def _project_root(data: Metadata) -> "Path | None":
+    """Return the project directory being rated, when one exists on disk."""
+    path = data.get("_path")
+    if not path:
+        return None
+    root = Path(path)
+    return root if root.is_dir() else None
 
 
 class FieldTest(BaseTest):
@@ -159,6 +250,8 @@ class VersionIsString(BaseTest):
 class PEPVersion(BaseTest):
     """Validate project versions against the packaging version rules."""
 
+    category = Category.INDEX
+
     weight = 50
 
     def test(self, data: Metadata) -> TestResult:
@@ -201,6 +294,8 @@ class PEPVersion(BaseTest):
 class MetadataVersion(BaseTest):
     """Validate the declared Core Metadata version."""
 
+    category = Category.INDEX
+
     weight = 100
 
     _valid = ("1.0", "1.1", "1.2", "2.1", "2.2", "2.3", "2.4", "2.5")
@@ -224,6 +319,8 @@ NAME_RE = re.compile(r"^([A-Z0-9]|[A-Z0-9][A-Z0-9._-]*[A-Z0-9])\Z", re.IGNORECAS
 
 class NameFormat(BaseTest):
     """Validate the project-name syntax."""
+
+    category = Category.INDEX
 
     fatal = True
 
@@ -281,27 +378,50 @@ class Classifiers(FieldTest):
     field = "classifier"
 
 
+def _deprecated_classifier_line(classifier: str) -> str:
+    """Describe one deprecated classifier and its replacement, if any."""
+    replacements = trove_classifiers.deprecated_classifiers.get(classifier) or []
+    if replacements:
+        joined = " or ".join(repr(replacement) for replacement in replacements)
+        return f"  {classifier!r} has been replaced by {joined}."
+    return f"  {classifier!r} has been removed with no replacement."
+
+
 class ClassifierVerification(BaseTest):
     """Validate classifiers against the registered classifier list."""
+
+    category = Category.COHERENCE
 
     weight = 20
 
     def test(self, data: Metadata) -> TestResult:
-        """Report unknown classifiers unless they use the private namespace."""
-        classifiers = data.get("classifier", [])
-        incorrect = [
+        """Report deprecated and unknown classifiers separately."""
+        classifiers = _as_list(data.get("classifier"))
+        deprecated = [c for c in classifiers if c in trove_classifiers.deprecated_classifiers]
+        unknown = [
             classifier
             for classifier in classifiers
-            if classifier not in trove_classifiers.classifiers and not classifier.startswith("Private :: ")
+            if classifier not in trove_classifiers.classifiers
+            and classifier not in trove_classifiers.deprecated_classifiers
+            and not classifier.startswith("Private :: ")
         ]
-        if incorrect:
-            err = "\n".join(incorrect)
-            return self._failed(
-                f"Some of your classifiers are not standard classifiers:\n{err}\n"
-                f"If you have custom classifiers, they should start with 'Private :: '\n"
-                f"You can find the list of standard classifiers here: https://pypi.org/classifiers/"
+        if not deprecated and not unknown:
+            return self._passed()
+
+        blocks = []
+        if deprecated:
+            # A deprecated classifier is a known one, so telling the user it
+            # is "not standard" and suggesting 'Private :: ' would be wrong.
+            listed = "\n".join(_deprecated_classifier_line(c) for c in deprecated)
+            blocks.append(f"Some of your classifiers are deprecated:\n{listed}")
+        if unknown:
+            listed = "\n".join(unknown)
+            blocks.append(
+                f"Some of your classifiers are not standard classifiers:\n{listed}\n"
+                "If you have custom classifiers, they should start with 'Private :: '"
             )
-        return self._passed()
+        blocks.append("You can find the list of standard classifiers here: https://pypi.org/classifiers/")
+        return self._failed("\n".join(blocks))
 
 
 class PythonClassifierVersion(BaseTest):
@@ -506,6 +626,8 @@ class Url(BaseTest):
 class Licensing(BaseTest):
     """Validate modern project licensing metadata."""
 
+    category = Category.INDEX
+
     weight = 50
 
     def test(self, data: Metadata) -> TestResult:  # noqa: PLR0911 - Each metadata combination is distinct.
@@ -545,8 +667,10 @@ class Licensing(BaseTest):
 
             if has_license_classifier:
                 return self._failed(
-                    "Specifying both a License-Expression and license classifiers is ambiguous, deprecated, "
-                    "and may be rejected by package indices."
+                    "You specify both a License-Expression and license classifiers. License "
+                    "classifiers are deprecated in favour of License-Expression, and keeping "
+                    "both leaves two sources of truth that can disagree. Remove the license "
+                    "classifiers."
                 )
             return self._passed()
 
@@ -560,6 +684,8 @@ class Licensing(BaseTest):
 
 class DescriptionContentType(BaseTest):
     """Validate Description-Content-Type media types and parameters."""
+
+    category = Category.SPEC
 
     weight = 50
 
@@ -627,6 +753,8 @@ _PARENTHESIZED_VERSIONS_RE = re.compile(r"\(\s*[<>=!~]")
 class DependencySpecifiers(BaseTest):
     """Validate Requires-Dist dependency specifiers and markers."""
 
+    category = Category.SPEC
+
     weight = 100
 
     def test(self, data: Metadata) -> TestResult:
@@ -670,21 +798,24 @@ class DependencySpecifiers(BaseTest):
         return self._passed(weight=20)
 
 
+def _load_pyproject(data: Metadata) -> "dict[str, Any] | None":
+    """Return the pre-parsed pyproject.toml table, if there is a usable one.
+
+    projectdata parses the file once; nothing here reads from disk. The
+    isinstance guard matters because the property test feeds arbitrary
+    values through this path.
+    """
+    pyproject = data.get("_pyproject")
+    if not isinstance(pyproject, dict):
+        return None
+    return pyproject
+
+
 def _load_project_table(data: Metadata) -> "dict[str, Any] | None":
-    if "_path" not in data:
+    pyproject = _load_pyproject(data)
+    if pyproject is None:
         return None
-    if "_missing_pyproject_toml" in data or "_missing_build_system" in data:
-        return None
-
-    pyproject_path = Path(data["_path"]) / "pyproject.toml"
-    try:
-        with pyproject_path.open("rb") as pyproject_file:
-            config = tomllib.load(pyproject_file)
-    except (OSError, tomllib.TOMLDecodeError):
-        # PyprojectTomlValid reports unreadable/unparseable files.
-        return None
-
-    project = config.get("project")
+    project = pyproject.get("project")
     if not isinstance(project, dict):
         # No [project] table; the metadata comes from somewhere else.
         return None
@@ -732,6 +863,8 @@ class PyProjectProjectTable(BaseTest):
     catch.
     """
 
+    category = Category.SPEC
+
     def test(self, data: Metadata) -> TestResult:
         """Validate cross-field rules in the project table."""
         project = _load_project_table(data)
@@ -775,6 +908,8 @@ class DevStatusClassifier(BaseTest):
 
 class SDist(BaseTest):
     """Require an uploaded source distribution when rating an index project."""
+
+    category = Category.PRACTICE
 
     def test(self, data: Metadata) -> TestResult:
         """Check the source-distribution sentinel supplied by index metadata."""
@@ -828,6 +963,8 @@ class ValidREST(BaseTest):
 class BusFactor(BaseTest):
     """Encourage projects to have multiple index owners."""
 
+    category = Category.PRACTICE
+
     def test(self, data: Metadata) -> TestResult:
         """Rate the number of project owners reported by the index."""
         if "_owners" not in data:
@@ -848,6 +985,8 @@ class BusFactor(BaseTest):
 class MissingBuildSystem(BaseTest):
     """Report projects that cannot be built by standard tooling."""
 
+    category = Category.INTERNAL
+
     def test(self, data: Metadata) -> TestResult:
         """Check for the missing-build-system sentinel."""
         if "_missing_build_system" in data:
@@ -866,6 +1005,8 @@ class MissingBuildSystem(BaseTest):
 
 class MissingPyProjectToml(BaseTest):
     """Recommend a pyproject.toml build configuration."""
+
+    category = Category.INTERNAL
 
     def test(self, data: Metadata) -> TestResult:
         """Check for missing pyproject.toml metadata sentinels."""
@@ -895,37 +1036,41 @@ def _pyproject_validator() -> pyproject_api.Validator:
 class PyprojectTomlValid(BaseTest):
     """Validate pyproject.toml against registered project schemas."""
 
+    category = Category.SPEC
+
     def test(self, data: Metadata) -> TestResult:
-        """Load and validate the project's pyproject.toml file."""
+        """Validate the project's pre-parsed pyproject.toml."""
         # The build system tests give only negative weight, as they are effectively required
         # for a working package, so passing them shouldn't give you a better rating,
         # but failing them should give you a worse rating.
+        read_error = data.get("_pyproject_error")
+        if read_error:
+            # projectdata could not read or parse the file at all.
+            return self._invalid(str(read_error))
 
-        # Only test if we have a path and pyproject.toml exists
-        if "_path" not in data:
+        pyproject = _load_pyproject(data)
+        if pyproject is None:
+            # No pyproject.toml to validate, skip this test.
             return self._skipped()
-
-        if "_missing_pyproject_toml" in data or "_missing_build_system" in data:
-            # No pyproject.toml to validate, skip this test
-            return self._skipped()
-
-        pyproject_path = Path(data["_path"]) / "pyproject.toml"
 
         try:
-            with pyproject_path.open("rb") as pyproject_file:
-                config = tomllib.load(pyproject_file)
-            _pyproject_validator()(config)
-            return self._passed(weight=0)
-        except (OSError, tomllib.TOMLDecodeError, pyproject_errors.ValidationError) as e:
-            return self._failed(
-                f"Your pyproject.toml is invalid: {e}\n"
-                "See https://packaging.python.org for more information on how to package your project.",
-                weight=100,
-            )
+            _pyproject_validator()(pyproject)
+        except pyproject_errors.ValidationError as e:
+            return self._invalid(str(e))
+        return self._passed(weight=0)
+
+    def _invalid(self, reason: str) -> TestResult:
+        return self._failed(
+            f"Your pyproject.toml is invalid: {reason}\n"
+            "See https://packaging.python.org for more information on how to package your project.",
+            weight=100,
+        )
 
 
 class DeprecatedMetadataFields(BaseTest):
     """Report legacy metadata fields when modern replacements are available."""
+
+    category = Category.COHERENCE
 
     weight = 50
 
@@ -967,6 +1112,718 @@ class DeprecatedMetadataFields(BaseTest):
         return self._passed()
 
 
+# ---------------------------------------------------------------------------
+# Advisory checks.
+#
+# These are reported but never scored, so that adding one can never move an
+# existing package's rating. Running with --strict scores them like any other
+# test. See RatedProject.advisories.
+# ---------------------------------------------------------------------------
+
+_DEPENDENCY_FIELDS = ("requires-dist", "provides-dist", "obsoletes-dist")
+
+
+class DirectUrlDependency(BaseTest):
+    """Flag dependencies declared as direct URL references."""
+
+    category = Category.INDEX
+
+    advisory = True
+    fatal = True
+
+    def test(self, data: Metadata) -> TestResult:
+        """Check that no dependency is declared as a direct URL reference."""
+        direct = []
+        for field_name in _DEPENDENCY_FIELDS:
+            for entry in _as_list(cast("dict[str, Any]", data).get(field_name)):
+                try:
+                    requirement = Requirement(entry)
+                except InvalidRequirement:
+                    # DependencySpecifiers reports malformed specifiers.
+                    continue
+                if requirement.url is not None:
+                    direct.append(entry)
+
+        if not direct:
+            return self._passed()
+        listed = "\n".join(f"  {entry}" for entry in direct)
+        return self._failed(
+            "Your package declares direct URL dependencies, which package indices reject "
+            f"outright:\n{listed}\n"
+            "Depend on a released version from an index instead, and keep direct URLs in a "
+            "requirements file or a [dependency-groups] entry."
+        )
+
+
+# Package indices limit the Summary to 512 characters; it is the only
+# metadata field with a length limit.
+_MAX_SUMMARY_LENGTH = 512
+
+
+class SummaryFormat(BaseTest):
+    """Enforce the Summary length and single-line rules indices apply."""
+
+    category = Category.INDEX
+
+    advisory = True
+    fatal = True
+
+    def test(self, data: Metadata) -> TestResult:
+        """Check the Summary is one line and within the index length limit."""
+        summary = data.get("summary")
+        if not summary or not isinstance(summary, str):
+            # Summary reports a missing or empty summary.
+            return self._skipped()
+        if "\n" in summary or "\r" in summary:
+            return self._failed(
+                "Your Summary contains a line break, but it must be a single line. "
+                "Package indices reject multi-line summaries; move the detail into "
+                "your Description."
+            )
+        if len(summary) > _MAX_SUMMARY_LENGTH:
+            return self._failed(
+                f"Your Summary is {len(summary)} characters long, but package indices limit "
+                f"it to {_MAX_SUMMARY_LENGTH} and will reject the upload. Move the detail "
+                "into your Description."
+            )
+        return self._passed()
+
+
+_COLLIDING_PAIR = 2
+
+
+def _collision_line(canonical: str, labels: "list[str]") -> str:
+    """Describe one group of Project-URL labels that normalize alike."""
+    qualifier = "both" if len(labels) == _COLLIDING_PAIR else "all"
+    joined = ", ".join(repr(label) for label in labels)
+    return f"  {joined} {qualifier} normalize to {canonical!r}."
+
+
+class ProjectUrlLabelCollision(BaseTest):
+    """Flag Project-URL labels that collide once normalized."""
+
+    category = Category.COHERENCE
+
+    advisory = True
+    weight = 10
+
+    def test(self, data: Metadata) -> TestResult:
+        """Check that no two Project-URL labels normalize to the same name."""
+        urls = _get_project_urls(data)
+        if not urls:
+            return self._skipped()
+
+        grouped: dict[str, list[str]] = {}
+        for label, _url in urls:
+            normalized = _normalize_url_label(label)
+            canonical = WELL_KNOWN_URL_LABELS.get(normalized, normalized)
+            grouped.setdefault(canonical, []).append(str(label))
+
+        # Sorted, so the message is deterministic for the property test.
+        collisions = sorted((canonical, labels) for canonical, labels in grouped.items() if len(labels) > 1)
+        if not collisions:
+            return self._passed()
+        listed = "\n".join(_collision_line(canonical, labels) for canonical, labels in collisions)
+        return self._failed(
+            "Several of your Project-URL labels mean the same thing once normalized, so "
+            f"indices and other tools collapse them into one link:\n{listed}\n"
+            "See https://packaging.python.org/en/latest/specifications/well-known-project-urls/"
+        )
+
+
+class PythonRequiresUpperBound(BaseTest):
+    """Flag an upper bound on Requires-Python."""
+
+    category = Category.PRACTICE
+
+    advisory = True
+    weight = 20
+
+    def test(self, data: Metadata) -> TestResult:
+        """Check that Requires-Python does not cap the Python version."""
+        specifiers = _parse_specifier_set(data.get("requires-python"))
+        if specifiers is None:
+            # PythonRequiresVersion reports a missing or invalid value.
+            return self._skipped()
+        if not _specifier_has_upper_bound(specifiers):
+            return self._passed()
+        return self._failed(
+            f"Your Requires-Python ('{data.get('requires-python')}') has an upper bound. "
+            "Capping the Python version makes your package uninstallable on every new "
+            "Python release until you publish a fix, and resolvers cannot work around it. "
+            "Drop the cap and let your classifiers say which versions you actually test."
+        )
+
+
+def _runtime_requirements(data: Metadata) -> "list[Requirement]":
+    """Parse the runtime dependencies, skipping extras and malformed entries."""
+    requirements = []
+    for entry in _as_list(cast("dict[str, Any]", data).get("requires-dist")):
+        try:
+            requirement = Requirement(entry)
+        except InvalidRequirement:
+            # DependencySpecifiers reports malformed specifiers.
+            continue
+        # An "extra" marker means this is an optional dependency, not a
+        # dependency every user of the package will install.
+        if requirement.marker is not None and "extra" in str(requirement.marker):
+            continue
+        requirements.append(requirement)
+    return requirements
+
+
+class DependencyUpperBounds(BaseTest):
+    """Flag runtime dependencies that are capped or pinned."""
+
+    category = Category.PRACTICE
+
+    advisory = True
+    weight = 20
+
+    def test(self, data: Metadata) -> TestResult:
+        """Check that runtime dependencies do not cap or pin their versions."""
+        capped = [
+            str(requirement)
+            for requirement in _runtime_requirements(data)
+            if _specifier_has_upper_bound(requirement.specifier)
+        ]
+        if not capped:
+            return self._passed()
+        listed = "\n".join(f"  {entry}" for entry in sorted(capped))
+        return self._failed(
+            "These runtime dependencies cap or pin their versions, which causes resolution "
+            f"conflicts for anyone who depends on your package:\n{listed}\n"
+            "You cannot know that the next release breaks you, and consumers cannot override "
+            "the cap. If you publish an application rather than a library, skip this with "
+            "--skip-tests DependencyUpperBounds."
+        )
+
+
+class DependencyLowerBounds(BaseTest):
+    """Flag runtime dependencies with no minimum version."""
+
+    category = Category.PRACTICE
+
+    advisory = True
+    weight = 10
+
+    def test(self, data: Metadata) -> TestResult:
+        """Check that every runtime dependency declares a lower bound."""
+        floorless = [
+            requirement.name
+            for requirement in _runtime_requirements(data)
+            # A direct URL reference names an exact artifact and has no
+            # specifier at all; DirectUrlDependency reports those.
+            if requirement.url is None and _specifier_lower_bound(requirement.specifier) is None
+        ]
+        if not floorless:
+            return self._passed()
+        return self._failed(
+            "These runtime dependencies have no lower bound, so a resolver may install a "
+            f"version far older than anything you tested: {', '.join(sorted(floorless))}. "
+            "Add a floor for each, for example 'requests>=2.32'."
+        )
+
+
+_MARKDOWN_TARGET_RES = (
+    re.compile(r"!\[[^\]]*\]\(\s*([^)\s]+)"),
+    re.compile(r"(?<!!)\[[^\]]*\]\(\s*([^)\s]+)"),
+    re.compile(r"<img[^>]+src=[\"']([^\"']+)"),
+)
+_REST_TARGET_RES = (
+    re.compile(r"(?m)^\s*\.\.\s+image::\s*(\S+)"),
+    re.compile(r"`[^`]+<([^>]+)>`_"),
+)
+_MAX_LISTED_TARGETS = 5
+
+
+def _is_relative_target(target: str) -> bool:
+    """Report whether a link target is a repository-relative path."""
+    if target.startswith(("#", "//", "mailto:", "data:")):
+        return False
+    return urlsplit(target).scheme == ""
+
+
+def _relative_description_targets(description: str, content_type: str) -> "list[str]":
+    """Return the relative link and image targets found in a description."""
+    if content_type == "text/plain":
+        return []
+    patterns = _MARKDOWN_TARGET_RES if content_type == "text/markdown" else _REST_TARGET_RES
+    # A list rather than a set, so the order is deterministic.
+    found: list[str] = []
+    for pattern in patterns:
+        for match in pattern.finditer(description):
+            target = match.group(1)
+            if target not in found and _is_relative_target(target):
+                found.append(target)
+    return found
+
+
+class ReadmeRelativeLinks(BaseTest):
+    """Flag relative links in the description, which do not resolve on PyPI."""
+
+    category = Category.PRACTICE
+
+    advisory = True
+    weight = 20
+
+    def test(self, data: Metadata) -> TestResult:
+        """Check the Description has no repository-relative links or images."""
+        description = data.get("description")
+        if not description or not isinstance(description, str):
+            return self._skipped()
+
+        # Readers assume reStructuredText when no type is declared.
+        raw = data.get("description-content-type") or "text/x-rst"
+        content_type = str(raw).split(";")[0].strip().lower()
+        targets = _relative_description_targets(description, content_type)
+        if not targets:
+            return self._passed()
+
+        listed = "\n".join(f"  {target}" for target in targets[:_MAX_LISTED_TARGETS])
+        if len(targets) > _MAX_LISTED_TARGETS:
+            listed += f"\n  (and {len(targets) - _MAX_LISTED_TARGETS} more)"
+        return self._failed(
+            "Your Description refers to files with relative paths, which do not resolve on "
+            f"PyPI because the rendered page has no repository context:\n{listed}\n"
+            "Use absolute URLs instead, for example a https://raw.githubusercontent.com/... "
+            "link for images."
+        )
+
+
+class PythonVersionCoherence(BaseTest):
+    """Flag Python classifiers that contradict Requires-Python."""
+
+    category = Category.COHERENCE
+
+    advisory = True
+    weight = 50
+
+    def test(self, data: Metadata) -> TestResult:
+        """Check the Python classifiers agree with Requires-Python."""
+        specifiers = _parse_specifier_set(data.get("requires-python"))
+        versions = _classifier_python_versions(data.get("classifier"))
+        if specifiers is None or not versions:
+            # PythonRequiresVersion and PythonClassifierVersion report absences.
+            return self._skipped()
+
+        excluded = [f"{major}.{minor}" for major, minor in versions if not specifiers.contains(f"{major}.{minor}")]
+        if not excluded:
+            return self._passed()
+        return self._failed(
+            f"Your classifiers claim support for Python {', '.join(excluded)}, but your "
+            f"Requires-Python ('{data.get('requires-python')}') excludes those versions. "
+            "Installers trust Requires-Python and ignore the classifiers, so the two must agree."
+        )
+
+
+# CPython end-of-life dates. Frozen at import so that a rating is
+# deterministic within a process, which the property test requires, and so
+# that tests can patch a fixed date.
+_TODAY = datetime.datetime.now(tz=datetime.UTC).date()
+_PYTHON_EOL_DATES = {
+    (2, 6): datetime.date(2013, 10, 29),
+    (2, 7): datetime.date(2020, 1, 1),
+    (3, 0): datetime.date(2009, 6, 27),
+    (3, 1): datetime.date(2012, 4, 9),
+    (3, 2): datetime.date(2016, 2, 20),
+    (3, 3): datetime.date(2017, 9, 29),
+    (3, 4): datetime.date(2019, 3, 18),
+    (3, 5): datetime.date(2020, 9, 30),
+    (3, 6): datetime.date(2021, 12, 23),
+    (3, 7): datetime.date(2023, 6, 27),
+    (3, 8): datetime.date(2024, 10, 7),
+    (3, 9): datetime.date(2025, 10, 31),
+    (3, 10): datetime.date(2026, 10, 31),
+    (3, 11): datetime.date(2027, 10, 31),
+    (3, 12): datetime.date(2028, 10, 31),
+    (3, 13): datetime.date(2029, 10, 31),
+    (3, 14): datetime.date(2030, 10, 31),
+}
+
+
+def _is_end_of_life(version: "tuple[int, int]") -> bool:
+    """Report whether a Python version has passed its end-of-life date."""
+    end_of_life = _PYTHON_EOL_DATES.get(version)
+    if end_of_life is not None:
+        return end_of_life < _TODAY
+    # Older than the oldest version tracked is long dead. Newer than the
+    # newest is unreleased, so treat it as supported and extend the table
+    # when the release happens; a stale table under-reports, never misfires.
+    return version < min(_PYTHON_EOL_DATES)
+
+
+class EndOfLifePython(BaseTest):
+    """Flag claimed support for end-of-life Python versions."""
+
+    category = Category.PRACTICE
+
+    advisory = True
+    weight = 20
+
+    def test(self, data: Metadata) -> TestResult:
+        """Check no end-of-life Python version is advertised as supported."""
+        dead = [
+            f"{major}.{minor}"
+            for major, minor in _classifier_python_versions(data.get("classifier"))
+            if _is_end_of_life((major, minor))
+        ]
+        if not dead:
+            return self._passed()
+        return self._failed(
+            f"Your classifiers still claim support for Python {', '.join(dead)}, which "
+            "reached end of life. Dropping dead versions lets you use newer syntax and "
+            "stops resolvers offering your package to interpreters nobody supports."
+        )
+
+
+_DEV_STATUS_RE = re.compile(r"^Development Status :: (\d) - .+$")
+_STABLE_DEV_STATUS = 5
+_EARLY_DEV_STATUS = 3
+
+
+def _development_status(classifiers: object) -> "tuple[int, str] | None":
+    """Return the highest Development Status classifier, if there is one."""
+    found = []
+    for classifier in _as_list(classifiers):
+        stripped = classifier.strip()
+        match = _DEV_STATUS_RE.match(stripped)
+        if match:
+            found.append((int(match.group(1)), stripped))
+    return max(found) if found else None
+
+
+def _parse_version(value: object) -> "PackagingVersion | None":
+    """Parse a version string, returning None when it is unusable."""
+    if not value:
+        return None
+    try:
+        return PackagingVersion(str(value))
+    except InvalidVersion:
+        return None
+
+
+class DevelopmentStatusCoherence(BaseTest):
+    """Flag a Development Status classifier that contradicts the version."""
+
+    category = Category.COHERENCE
+
+    advisory = True
+    weight = 20
+
+    def test(self, data: Metadata) -> TestResult:
+        """Check the Development Status classifier agrees with the version."""
+        status = _development_status(data.get("classifier"))
+        version = _parse_version(data.get("version"))
+        if status is None or version is None:
+            return self._skipped()
+
+        level, classifier = status
+        if level >= _STABLE_DEV_STATUS:
+            return self._unstable_version_result(level, classifier, version)
+        if level <= _EARLY_DEV_STATUS and not version.is_prerelease and version.major >= 1:
+            return self._failed(
+                f"Your classifiers say '{classifier}', but you have released version "
+                f"'{version}', a final release. Users read the classifier, not the version "
+                "number, so raise the development status to match."
+            )
+        return self._passed()
+
+    def _unstable_version_result(self, level: int, classifier: str, version: PackagingVersion) -> TestResult:
+        """Check a stable-or-better status against an unstable version."""
+        if version.is_prerelease or version.is_devrelease:
+            return self._failed(
+                f"Your classifiers say '{classifier}', but your version '{version}' is a "
+                "pre-release. Pick one: ship a final version, or lower the development "
+                "status to '4 - Beta' or below."
+            )
+        if version.major == 0:
+            return self._failed(
+                f"Your classifiers say '{classifier}', but your version is '{version}'. "
+                "A 0.x version tells installers your API is not stable yet, which "
+                "contradicts the classifier."
+            )
+        del level
+        return self._passed()
+
+
+def _has_typed_marker(root: Path) -> bool:
+    """Report whether the project ships a PEP 561 py.typed marker."""
+    # Depth-bounded: rglob would walk .git, .venv and node_modules.
+    with suppress(OSError):
+        return any(root.glob("*/py.typed")) or any(root.glob("src/*/py.typed"))
+    return False
+
+
+class TypedMarker(BaseTest):
+    """Flag a py.typed marker that disagrees with the Typing classifier."""
+
+    category = Category.COHERENCE
+
+    advisory = True
+    weight = 20
+
+    def test(self, data: Metadata) -> TestResult:
+        """Check the py.typed marker and Typing :: Typed classifier agree."""
+        root = _project_root(data)
+        if root is None:
+            return self._skipped()
+
+        has_marker = _has_typed_marker(root)
+        has_classifier = "Typing :: Typed" in _as_list(data.get("classifier"))
+        if has_marker and not has_classifier:
+            return self._failed(
+                "Your project ships a py.typed marker but does not advertise it. Add the "
+                "'Typing :: Typed' classifier so users and tools know the package is typed."
+            )
+        if has_classifier and not has_marker:
+            return self._failed(
+                "You declare the 'Typing :: Typed' classifier, but no py.typed marker file "
+                "was found in your package. Without it, type checkers ignore your "
+                "annotations entirely. See https://peps.python.org/pep-0561/"
+            )
+        if not has_marker:
+            # An untyped package is neither penalized nor rewarded.
+            return self._skipped()
+        return self._passed()
+
+
+def _build_system_table(data: Metadata) -> "dict[str, Any] | None":
+    """Return the [build-system] table from the pre-parsed pyproject.toml."""
+    pyproject = _load_pyproject(data)
+    if pyproject is None:
+        return None
+    build_system = pyproject.get("build-system")
+    if not isinstance(build_system, dict):
+        return None
+    return cast("dict[str, Any]", build_system)
+
+
+class BuildBackendDeclared(BaseTest):
+    """Require a build-backend alongside a [build-system] table."""
+
+    advisory = True
+    category = Category.PRACTICE
+    weight = 50
+
+    def test(self, data: Metadata) -> TestResult:
+        """Check that a declared [build-system] also names its backend."""
+        build_system = _build_system_table(data)
+        # A pyproject.toml with no [build-system] at all is a different
+        # problem, and MissingPyProjectToml already covers having none.
+        if build_system is None:
+            return self._skipped()
+        if build_system.get("build-backend"):
+            return self._passed()
+        return self._failed(
+            "Your pyproject.toml has a [build-system] table but no build-backend key, so "
+            "tools fall back to the legacy setuptools behaviour rather than the backend "
+            'your requires list implies. Add, for example:\n\n    build-backend = "setuptools.build_meta"'
+        )
+
+
+# Backends whose PEP 639 support arrived in a known release. A backend that
+# is not listed is deliberately skipped rather than guessed at.
+_BACKEND_DISTRIBUTIONS = {
+    "setuptools.build_meta": "setuptools",
+    "setuptools.build_meta:__legacy__": "setuptools",
+    "hatchling.build": "hatchling",
+    "flit_core.buildapi": "flit-core",
+}
+_PEP639_BACKEND_FLOORS = {"setuptools": "77.0.0", "hatchling": "1.27", "flit-core": "1.11"}
+
+
+def _uses_pep639_licensing(project: "dict[str, Any]") -> bool:
+    """Report whether the project table uses PEP 639 licence metadata."""
+    # A string license is the SPDX form; a table is the legacy file/text form.
+    return isinstance(project.get("license"), str) or "license-files" in project
+
+
+def _declared_backend_floor(build_system: "dict[str, Any]", distribution: str) -> "PackagingVersion | None":
+    """Return the lower bound declared for one build requirement."""
+    for entry in _as_list(build_system.get("requires")):
+        try:
+            requirement = Requirement(entry)
+        except InvalidRequirement:
+            continue
+        if normalize(requirement.name) == distribution:
+            return _specifier_lower_bound(requirement.specifier)
+    return None
+
+
+class BuildBackendVersionFloor(BaseTest):
+    """Require a build backend new enough for the metadata features used."""
+
+    advisory = True
+    category = Category.COHERENCE
+    weight = 100
+
+    def test(self, data: Metadata) -> TestResult:
+        """Check the build-system floor supports the licence metadata used."""
+        project = _load_project_table(data)
+        build_system = _build_system_table(data)
+        if project is None or build_system is None or not _uses_pep639_licensing(project):
+            return self._skipped()
+
+        backend = build_system.get("build-backend")
+        distribution = _BACKEND_DISTRIBUTIONS.get(str(backend))
+        if distribution is None:
+            # An unrecognised backend; do not guess at its PEP 639 support.
+            return self._skipped()
+
+        floor = _PEP639_BACKEND_FLOORS[distribution]
+        declared = _declared_backend_floor(build_system, distribution)
+        if declared is not None and declared >= PackagingVersion(floor):
+            return self._passed()
+        return self._failed(
+            "Your [project] table uses PEP 639 licensing (an SPDX 'license' string or "
+            f"'license-files'), but your declared build backend floor is too low: PEP 639 "
+            f"needs {distribution}>={floor}. Older backends emit the wrong License metadata "
+            f"without telling you. Raise the [build-system] requires entry to "
+            f"'{distribution}>={floor}'."
+        )
+
+
+class LicenseFilesExist(BaseTest):
+    """Require every license-files pattern to match a real file."""
+
+    advisory = True
+    category = Category.COHERENCE
+    weight = 50
+
+    def test(self, data: Metadata) -> TestResult:
+        """Check that each license-files glob matches something on disk."""
+        project = _load_project_table(data)
+        root = _project_root(data)
+        if project is None or root is None or "license-files" not in project:
+            return self._skipped()
+
+        unmatched = [pattern for pattern in _as_list(project.get("license-files")) if not _glob_matches(root, pattern)]
+        if not unmatched:
+            return self._passed()
+        listed = "\n".join(f"  {pattern}" for pattern in unmatched)
+        return self._failed(
+            "These 'license-files' patterns in your pyproject.toml match no file in your "
+            f"project:\n{listed}\n"
+            "Your distribution will ship without a license file even though you declared "
+            "one. See https://packaging.python.org/en/latest/specifications/pyproject-toml/"
+        )
+
+
+def _glob_matches(root: Path, pattern: str) -> bool:
+    """Report whether a license-files pattern matches anything under root."""
+    if not pattern or pattern.startswith("/") or ".." in pattern:
+        # PEP 639 forbids absolute paths and parent traversal, and Path.glob
+        # raises on them rather than returning nothing.
+        return False
+    try:
+        return any(root.glob(pattern))
+    except (NotImplementedError, ValueError, OSError):
+        return False
+
+
+_README_SUFFIX_TYPES = {
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".rst": "text/x-rst",
+    ".txt": "text/plain",
+}
+
+
+def _declared_readme(project: "dict[str, Any]") -> "tuple[str, str | None] | None":
+    """Return the readme filename and its explicitly declared content type."""
+    readme = project.get("readme")
+    if isinstance(readme, str):
+        return readme, None
+    if isinstance(readme, dict):
+        filename = readme.get("file")
+        if isinstance(filename, str):
+            content_type = readme.get("content-type")
+            return filename, content_type if isinstance(content_type, str) else None
+    return None
+
+
+class ReadmeContentTypeMatch(BaseTest):
+    """Require the readme's content type to match its file extension."""
+
+    advisory = True
+    category = Category.COHERENCE
+    weight = 50
+
+    def test(self, data: Metadata) -> TestResult:
+        """Check the declared content type matches the readme's suffix."""
+        project = _load_project_table(data)
+        if project is None:
+            return self._skipped()
+        declared = _declared_readme(project)
+        if declared is None:
+            return self._skipped()
+
+        filename, explicit_type = declared
+        expected = _README_SUFFIX_TYPES.get(Path(filename).suffix.lower())
+        raw = explicit_type or data.get("description-content-type") or ""
+        actual = str(raw).split(";")[0].strip().lower()
+        if expected is None or not actual or actual == expected:
+            return self._passed()
+        return self._failed(
+            f"Your readme is '{filename}', which is {expected}, but its content type is "
+            f"'{actual}'. PyPI renders the description using the declared type, so the page "
+            f'will come out mangled. Set content-type = "{expected}".'
+        )
+
+
+# Extra names that almost always mean "not for your users".
+_DEVELOPMENT_EXTRA_NAMES = frozenset(
+    {
+        "dev",
+        "develop",
+        "development",
+        "test",
+        "tests",
+        "testing",
+        "doc",
+        "docs",
+        "documentation",
+        "lint",
+        "linting",
+        "typing",
+        "typecheck",
+        "check",
+        "checks",
+        "qa",
+    }
+)
+
+
+class DevelopmentExtras(BaseTest):
+    """Flag development dependencies published as optional extras."""
+
+    advisory = True
+    category = Category.PRACTICE
+    weight = 20
+
+    def test(self, data: Metadata) -> TestResult:
+        """Check development dependencies use PEP 735 dependency groups."""
+        project = _load_project_table(data)
+        if project is None:
+            return self._skipped()
+        extras = project.get("optional-dependencies")
+        if not isinstance(extras, dict):
+            return self._skipped()
+
+        development = sorted(name for name in extras if normalize(str(name)) in _DEVELOPMENT_EXTRA_NAMES)
+        if not development:
+            return self._passed()
+        listed = ", ".join(repr(name) for name in development)
+        return self._failed(
+            f"Your development dependencies are declared as extras: {listed}. Extras are "
+            "published in your package metadata and installable by your users, who do not "
+            "need your test runner. Move them to [dependency-groups], which stays local to "
+            "your project. See "
+            "https://packaging.python.org/en/latest/specifications/dependency-groups/"
+        )
+
+
 BUILD_SYSTEM_TESTS: "list[BaseTest]" = [
     MissingBuildSystem(),
     MissingPyProjectToml(),
@@ -1000,6 +1857,23 @@ ALL_TESTS: "list[BaseTest]" = [
     BusFactor(),
     DevStatusClassifier(),
     DeprecatedMetadataFields(),
+    # Advisory checks. Reported but not scored; see RatedProject.advisories.
+    DirectUrlDependency(),
+    SummaryFormat(),
+    ProjectUrlLabelCollision(),
+    PythonRequiresUpperBound(),
+    DependencyUpperBounds(),
+    DependencyLowerBounds(),
+    ReadmeRelativeLinks(),
+    PythonVersionCoherence(),
+    EndOfLifePython(),
+    DevelopmentStatusCoherence(),
+    TypedMarker(),
+    BuildBackendDeclared(),
+    BuildBackendVersionFloor(),
+    LicenseFilesExist(),
+    ReadmeContentTypeMatch(),
+    DevelopmentExtras(),
 ]
 
 
@@ -1008,6 +1882,8 @@ try:
 
     class CheckManifest(BaseTest):
         """Compare version-controlled files with the built source distribution."""
+
+        category = Category.PRACTICE
 
         def test(self, data: Metadata) -> TestResult:
             """Run check-manifest when metadata represents a VCS checkout."""
@@ -1097,31 +1973,73 @@ def _normalized_skip_tests(skip_tests: "list[str] | str | None") -> "set[str]":
     return set(skip_tests)
 
 
+@dataclass
+class _Evaluation:
+    """Mutable accumulator for a single rating pass."""
+
+    problems: "list[Problem]" = field(default_factory=list)
+    advisories: "list[Problem]" = field(default_factory=list)
+    good: int = 0
+    bad: int = 0
+    fatality: bool = False
+
+
+def _record_result(
+    evaluation: _Evaluation,
+    test_name: str,
+    result: TestResult,
+    *,
+    scored: bool,
+    category: str = Category.METADATA,
+) -> None:
+    if not scored:
+        # An unscored test contributes nothing to the rating in either
+        # direction; only its failures are worth reporting.
+        if result.outcome is False:
+            evaluation.advisories.append(
+                Problem(
+                    test=test_name,
+                    message=result.message,
+                    weight=result.weight,
+                    fatal=result.fatal,
+                    category=category,
+                )
+            )
+        return
+    if result.outcome is False:
+        evaluation.problems.append(
+            Problem(
+                test=test_name,
+                message=result.message,
+                weight=result.weight,
+                fatal=result.fatal,
+                category=category,
+            )
+        )
+        if result.fatal:
+            evaluation.fatality = True
+        else:
+            evaluation.bad += result.weight
+    elif result.outcome is True and not result.fatal:
+        evaluation.good += result.weight
+    # If the outcome is None, it's ignored.
+
+
 def _evaluate_rating_tests(
     data: Metadata,
     test_list: "list[BaseTest]",
     skip_tests: "set[str]",
-    problems: "list[Problem]",
-) -> "tuple[int, int, bool]":
-    good = 0
-    bad = 0
-    fatality = False
+    evaluation: _Evaluation,
+    *,
+    strict: bool = False,
+) -> None:
     for test in test_list:
         test_name = test.__class__.__name__
-        if test_name in skip_tests:
+        # A test is skippable by its class name or by its whole category.
+        if test_name in skip_tests or test.category in skip_tests:
             continue
-        result = test.test(data)
-        if result.outcome is False:
-            problems.append(Problem(test=test_name, message=result.message, weight=result.weight, fatal=result.fatal))
-            if result.fatal:
-                fatality = True
-            else:
-                bad += result.weight
-        elif result.outcome is True:
-            if not result.fatal:
-                good += result.weight
-        # If the outcome is None, it's ignored.
-    return good, bad, fatality
+        scored = strict or not test.advisory
+        _record_result(evaluation, test_name, test.test(data), scored=scored, category=test.category)
 
 
 def _calculate_rating(good: int, bad: int, *, fatality: bool) -> int:
@@ -1137,21 +2055,32 @@ def _calculate_rating(good: int, bad: int, *, fatality: bool) -> int:
     return (good * 9) // (good + bad) + 1
 
 
-def rate_project(data: Metadata, skip_tests: "list[str] | str | None" = None) -> RatedProject:
-    """Rate a package, returning a structured RatedProject result."""
+def rate_project(
+    data: Metadata,
+    skip_tests: "list[str] | str | None" = None,
+    *,
+    strict: bool = False,
+) -> RatedProject:
+    """Rate a package, returning a structured RatedProject result.
+
+    Advisory tests are reported separately and excluded from the rating,
+    unless ``strict`` is set, in which case they are scored like any other.
+    """
     no_config = _no_config_result(data)
     if no_config is not None:
         return no_config
 
     test_list, problems, initial_fatality = _initial_rating_state(data)
-    good, bad, test_fatality = _evaluate_rating_tests(
-        data,
-        test_list,
-        _normalized_skip_tests(skip_tests),
-        problems,
+    evaluation = _Evaluation(problems=problems, fatality=initial_fatality)
+    _evaluate_rating_tests(data, test_list, _normalized_skip_tests(skip_tests), evaluation, strict=strict)
+    rating = _calculate_rating(evaluation.good, evaluation.bad, fatality=evaluation.fatality)
+    return RatedProject(
+        name=data.get("name"),
+        rating=rating,
+        level=LEVELS[rating],
+        problems=evaluation.problems,
+        advisories=evaluation.advisories,
     )
-    rating = _calculate_rating(good, bad, fatality=initial_fatality or test_fatality)
-    return RatedProject(name=data.get("name"), rating=rating, level=LEVELS[rating], problems=problems)
 
 
 def rate(data: Metadata, skip_tests: "list[str] | str | None" = None) -> "tuple[int, list[str]]":

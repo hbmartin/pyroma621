@@ -24,6 +24,7 @@ classifiers = [
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: Implementation :: PyPy",
+    "Typing :: Typed",
 ]
 keywords = ["pypi", "quality", "testing"]
 license = "MIT"
@@ -33,8 +34,8 @@ dependencies = [
     "build>=0.7.0",
     "docutils>=0.22",
     "packaging>=24.2",
-    "pygments",
-    "requests",
+    "pygments>=2.19",
+    "requests>=2.32",
     "trove-classifiers>=2022.6.26",
     "validate-pyproject>=0.16",
 ]
@@ -78,6 +79,7 @@ Homepage = "https://github.com/hbmartin/pyroma621"
 "Source Code" = "https://github.com/hbmartin/pyroma621"
 Documentation = "https://hbmartin.github.io/pyroma621/"
 Changelog = "https://hbmartin.github.io/pyroma621/changelog/"
+Issues = "https://github.com/hbmartin/pyroma621/issues"
 
 [project.scripts]
 pyroma = "pyroma:main"

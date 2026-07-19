@@ -63,6 +63,25 @@ jobs:
       - name: Run pyroma
         run: uv run --no-default-groups --extra test pyroma --min 10 .
 
+  selfcheck-strict:
+    name: Run pyroma on itself, scoring advisory checks
+
+    runs-on: ubuntu-latest
+    # Advisory checks are not a merge gate. This job surfaces what pyroma
+    # would say about itself under --strict; promote it to blocking once
+    # the remaining findings are addressed.
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+      - name: Run pyroma with advisory checks scored
+        run: uv run --no-default-groups --extra test pyroma --strict --min 10 .
+
   complexity:
     name: Run Lizard
 
