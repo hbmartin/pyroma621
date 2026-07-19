@@ -2,6 +2,7 @@
 
 # Kept at runtime so the public Pathish alias resolves through get_type_hints.
 import os  # noqa: TC003
+import tomllib
 from email.message import Message
 from pathlib import Path
 from typing import Any, Union, cast
@@ -44,11 +45,18 @@ def build_metadata(path: Pathish, isolated: "bool | None" = None) -> Metadata:
     # Core Metadata Specs recommend.
     data: dict[str, Any] = {}
     for raw_key in set(metadata.keys()):
-        value = metadata.get_all(raw_key) or []
+        values = metadata.get_all(raw_key) or []
         key = normalize(raw_key)
 
-        if len(value) == 1:
-            value = value[0]
+        if key == "classifier":
+            if len(values) == 1 and values[0].strip() == "UNKNOWN":
+                continue
+            data[key] = values
+            continue
+
+        value: Any = values
+        if len(values) == 1:
+            value = values[0]
             if value.strip() == "UNKNOWN":
                 # Legacy metadata uses UNKNOWN as an empty-value marker.
                 continue
@@ -65,12 +73,35 @@ def build_metadata(path: Pathish, isolated: "bool | None" = None) -> Metadata:
     return cast("Metadata", data)
 
 
+def read_pyproject(path: Pathish) -> "tuple[dict[str, Any] | None, str | None]":
+    """Read and parse a project's pyproject.toml.
+
+    Returns a ``(table, error)`` pair: exactly one of the two is set. The
+    error is a plain string rather than an exception so that metadata stays
+    plain data and rating remains a pure function of it.
+    """
+    pyproject_path = Path(path) / "pyproject.toml"
+    try:
+        with pyproject_path.open("rb") as pyproject_file:
+            return tomllib.load(pyproject_file), None
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        return None, str(error)
+
+
 def get_build_data(path: Pathish, isolated: "bool | None" = None) -> Metadata:
     """Return built metadata plus project build-system sentinels."""
     metadata = build_metadata(path, isolated=isolated)
     # Check if there is a pyproject_toml
     if "pyproject.toml" not in {entry.name for entry in Path(path).iterdir()}:
         metadata["_missing_pyproject_toml"] = True
+        return metadata
+
+    # Parse it once here, so that no rating test has to touch the disk.
+    table, error = read_pyproject(path)
+    if table is not None:
+        metadata["_pyproject"] = table
+    elif error is not None:
+        metadata["_pyproject_error"] = error
     return metadata
 
 

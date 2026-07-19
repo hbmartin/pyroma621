@@ -7,6 +7,7 @@ import tarfile
 import tempfile
 import unittest
 import unittest.mock
+from email.message import Message
 from pathlib import Path
 from typing import Never
 from xmlrpc import client as xmlrpclib
@@ -15,11 +16,29 @@ from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 import pyroma
-from pyroma import distributiondata, projectdata, pypidata, ratings, report
+from pyroma import config, distributiondata, projectdata, pypidata, ratings, report
 from pyroma.metadata import Metadata
 from pyroma.ratings import rate
 
 TESTDATA_DIR = Path(__file__).parent / "testdata"
+
+
+def _attach_pyproject(testdata: Metadata, path: "Path | str") -> Metadata:
+    """Point metadata at a directory the way projectdata would.
+
+    ratings no longer reads from disk, so a test that supplies ``_path`` must
+    also supply the parsed pyproject.toml, or every pyproject check silently
+    skips and the test passes while asserting nothing.
+    """
+    testdata["_path"] = path
+    table, error = projectdata.read_pyproject(path)
+    if table is not None:
+        testdata["_pyproject"] = table
+    elif error is not None:
+        testdata["_pyproject_error"] = error
+    return testdata
+
+
 long_description = (TESTDATA_DIR / "complete" / "README.txt").read_text(encoding="UTF-8")
 # Translate newlines to universal format
 long_description = io.StringIO(long_description, newline=None).read()
@@ -332,7 +351,7 @@ class RatingsTest(unittest.TestCase):
         # Use valid metadata so we exercise the rating check itself,
         # then point _path to a fixture with an invalid pyproject.toml.
         testdata = COMPLETE.copy()
-        testdata["_path"] = TESTDATA_DIR / "invalid_pyproject"
+        _attach_pyproject(testdata, TESTDATA_DIR / "invalid_pyproject")
 
         rating = rate(testdata)
         self.assertLess(rating[0], 10)
@@ -507,7 +526,7 @@ class SpecComplianceTest(unittest.TestCase):
 
     def test_console_scripts_in_entry_points_is_fatal(self) -> None:
         testdata = COMPLETE.copy()
-        testdata["_path"] = TESTDATA_DIR / "bad_console_scripts"
+        _attach_pyproject(testdata, TESTDATA_DIR / "bad_console_scripts")
 
         rating = rate(testdata)
         self.assertEqual(rating[0], 0)
@@ -515,7 +534,7 @@ class SpecComplianceTest(unittest.TestCase):
 
     def test_readme_both_file_and_text_is_fatal(self) -> None:
         testdata = COMPLETE.copy()
-        testdata["_path"] = TESTDATA_DIR / "readme_both"
+        _attach_pyproject(testdata, TESTDATA_DIR / "readme_both")
 
         rating = rate(testdata)
         self.assertEqual(rating[0], 0)
@@ -523,7 +542,7 @@ class SpecComplianceTest(unittest.TestCase):
 
     def test_dynamic_name_is_fatal(self) -> None:
         testdata = COMPLETE.copy()
-        testdata["_path"] = TESTDATA_DIR / "dynamic_name"
+        _attach_pyproject(testdata, TESTDATA_DIR / "dynamic_name")
 
         rating = rate(testdata)
         self.assertEqual(rating[0], 0)
@@ -630,7 +649,7 @@ class BugFixTest(unittest.TestCase):
                 encoding="UTF-8",
             )
             testdata = COMPLETE.copy()
-            testdata["_path"] = tmp
+            _attach_pyproject(testdata, tmp)
 
             messages = rate(testdata)[1]
 
@@ -662,6 +681,7 @@ class ReportTest(unittest.TestCase):
                     message="The package's Description is quite short.",
                     weight=50,
                     fatal=False,
+                    category="metadata",
                 )
             ],
         )
@@ -712,11 +732,410 @@ class ReportTest(unittest.TestCase):
                         "message": "The package's Description is quite short.",
                         "weight": 50,
                         "fatal": False,
+                        "category": "metadata",
                     }
                 ],
+                "advisories": [],
                 "_meta": {"mode": "directory"},
             },
         )
+
+
+class _AlwaysPasses(ratings.BaseTest):
+    weight = 100
+
+    def test(self, _data: Metadata) -> ratings.TestResult:
+        return self._passed()
+
+
+class _AlwaysFailsAdvisory(ratings.BaseTest):
+    weight = 100
+    advisory = True
+
+    def test(self, _data: Metadata) -> ratings.TestResult:
+        return self._failed("advisory finding")
+
+
+class AdvisoryTest(unittest.TestCase):
+    maxDiff = None
+
+    def _rate(self, *, strict: bool = False) -> ratings.RatedProject:
+        stand_ins: list[ratings.BaseTest] = [_AlwaysPasses(), _AlwaysFailsAdvisory()]
+        with unittest.mock.patch.object(ratings, "ALL_TESTS", stand_ins):
+            return ratings.rate_project({"name": "example"}, strict=strict)
+
+    def test_advisory_failure_does_not_affect_the_rating(self) -> None:
+        # The whole point of the advisory tier: a new check can never move an
+        # existing package's score.
+        rated = self._rate()
+
+        self.assertEqual(rated.rating, 10)
+        self.assertEqual(rated.problems, [])
+        self.assertEqual([advisory.message for advisory in rated.advisories], ["advisory finding"])
+
+    def test_strict_scores_advisory_failures(self) -> None:
+        rated = self._rate(strict=True)
+
+        self.assertEqual(rated.advisories, [])
+        self.assertEqual([problem.message for problem in rated.problems], ["advisory finding"])
+        # 100 good against 100 bad: (100 * 9) // 200 + 1
+        self.assertEqual(rated.rating, 5)
+
+    def test_rate_tuple_api_never_reports_advisories(self) -> None:
+        # rate() is the documented backwards-compatible API; advisories must
+        # not leak into its message list.
+        stand_ins: list[ratings.BaseTest] = [_AlwaysPasses(), _AlwaysFailsAdvisory()]
+        with unittest.mock.patch.object(ratings, "ALL_TESTS", stand_ins):
+            self.assertEqual(rate({"name": "example"}), (10, []))
+
+    def _advisory_rating(self) -> ratings.RatedProject:
+        return ratings.RatedProject(
+            name="example",
+            rating=10,
+            level=ratings.LEVELS[10],
+            problems=[],
+            advisories=[
+                ratings.Problem(
+                    test="Example",
+                    message="first line\nsecond line",
+                    weight=20,
+                    fatal=False,
+                    category="practice",
+                )
+            ],
+        )
+
+    def test_format_text_renders_the_advisory_section(self) -> None:
+        text = report.format_text(self._advisory_rating())
+
+        self.assertIn("Advisory (not scored, 1 finding) - run --strict to score these:", text)
+        # Multi-line messages are indented in full, not just their first line.
+        self.assertIn("  first line\n  second line", text)
+
+    def test_format_text_can_suppress_advisories(self) -> None:
+        text = report.format_text(self._advisory_rating(), show_advisories=False)
+
+        self.assertNotIn("Advisory", text)
+        # Suppressing them restores byte-identical traditional output.
+        self.assertEqual(text, report.format_text(ratings.RatedProject("example", 10, ratings.LEVELS[10], [])))
+
+    def test_format_json_always_includes_advisories(self) -> None:
+        document = json.loads(report.format_json(self._advisory_rating()))
+
+        self.assertEqual(
+            document["advisories"],
+            [
+                {
+                    "test": "Example",
+                    "message": "first line\nsecond line",
+                    "weight": 20,
+                    "fatal": False,
+                    "category": "practice",
+                }
+            ],
+        )
+
+
+class AdvisoryChecksTest(unittest.TestCase):
+    maxDiff = None
+
+    def _advisories(self, testdata: Metadata) -> "list[str]":
+        return [advisory.message for advisory in ratings.rate_project(testdata).advisories]
+
+    def _assert_advises(self, testdata: Metadata, fragment: str) -> None:
+        messages = self._advisories(testdata)
+        self.assertTrue(
+            any(fragment in message for message in messages),
+            f"no advisory contained {fragment!r}; got {messages}",
+        )
+
+    def _assert_silent(self, testdata: Metadata, fragment: str) -> None:
+        self.assertFalse(any(fragment in message for message in self._advisories(testdata)))
+
+    def test_direct_url_dependency(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["requires-dist"] = ["zope.event @ https://example.com/zope.event-1.0.tar.gz"]
+
+        self._assert_advises(testdata, "declares direct URL dependencies")
+        # It is fatal, so strict mode zeroes the rating...
+        self.assertEqual(ratings.rate_project(testdata, strict=True).rating, 0)
+        # ...while the default rating is completely untouched.
+        self.assertEqual(ratings.rate_project(testdata).rating, 10)
+
+    def test_direct_url_dependency_is_not_also_reported_as_floorless(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["requires-dist"] = ["zope.event @ https://example.com/zope.event-1.0.tar.gz"]
+
+        self._assert_silent(testdata, "have no lower bound")
+
+    def test_summary_must_be_a_single_line(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["summary"] = "First line.\nSecond line."
+
+        self._assert_advises(testdata, "must be a single line")
+
+    def test_summary_length_limit(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["summary"] = "x" * 513
+
+        self._assert_advises(testdata, "characters long, but package indices limit")
+
+    def test_project_url_labels_colliding_after_normalization(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["project-url"] = ["Repository, https://example.com/a", "Source, https://example.com/b"]
+
+        self._assert_advises(testdata, "both normalize to 'source'")
+
+    def test_distinct_project_url_labels_do_not_collide(self) -> None:
+        # COMPLETE uses "repository" and "homepage", which are different links.
+        self._assert_silent(COMPLETE.copy(), "normalize to")
+
+    def test_requires_python_upper_bound(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["requires-python"] = ">=3.11,<4.0"
+
+        self._assert_advises(testdata, "has an upper bound")
+
+    def test_capped_runtime_dependency(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["requires-dist"] = ["requests>=2,<3"]
+
+        self._assert_advises(testdata, "cap or pin their versions")
+
+    def test_extras_are_not_treated_as_runtime_dependencies(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["requires-dist"] = ['pytest<9; extra == "test"']
+
+        self._assert_silent(testdata, "cap or pin their versions")
+
+    def test_floorless_runtime_dependency(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["requires-dist"] = ["zope.event"]
+
+        self._assert_advises(testdata, "have no lower bound")
+
+    def test_relative_markdown_links(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["description-content-type"] = "text/markdown"
+        testdata["description"] = "![badge](docs/badge.svg) and see [the docs](docs/index.md)."
+
+        message = next(m for m in self._advisories(testdata) if "relative paths" in m)
+        self.assertIn("docs/badge.svg", message)
+        self.assertIn("docs/index.md", message)
+
+    def test_absolute_links_are_not_flagged(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["description-content-type"] = "text/markdown"
+        testdata["description"] = "![badge](https://example.com/badge.svg)"
+
+        self._assert_silent(testdata, "relative paths")
+
+    def test_classifiers_contradicting_requires_python(self) -> None:
+        testdata = COMPLETE.copy()
+        # COMPLETE's classifiers name Python 2.6 through 3.3.
+        testdata["requires-python"] = ">=3.12"
+
+        self._assert_advises(testdata, "but your Requires-Python")
+
+    def test_end_of_life_python_classifiers(self) -> None:
+        self._assert_advises(COMPLETE.copy(), "reached end of life")
+
+    def test_supported_python_is_not_flagged_as_end_of_life(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["classifier"] = ["Programming Language :: Python :: 3.13"]
+
+        self._assert_silent(testdata, "reached end of life")
+
+    def test_mature_status_on_a_prerelease_version(self) -> None:
+        # COMPLETE is "Development Status :: 6 - Mature" at version 1.0.dev1.
+        self._assert_advises(COMPLETE.copy(), "is a pre-release")
+
+    def test_stable_status_on_a_zero_version(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["version"] = "0.0.1"
+
+        self._assert_advises(testdata, "A 0.x version tells installers")
+
+    def test_alpha_status_on_a_final_release(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["classifier"] = ["Development Status :: 3 - Alpha"]
+        testdata["version"] = "1.1.0"
+
+        self._assert_advises(testdata, "a final release")
+
+    def test_typing_classifier_without_a_marker(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["classifier"] = ["Typing :: Typed"]
+        testdata["_path"] = TESTDATA_DIR / "complete"
+
+        self._assert_advises(testdata, "no py.typed marker file")
+
+    def test_marker_without_a_typing_classifier(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["_path"] = TESTDATA_DIR / "typed_marker"
+
+        self._assert_advises(testdata, "does not advertise it")
+
+    def test_build_system_without_a_backend(self) -> None:
+        testdata = _attach_pyproject(COMPLETE.copy(), TESTDATA_DIR / "no_build_backend")
+
+        self._assert_advises(testdata, "no build-backend key")
+
+    def test_build_backend_floor_too_low_for_pep639(self) -> None:
+        # The complete fixture declares setuptools>=61 but uses license-files,
+        # which needs setuptools>=77.
+        testdata = _attach_pyproject(COMPLETE.copy(), TESTDATA_DIR / "complete")
+
+        self._assert_advises(testdata, "PEP 639 needs setuptools>=77.0.0")
+
+    def test_unknown_build_backend_is_not_guessed_at(self) -> None:
+        # pyroma itself uses uv_build, which is deliberately not in the table.
+        testdata = _attach_pyproject(COMPLETE.copy(), Path(__file__).parent.parent)
+
+        self._assert_silent(testdata, "build backend floor is too low")
+
+    def test_license_files_pattern_matching_nothing(self) -> None:
+        testdata = _attach_pyproject(COMPLETE.copy(), TESTDATA_DIR / "missing_license_file")
+
+        self._assert_advises(testdata, "match no file in your project")
+
+    def test_license_files_pattern_that_matches(self) -> None:
+        testdata = _attach_pyproject(COMPLETE.copy(), TESTDATA_DIR / "complete")
+
+        self._assert_silent(testdata, "match no file in your project")
+
+    def test_readme_content_type_mismatch(self) -> None:
+        testdata = _attach_pyproject(COMPLETE.copy(), TESTDATA_DIR / "readme_type_mismatch")
+
+        self._assert_advises(testdata, "which is text/markdown, but its content type is 'text/x-rst'")
+
+    def test_development_dependencies_declared_as_extras(self) -> None:
+        testdata = _attach_pyproject(COMPLETE.copy(), TESTDATA_DIR / "dev_extras")
+
+        message = next(m for m in self._advisories(testdata) if "declared as extras" in m)
+        self.assertIn("'docs', 'test'", message)
+        # A genuine feature extra is not a development dependency.
+        self.assertNotIn("colour", message)
+
+    def test_a_whole_category_can_be_skipped(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["requires-python"] = ">=3.11,<4.0"
+
+        # PythonRequiresUpperBound is an opinionated check.
+        self._assert_advises(testdata, "has an upper bound")
+        skipped = ratings.rate_project(testdata, ["practice"]).advisories
+        self.assertFalse(any("has an upper bound" in problem.message for problem in skipped))
+
+    def test_findings_carry_their_category(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["requires-python"] = ">=3.11,<4.0"
+
+        advisories = ratings.rate_project(testdata).advisories
+        upper_bound = next(a for a in advisories if "has an upper bound" in a.message)
+        self.assertEqual(upper_bound.category, "practice")
+
+    def test_skip_tests_accepts_categories_and_names(self) -> None:
+        self.assertEqual(pyroma.parse_tests("practice,Licensing"), ["practice", "Licensing"])
+        self.assertIsNone(pyroma.parse_tests("NoSuchThing"))
+
+    def test_deprecated_classifier_names_its_replacement(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["classifier"] = [*COMPLETE["classifier"], "Framework :: Django CMS :: 4.2"]
+
+        message = next(m for m in rate(testdata)[1] if "Some of your classifiers are deprecated" in m)
+        self.assertIn("has been replaced by", message)
+        # The old message wrongly told users to use the private namespace.
+        self.assertNotIn("should start with 'Private :: '", message)
+
+    def test_license_expression_with_classifiers_does_not_claim_rejection(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["classifier"] = [*COMPLETE["classifier"], "License :: OSI Approved :: MIT License"]
+
+        message = next(m for m in rate(testdata)[1] if "License-Expression" in m)
+        self.assertIn("two sources of truth", message)
+        # Package indices do not in fact reject this combination.
+        self.assertNotIn("rejected by package indices", message)
+
+
+class ConfigTest(unittest.TestCase):
+    maxDiff = None
+
+    def test_defaults(self) -> None:
+        settings = config.Config()
+
+        self.assertEqual(settings.min_rating, 8)
+        self.assertFalse(settings.strict)
+        self.assertTrue(settings.show_advisories)
+        self.assertEqual(settings.skip_tests, [])
+
+    def test_from_table(self) -> None:
+        settings = config.from_table(
+            {"min-rating": 10, "strict": True, "advisories": False, "skip-tests": ["practice"]},
+        )
+
+        self.assertEqual(settings.min_rating, 10)
+        self.assertTrue(settings.strict)
+        self.assertFalse(settings.show_advisories)
+        self.assertEqual(settings.skip_tests, ["practice"])
+
+    def test_unknown_key_is_an_error(self) -> None:
+        # Silently swallowing a typo'd key is the classic config failure mode.
+        with self.assertRaisesRegex(config.ConfigError, "unknown key 'ignor'"):
+            config.from_table({"ignor": ["practice"]})
+
+    def test_out_of_range_min_rating(self) -> None:
+        with self.assertRaisesRegex(config.ConfigError, "between 1 and 10"):
+            config.from_table({"min-rating": 42})
+
+    def test_wrong_type_is_an_error(self) -> None:
+        with self.assertRaisesRegex(config.ConfigError, "must be true or false"):
+            config.from_table({"strict": "yes"})
+
+    def test_booleans_are_not_accepted_as_min_rating(self) -> None:
+        # bool is an int subclass, so this needs an explicit guard.
+        with self.assertRaisesRegex(config.ConfigError, "whole number"):
+            config.from_table({"min-rating": True})
+
+    def test_from_directory_reads_the_tool_table(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "pyproject.toml").write_text(
+                '[tool.pyroma]\nmin-rating = 9\nskip-tests = ["practice"]\n',
+                encoding="UTF-8",
+            )
+            settings = config.from_directory(tmp)
+
+        self.assertEqual(settings.min_rating, 9)
+        self.assertEqual(settings.skip_tests, ["practice"])
+
+    def test_from_directory_without_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "pyproject.toml").write_text('[project]\nname = "x"\n', encoding="UTF-8")
+            self.assertEqual(config.from_directory(tmp), config.Config())
+
+    def test_a_broken_pyproject_does_not_stop_pyroma(self) -> None:
+        # The rating reports the broken file; configuration just falls back.
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "pyproject.toml").write_text("not toml at all {", encoding="UTF-8")
+            self.assertEqual(config.from_directory(tmp), config.Config())
+
+    def _resolve(self, argv: "list[str]", mode: str = "directory") -> config.Config:
+        args = pyroma._build_parser().parse_args(argv)
+        return pyroma._resolve_config(args, mode)
+
+    def test_explicit_flag_beats_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "pyproject.toml").write_text("[tool.pyroma]\nmin-rating = 3\n", encoding="UTF-8")
+
+            self.assertEqual(self._resolve([tmp]).min_rating, 3)
+            self.assertEqual(self._resolve(["--min", "10", tmp]).min_rating, 10)
+            # --no-config ignores the table entirely.
+            self.assertEqual(self._resolve(["--no-config", tmp]).min_rating, 8)
+
+    def test_configuration_is_only_read_in_directory_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "pyproject.toml").write_text("[tool.pyroma]\nmin-rating = 3\n", encoding="UTF-8")
+
+            self.assertEqual(self._resolve([tmp], mode="pypi").min_rating, 8)
 
 
 class PyPITest(unittest.TestCase):
@@ -780,6 +1199,51 @@ class PyPITest(unittest.TestCase):
         requestmock.assert_called_once_with(
             "https://packages.example.com/pypi/internalpkg/json", timeout=pypidata.REQUEST_TIMEOUT
         )
+
+    @unittest.mock.patch("pyroma.pypidata.requests.get")
+    def test_custom_index_not_found_error_omits_url_secrets(self, requestmock: unittest.mock.Mock) -> None:
+        requestmock.return_value = unittest.mock.Mock(ok=False, status_code=404)
+        index_url = "https://user:password@packages.example.com/simple?token=secret"
+
+        with self.assertRaises(ValueError) as caught:
+            pypidata._get_project_data("internalpkg", index_url=index_url)
+
+        error = str(caught.exception)
+        self.assertEqual(error, "Did not find 'internalpkg' on the configured package index.")
+        for secret in ("user", "password", "token", "secret", "packages.example.com"):
+            self.assertNotIn(secret, error)
+
+    def test_http_errors_omit_url_secrets_and_request_details(self) -> None:
+        url = "https://user:password@packages.example.com/pypi?token=secret"
+        errors = (
+            pypidata.requests.exceptions.Timeout(f"Timed out fetching {url}"),
+            pypidata.requests.exceptions.ConnectionError(f"Could not connect to {url}"),
+        )
+
+        for request_error in errors:
+            with (
+                self.subTest(error=type(request_error).__name__),
+                unittest.mock.patch("pyroma.pypidata.requests.get", side_effect=request_error),
+                self.assertRaises(ValueError) as caught,
+            ):
+                pypidata._http_get(url)
+
+            error = str(caught.exception)
+            for secret in ("user", "password", "token", "secret", "packages.example.com"):
+                self.assertNotIn(secret, error)
+            self.assertTrue(caught.exception.__suppress_context__)
+
+    @unittest.mock.patch("pyroma.pypidata._get_project_data")
+    def test_get_data_rejects_malformed_info(self, projectdatamock: unittest.mock.Mock) -> None:
+        invalid_responses = ([], {}, {"info": None}, {"info": []}, {"info": "not metadata"})
+        for invalid_response in invalid_responses:
+            with self.subTest(response=invalid_response):
+                projectdatamock.return_value = invalid_response
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Invalid metadata format received from package index",
+                ):
+                    pypidata.get_data("example")
 
     @unittest.mock.patch("pyroma.pypidata.xmlrpc.client.ServerProxy")
     @unittest.mock.patch("pyroma.pypidata._get_project_data")
@@ -884,15 +1348,21 @@ class PyPITest(unittest.TestCase):
         requestmock: unittest.mock.Mock,
         proxymock: unittest.mock.Mock,
     ) -> None:
+        download_url = "https://user:password@files.example.com/example-1.0.tar.gz?token=secret"
         projectdatamock.return_value = {
             "info": {"name": "example", "version": "1.0"},
-            "releases": {"1.0": [{"packagetype": "sdist", "url": "https://files.example.com/example-1.0.tar.gz"}]},
+            "releases": {"1.0": [{"packagetype": "sdist", "url": download_url}]},
         }
         proxymock.return_value.__enter__.return_value.package_roles.return_value = []
         requestmock.return_value = unittest.mock.Mock(ok=False, status_code=404, reason="Not Found")
 
-        with self.assertRaisesRegex(ValueError, "404"):
+        with self.assertRaises(ValueError) as caught:
             pypidata.get_data("example")
+
+        error = str(caught.exception)
+        self.assertEqual(error, "Could not download source distribution: 404 Not Found")
+        for secret in ("user", "password", "token", "secret", "files.example.com"):
+            self.assertNotIn(secret, error)
 
     @unittest.mock.patch("pyroma.pypidata.distributiondata.get_data")
     @unittest.mock.patch("pyroma.pypidata.requests.get")
@@ -1001,6 +1471,14 @@ class MainTest(unittest.TestCase):
         self.assertIn("Did not find 'nosuch'", document["error"]["message"])
         self.assertEqual(document["_meta"]["mode"], "pypi")
 
+    @unittest.mock.patch("pyroma.package_version", return_value="6.0.0")
+    def test_json_meta_uses_published_distribution_name(self, versionmock: unittest.mock.Mock) -> None:
+        self.assertEqual(
+            pyroma._json_meta("pypi", "example"),
+            {"package": "example", "mode": "pypi", "pyroma": "6.0.0"},
+        )
+        versionmock.assert_called_once_with("pyroma621")
+
     def test_main_all_tests_skipped_exits_3(self) -> None:
         skip = ",".join(pyroma.get_all_tests())
 
@@ -1027,8 +1505,23 @@ class ProjectDataTest(unittest.TestCase):
 
         data = projectdata.get_data(directory)
         del data["_path"]  # This changes, so I just ignore it
+        del data["_pyproject"]  # Parsed on the fly, not part of the metadata
 
         self.assertEqual(data, COMPLETE)
+
+    @unittest.mock.patch("pyroma.projectdata.wheel_metadata")
+    def test_single_classifier_remains_a_list(self, metadatamock: unittest.mock.Mock) -> None:
+        metadata = Message()
+        metadata["Name"] = "example"
+        metadata["Version"] = "1.0"
+        metadata["Classifier"] = "Programming Language :: Python :: 3.14"
+        metadatamock.return_value = metadata
+
+        data = projectdata.build_metadata(".")
+
+        self.assertEqual(data["classifier"], ["Programming Language :: Python :: 3.14"])
+        self.assertIs(ratings.ClassifierVerification().test(data).outcome, True)
+        self.assertIs(ratings.PythonClassifierVersion().test(data).outcome, True)
 
 
 class DistroDataTest(unittest.TestCase):
@@ -1043,6 +1536,7 @@ class DistroDataTest(unittest.TestCase):
                 try:
                     self.assertTrue(data.pop("_sdist"), distribution_path.name)
                     self.assertTrue(Path(data.pop("_path")).is_dir(), distribution_path.name)
+                    self.assertTrue(data.pop("_pyproject"), distribution_path.name)
                     self.assertEqual(data, COMPLETE)
                 finally:
                     distributiondata.cleanup(data)
@@ -1068,6 +1562,7 @@ class DistroDataTest(unittest.TestCase):
         def rate_project(
             data: Metadata,
             _skip_tests: "list[str] | str | None",
+            **_kwargs: object,
         ) -> ratings.RatedProject:
             extracted_paths.append(data["_path"])
             self.assertTrue(Path(data["_path"]).is_dir())
@@ -1090,6 +1585,7 @@ class DistroDataTest(unittest.TestCase):
         def fail_rating(
             data: Metadata,
             _skip_tests: "list[str] | str | None",
+            **_kwargs: object,
         ) -> Never:
             extracted_paths.append(data["_path"])
             self.assertTrue(Path(data["_path"]).is_dir())

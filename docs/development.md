@@ -46,20 +46,26 @@ them repository-wide.
 Build the wheel and source distribution with uv:
 
 ```console
-$ uv build
+uv build
 ```
 
 Run the same self-rating, complexity, and dependency checks used in CI:
 
 ```console
-$ uv run --no-default-groups --extra test pyroma --min 10 .
-$ uv run --only-group quality lizard pyroma --exclude "pyroma/testdata/*" --warnings_only
-$ uv run --no-default-groups --group quality deptry . --github-output
+uv run --no-default-groups --extra test pyroma --min 10 .
+uv run --only-group quality lizard pyroma --exclude "pyroma/testdata/*" --warnings_only
+uv run --no-default-groups --group quality deptry . --github-output
 ```
 
 Lizard uses its default strict threshold of 15 and must report no warnings.
 Deptry excludes bundled compatibility fixtures and has narrow exceptions for
 optional or indirectly loaded dependencies documented in `pyproject.toml`.
+The project-specific Semgrep rule prevents URL credentials and signed query
+parameters from being copied into user-facing exceptions:
+
+```console
+uv run --only-group quality semgrep scan --config .semgrep.yml --error pyroma
+```
 
 ## Test data
 

@@ -46,6 +46,8 @@ Metadata = TypedDict(
         "requires": Union[str, "list[str]"],
         "provides": Union[str, "list[str]"],
         "obsoletes": Union[str, "list[str]"],
+        "provides-dist": Union[str, "list[str]"],
+        "obsoletes-dist": Union[str, "list[str]"],
         "license": str,
         "license-expression": str,
         "license-file": Union[str, "list[str]"],
@@ -53,6 +55,11 @@ Metadata = TypedDict(
         "platform": Union[str, "list[str]"],
         # Pyroma-internal sentinels.
         "_path": Union[str, "os.PathLike[str]"],
+        # The target's pyproject.toml, parsed once by projectdata so that no
+        # rating test has to read from disk. Exactly one of these is set when
+        # a pyproject.toml exists. Treat the table as read-only.
+        "_pyproject": "dict[str, Any]",
+        "_pyproject_error": str,
         "_sdist": bool,
         "_owners": "list[str]",
         "_wheel_build_failed": bool,

@@ -1,5 +1,45 @@
 # Changelog
 
+## 6.0.0 (unreleased)
+
+- Added an advisory tier. Checks are now either scored, deciding the 1-10
+  rating as before, or advisory, reported below the rating but kept out of
+  the arithmetic. Every check added in this release is advisory, so
+  upgrading pyroma cannot change an existing package's rating. `--strict`
+  scores the advisory checks as well, and `--no-advisories` hides them.
+  Advisory findings always appear in JSON output under an `advisories` key.
+- Added sixteen checks, all advisory: direct URL dependencies, which package
+  indices reject and `twine check` does not catch; the 512-character
+  single-line Summary limit; Python classifiers contradicting
+  `Requires-Python`; end-of-life Python versions; a Development Status
+  classifier contradicting the version; a build backend floor too low for
+  the PEP 639 licensing in use; `license-files` patterns matching no file; a
+  readme content type disagreeing with its extension; a `py.typed` marker
+  disagreeing with the `Typing :: Typed` classifier; capped, pinned and
+  floorless runtime dependencies; an upper bound on `Requires-Python`;
+  development dependencies published as extras rather than declared in
+  `[dependency-groups]`; relative links in the description, which do not
+  resolve on PyPI; colliding project URL labels; and a `[build-system]`
+  table with no `build-backend`.
+- Every check now has a category: `spec`, `index`, `metadata`, `coherence`,
+  `practice` or `internal`. A whole category can be skipped at once, for
+  example `--skip-tests practice`, and the category appears in JSON output.
+- Added `[tool.pyroma]` configuration, read from the rated project's own
+  `pyproject.toml` in directory mode. Supports `min-rating`, `strict`,
+  `advisories` and `skip-tests`. An explicit command-line flag always wins;
+  `--no-config` ignores the table entirely.
+- Corrected the `Licensing` message. It claimed that a `License-Expression`
+  alongside license classifiers may be rejected by package indices; PyPI
+  implements no such check. It is now worded as the opinionated
+  recommendation it is.
+- A deprecated classifier now names its replacement, instead of being
+  reported as a non-standard classifier that should use the `Private ::`
+  namespace.
+- `pyproject.toml` is now parsed once, by `projectdata`, and handed to the
+  checks. `ratings` no longer reads from disk at all.
+- Added a rules reference page documenting every check, its category and
+  whether it is scored.
+
 ## 5.1b3 (unreleased)
 
 - Pyroma itself is now built by the native `uv_build` backend. Its flat

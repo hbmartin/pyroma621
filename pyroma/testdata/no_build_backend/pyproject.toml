@@ -1,0 +1,6 @@
+[build-system]
+requires = ["setuptools>=77"]
+
+[project]
+name = "no-build-backend"
+version = "1.0"

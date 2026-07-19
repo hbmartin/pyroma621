@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dev-extras"
+version = "1.0"
+
+[project.optional-dependencies]
+test = ["pytest"]
+docs = ["sphinx"]
+colour = ["rich"]
