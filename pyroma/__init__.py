@@ -1,14 +1,15 @@
 """Rate Python packages for packaging best practices."""
 
 import sys
-from argparse import ArgumentParser, ArgumentTypeError
+from argparse import ArgumentParser, ArgumentTypeError, Namespace
 from contextlib import suppress
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Any, cast
 
-from pyroma import distributiondata, projectdata, pypidata, ratings, report
+from pyroma import config as config_module
+from pyroma import distributiondata, projectdata, pypidata, ratings, report, rules
 from pyroma import metadata as metadata_types
 
 _MIN_RATING = 1
@@ -55,6 +56,11 @@ def min_argument(arg: str) -> int:
     return f
 
 
+def get_all_categories() -> "list[str]":
+    """Return every skippable rule category."""
+    return rules.categories()
+
+
 def get_all_tests() -> "list[str]":
     """Return the names of every registered rating test."""
     return [x.__class__.__name__ for x in ratings.ALL_TESTS]
@@ -75,9 +81,10 @@ def parse_tests(arg: str) -> "list[str] | None":
     # Trailing or doubled separators leave empty tokens behind.
     names = [name for name in names if name]
 
-    tests = get_all_tests()
+    # A token is either a test class name or a whole category.
+    selectable = set(get_all_tests()) | set(get_all_categories())
     for skip in names:
-        if skip not in tests:
+        if skip not in selectable:
             # Invalid test mentioned, fail and print valid tests
             return None
 
@@ -92,12 +99,13 @@ def skip_tests(arg: str) -> "list[str]":
 
     # It returned None, so there was an invalid test mentioned, or none at all
     tests = ", ".join(get_all_tests())
-    message = f"Invalid tests listed. Available tests: {tests}"
+    categories = ", ".join(get_all_categories())
+    message = f"Invalid tests listed. Available tests: {tests}. Available categories: {categories}"
     raise ArgumentTypeError(message)
 
 
-def main() -> None:
-    """Run the command-line interface."""
+def _build_parser() -> ArgumentParser:
+    """Construct the command-line argument parser."""
     parser = ArgumentParser()
     # argparse only grew the color attribute in Python 3.14.
     cast_parser = cast("Any", parser)
@@ -110,7 +118,9 @@ def main() -> None:
         "-n",
         "--min",
         dest="min",
-        default=8,
+        # None, not 8, so that an explicit flag can be told apart from a
+        # default and take precedence over [tool.pyroma] min-rating.
+        default=None,
         action="store",
         type=min_argument,
         help="Minimum rating for clean return between 1 and 10, inclusive.",
@@ -173,28 +183,85 @@ def main() -> None:
         dest="index_url",
         help="Base URL of a PyPI-compatible package index (default: https://pypi.org)",
     )
+    parser.add_argument(
+        "--strict",
+        dest="strict",
+        action="store_true",
+        default=None,
+        help="Score the advisory checks as well, instead of only reporting them",
+    )
+    parser.add_argument(
+        "--no-advisories",
+        dest="show_advisories",
+        action="store_false",
+        default=None,
+        help="Do not report advisory findings",
+    )
+    parser.add_argument(
+        "--no-config",
+        dest="use_config",
+        action="store_false",
+        default=True,
+        help="Ignore the target project's [tool.pyroma] configuration",
+    )
+    return parser
 
-    args = parser.parse_args()
 
-    mode = args.mode
-    if args.mode is None or args.mode == "auto":
-        package_path = Path(args.package)
-        if package_path.is_dir():
-            mode = "directory"
-        elif package_path.is_file():
-            mode = "file"
-        else:
-            mode = "pypi"
+def _resolve_config(args: Namespace, mode: str) -> config_module.Config:
+    """Merge command-line arguments over the project's configuration.
+
+    An explicitly supplied flag always wins; the configuration only fills in
+    what the user did not ask for.
+    """
+    settings = config_module.Config()
+    if args.use_config and mode == "directory":
+        settings = config_module.from_directory(args.package)
+
+    skip = args.skip_tests or settings.skip_tests
+    return config_module.Config(
+        min_rating=args.min if args.min is not None else settings.min_rating,
+        strict=args.strict if args.strict is not None else settings.strict,
+        show_advisories=(args.show_advisories if args.show_advisories is not None else settings.show_advisories),
+        skip_tests=skip,
+    )
+
+
+def _resolve_mode(mode: "str | None", package: str) -> str:
+    """Resolve the rating mode, inferring it from the argument when automatic."""
+    if mode is not None and mode != "auto":
+        return mode
+    package_path = Path(package)
+    if package_path.is_dir():
+        return "directory"
+    if package_path.is_file():
+        return "file"
+    return "pypi"
+
+
+def main() -> None:
+    """Run the command-line interface."""
+    args = _build_parser().parse_args()
+    mode = _resolve_mode(args.mode, args.package)
 
     try:
-        rating = run(mode, args.package, args.quiet, args.skip_tests, args.index_url, args.output_format)
-    except (OSError, ratings.ConfigurationError, ValueError) as e:
+        settings = _resolve_config(args, mode)
+        rating = run(
+            mode,
+            args.package,
+            args.quiet,
+            settings.skip_tests,
+            args.index_url,
+            args.output_format,
+            strict=settings.strict,
+            show_advisories=settings.show_advisories,
+        )
+    except (OSError, ratings.ConfigurationError, config_module.ConfigError, ValueError) as e:
         if args.output_format == "json":
             print(report.format_json_error(e, _json_meta(mode, args.package)))
         else:
             print(f"Error: {e}", file=sys.stderr)
         sys.exit(3)
-    if rating < args.min:
+    if rating < settings.min_rating:
         sys.exit(2)
     sys.exit(0)
 
@@ -215,6 +282,23 @@ def _get_data(mode: str, argument: str, index_url: "str | None" = None) -> metad
     return pypidata.get_data(argument, index_url=index_url)
 
 
+def _emit(
+    rated: ratings.RatedProject,
+    output_format: str,
+    meta: "dict[str, str]",
+    *,
+    quiet: bool,
+    show_advisories: bool = True,
+) -> None:
+    """Print a rating result in the requested output format."""
+    if output_format == "json":
+        print(report.format_json(rated, meta))
+    elif quiet:
+        print(rated.rating)
+    else:
+        print(report.format_text(rated, show_advisories=show_advisories))
+
+
 def run(  # noqa: PLR0913 - The positional API is retained for compatibility.
     mode: str,
     argument: str,
@@ -222,6 +306,9 @@ def run(  # noqa: PLR0913 - The positional API is retained for compatibility.
     skip_tests: "list[str] | str | None" = None,
     index_url: "str | None" = None,
     output_format: str = "text",
+    *,
+    strict: bool = False,
+    show_advisories: bool = True,
 ) -> int:
     """Rate a package and print the result. Returns the rating as an int."""
     verbose = not quiet and output_format == "text"
@@ -235,15 +322,14 @@ def run(  # noqa: PLR0913 - The positional API is retained for compatibility.
         if verbose:
             print("Found " + (data.get("name") or "nothing"))
 
-        rated = ratings.rate_project(data, skip_tests)
-
-        if output_format == "json":
-            print(report.format_json(rated, _json_meta(mode, argument)))
-        elif quiet:
-            print(rated.rating)
-        else:
-            print(report.format_text(rated))
-
+        rated = ratings.rate_project(data, skip_tests, strict=strict)
+        _emit(
+            rated,
+            output_format,
+            _json_meta(mode, argument),
+            quiet=quiet,
+            show_advisories=show_advisories,
+        )
         return rated.rating
     finally:
         distributiondata.cleanup(data)
