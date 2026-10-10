@@ -11,7 +11,6 @@ import datetime
 import io
 import re
 import string
-from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
@@ -102,6 +101,8 @@ class BaseTest:
     weight = 0
     fatal = False
     # Advisory tests are reported but never scored, unless strict mode is on.
+    # An advisory test must never also be fatal: under --strict that would
+    # turn a reported-only finding into a zero rating. tests.py enforces it.
     advisory = False
     # What kind of problem this test reports. Used for reporting and for
     # skipping a whole class of checks with --skip-tests.
@@ -195,15 +196,6 @@ def _classifier_python_versions(classifiers: object) -> "list[tuple[int, int]]":
         if match:
             versions.add((int(match.group(1)), int(match.group(2))))
     return sorted(versions)
-
-
-def _project_root(data: Metadata) -> "Path | None":
-    """Return the project directory being rated, when one exists on disk."""
-    path = data.get("_path")
-    if not path:
-        return None
-    root = Path(path)
-    return root if root.is_dir() else None
 
 
 class FieldTest(BaseTest):
@@ -801,9 +793,9 @@ class DependencySpecifiers(BaseTest):
 def _load_pyproject(data: Metadata) -> "dict[str, Any] | None":
     """Return the pre-parsed pyproject.toml table, if there is a usable one.
 
-    projectdata parses the file once; nothing here reads from disk. The
-    isinstance guard matters because the property test feeds arbitrary
-    values through this path.
+    projectdata gathers everything from disk, including this table, so the
+    checks stay a pure function of the metadata dict. The isinstance guard
+    matters because the property test feeds arbitrary values through here.
     """
     pyproject = data.get("_pyproject")
     if not isinstance(pyproject, dict):
@@ -1112,37 +1104,28 @@ class DeprecatedMetadataFields(BaseTest):
         return self._passed()
 
 
-# ---------------------------------------------------------------------------
-# Advisory checks.
-#
-# These are reported but never scored, so that adding one can never move an
-# existing package's rating. Running with --strict scores them like any other
-# test. See RatedProject.advisories.
-# ---------------------------------------------------------------------------
-
-_DEPENDENCY_FIELDS = ("requires-dist", "provides-dist", "obsoletes-dist")
-
-
 class DirectUrlDependency(BaseTest):
-    """Flag dependencies declared as direct URL references."""
+    """Flag dependencies declared as direct URL references.
+
+    Provides-Dist and Obsoletes-Dist are deliberately not scanned: they are
+    not dependency fields, and indices do not reject URLs in them.
+    """
 
     category = Category.INDEX
 
-    advisory = True
     fatal = True
 
     def test(self, data: Metadata) -> TestResult:
         """Check that no dependency is declared as a direct URL reference."""
         direct = []
-        for field_name in _DEPENDENCY_FIELDS:
-            for entry in _as_list(cast("dict[str, Any]", data).get(field_name)):
-                try:
-                    requirement = Requirement(entry)
-                except InvalidRequirement:
-                    # DependencySpecifiers reports malformed specifiers.
-                    continue
-                if requirement.url is not None:
-                    direct.append(entry)
+        for entry in _as_list(cast("dict[str, Any]", data).get("requires-dist")):
+            try:
+                requirement = Requirement(entry)
+            except InvalidRequirement:
+                # DependencySpecifiers reports malformed specifiers.
+                continue
+            if requirement.url is not None:
+                direct.append(entry)
 
         if not direct:
             return self._passed()
@@ -1165,7 +1148,6 @@ class SummaryFormat(BaseTest):
 
     category = Category.INDEX
 
-    advisory = True
     fatal = True
 
     def test(self, data: Metadata) -> TestResult:
@@ -1188,6 +1170,18 @@ class SummaryFormat(BaseTest):
             )
         return self._passed()
 
+
+# ---------------------------------------------------------------------------
+# Advisory checks.
+#
+# A new check lands here first. It is reported but not scored, so that an
+# upgrade shows what pyroma would say about a package before it affects the
+# rating. After at least one minor release without false-positive reports, a
+# check graduates to scored, and the changelog says so. Running with --strict
+# scores the advisory checks now. See RatedProject.advisories.
+#
+# An advisory check must never be fatal; see BaseTest.advisory.
+# ---------------------------------------------------------------------------
 
 _COLLIDING_PAIR = 2
 
@@ -1255,6 +1249,17 @@ class PythonRequiresUpperBound(BaseTest):
         )
 
 
+# packaging renders every marker value in double quotes, so stripping the
+# quoted strings leaves only variable names, operators and keywords behind.
+_MARKER_STRING_RE = re.compile(r'"[^"]*"')
+_MARKER_EXTRA_RE = re.compile(r"\bextra\b")
+
+
+def _marker_names_extra(marker: object) -> bool:
+    """Report whether an environment marker refers to the ``extra`` variable."""
+    return _MARKER_EXTRA_RE.search(_MARKER_STRING_RE.sub('""', str(marker))) is not None
+
+
 def _runtime_requirements(data: Metadata) -> "list[Requirement]":
     """Parse the runtime dependencies, skipping extras and malformed entries."""
     requirements = []
@@ -1266,7 +1271,7 @@ def _runtime_requirements(data: Metadata) -> "list[Requirement]":
             continue
         # An "extra" marker means this is an optional dependency, not a
         # dependency every user of the package will install.
-        if requirement.marker is not None and "extra" in str(requirement.marker):
+        if requirement.marker is not None and _marker_names_extra(requirement.marker):
             continue
         requirements.append(requirement)
     return requirements
@@ -1341,7 +1346,12 @@ def _is_relative_target(target: str) -> bool:
     """Report whether a link target is a repository-relative path."""
     if target.startswith(("#", "//", "mailto:", "data:")):
         return False
-    return urlsplit(target).scheme == ""
+    try:
+        return urlsplit(target).scheme == ""
+    except ValueError:
+        # urlsplit rejects malformed targets such as an unclosed IPv6
+        # bracket. Whatever that is, it is not a repository-relative path.
+        return False
 
 
 def _relative_description_targets(description: str, content_type: str) -> "list[str]":
@@ -1391,6 +1401,20 @@ class ReadmeRelativeLinks(BaseTest):
         )
 
 
+# A probe micro version high enough to clear any real patch-level floor.
+_SERIES_PROBE_MICRO = 999
+
+
+def _series_admitted(specifiers: SpecifierSet, major: int, minor: int) -> bool:
+    """Report whether Requires-Python admits any release in an X.Y series.
+
+    Probing both ends of the series is enough: a floor such as ">=3.9.2"
+    rejects 3.9 but admits 3.9.999, a cap such as "<=3.9" does the reverse,
+    and an exclusion such as "!=3.9.*" or "<3.9" rejects both.
+    """
+    return specifiers.contains(f"{major}.{minor}") or specifiers.contains(f"{major}.{minor}.{_SERIES_PROBE_MICRO}")
+
+
 class PythonVersionCoherence(BaseTest):
     """Flag Python classifiers that contradict Requires-Python."""
 
@@ -1407,7 +1431,7 @@ class PythonVersionCoherence(BaseTest):
             # PythonRequiresVersion and PythonClassifierVersion report absences.
             return self._skipped()
 
-        excluded = [f"{major}.{minor}" for major, minor in versions if not specifiers.contains(f"{major}.{minor}")]
+        excluded = [f"{major}.{minor}" for major, minor in versions if not _series_admitted(specifiers, major, minor)]
         if not excluded:
             return self._passed()
         return self._failed(
@@ -1480,6 +1504,9 @@ class EndOfLifePython(BaseTest):
 _DEV_STATUS_RE = re.compile(r"^Development Status :: (\d) - .+$")
 _STABLE_DEV_STATUS = 5
 _EARLY_DEV_STATUS = 3
+# "7 - Inactive" says the project is abandoned, not that its API is stable,
+# so it makes no claim that a 0.x or pre-release version could contradict.
+_INACTIVE_DEV_STATUS = 7
 
 
 def _development_status(classifiers: object) -> "tuple[int, str] | None":
@@ -1519,8 +1546,8 @@ class DevelopmentStatusCoherence(BaseTest):
             return self._skipped()
 
         level, classifier = status
-        if level >= _STABLE_DEV_STATUS:
-            return self._unstable_version_result(level, classifier, version)
+        if _STABLE_DEV_STATUS <= level < _INACTIVE_DEV_STATUS:
+            return self._unstable_version_result(classifier, version)
         if level <= _EARLY_DEV_STATUS and not version.is_prerelease and version.major >= 1:
             return self._failed(
                 f"Your classifiers say '{classifier}', but you have released version "
@@ -1529,8 +1556,8 @@ class DevelopmentStatusCoherence(BaseTest):
             )
         return self._passed()
 
-    def _unstable_version_result(self, level: int, classifier: str, version: PackagingVersion) -> TestResult:
-        """Check a stable-or-better status against an unstable version."""
+    def _unstable_version_result(self, classifier: str, version: PackagingVersion) -> TestResult:
+        """Check a stable or mature status against an unstable version."""
         if version.is_prerelease or version.is_devrelease:
             return self._failed(
                 f"Your classifiers say '{classifier}', but your version '{version}' is a "
@@ -1543,16 +1570,7 @@ class DevelopmentStatusCoherence(BaseTest):
                 "A 0.x version tells installers your API is not stable yet, which "
                 "contradicts the classifier."
             )
-        del level
         return self._passed()
-
-
-def _has_typed_marker(root: Path) -> bool:
-    """Report whether the project ships a PEP 561 py.typed marker."""
-    # Depth-bounded: rglob would walk .git, .venv and node_modules.
-    with suppress(OSError):
-        return any(root.glob("*/py.typed")) or any(root.glob("src/*/py.typed"))
-    return False
 
 
 class TypedMarker(BaseTest):
@@ -1565,11 +1583,11 @@ class TypedMarker(BaseTest):
 
     def test(self, data: Metadata) -> TestResult:
         """Check the py.typed marker and Typing :: Typed classifier agree."""
-        root = _project_root(data)
-        if root is None:
+        # projectdata looks for the marker on disk and records what it found.
+        has_marker = data.get("_py_typed")
+        if not isinstance(has_marker, bool):
             return self._skipped()
 
-        has_marker = _has_typed_marker(root)
         has_classifier = "Typing :: Typed" in _as_list(data.get("classifier"))
         if has_marker and not has_classifier:
             return self._failed(
@@ -1630,7 +1648,9 @@ _BACKEND_DISTRIBUTIONS = {
     "hatchling.build": "hatchling",
     "flit_core.buildapi": "flit-core",
 }
-_PEP639_BACKEND_FLOORS = {"setuptools": "77.0.0", "hatchling": "1.27", "flit-core": "1.11"}
+# flit-core only learned license-expression and license-files in 3.12; the
+# 3.x releases before it silently emit the legacy License field instead.
+_PEP639_BACKEND_FLOORS = {"setuptools": "77.0.0", "hatchling": "1.27", "flit-core": "3.12"}
 
 
 def _uses_pep639_licensing(project: "dict[str, Any]") -> bool:
@@ -1649,6 +1669,22 @@ def _declared_backend_floor(build_system: "dict[str, Any]", distribution: str) -
         if normalize(requirement.name) == distribution:
             return _specifier_lower_bound(requirement.specifier)
     return None
+
+
+def _backend_floor_message(distribution: str, floor: str, declared: "PackagingVersion | None") -> str:
+    """Explain a missing or too-low build backend floor for PEP 639 metadata."""
+    needed = f"{distribution}>={floor}"
+    if declared is None:
+        problem = f"your [build-system] requires entry declares no minimum version for {distribution}"
+        fix = f"add '{needed}' to the [build-system] requires entry"
+    else:
+        problem = f"your declared build backend floor is too low: you require {distribution}>={declared}"
+        fix = f"raise the [build-system] requires entry to '{needed}'"
+    return (
+        "Your [project] table uses PEP 639 licensing (an SPDX 'license' string or 'license-files'), "
+        f"but {problem}. PEP 639 needs {needed}; older backends emit the wrong License metadata "
+        f"without telling you. To fix it, {fix}."
+    )
 
 
 class BuildBackendVersionFloor(BaseTest):
@@ -1675,13 +1711,7 @@ class BuildBackendVersionFloor(BaseTest):
         declared = _declared_backend_floor(build_system, distribution)
         if declared is not None and declared >= PackagingVersion(floor):
             return self._passed()
-        return self._failed(
-            "Your [project] table uses PEP 639 licensing (an SPDX 'license' string or "
-            f"'license-files'), but your declared build backend floor is too low: PEP 639 "
-            f"needs {distribution}>={floor}. Older backends emit the wrong License metadata "
-            f"without telling you. Raise the [build-system] requires entry to "
-            f"'{distribution}>={floor}'."
-        )
+        return self._failed(_backend_floor_message(distribution, floor, declared))
 
 
 class LicenseFilesExist(BaseTest):
@@ -1692,13 +1722,11 @@ class LicenseFilesExist(BaseTest):
     weight = 50
 
     def test(self, data: Metadata) -> TestResult:
-        """Check that each license-files glob matches something on disk."""
-        project = _load_project_table(data)
-        root = _project_root(data)
-        if project is None or root is None or "license-files" not in project:
+        """Check that each license-files glob matched something on disk."""
+        # projectdata expands the patterns on disk and records the misses.
+        unmatched = data.get("_license_files_unmatched")
+        if not isinstance(unmatched, list):
             return self._skipped()
-
-        unmatched = [pattern for pattern in _as_list(project.get("license-files")) if not _glob_matches(root, pattern)]
         if not unmatched:
             return self._passed()
         listed = "\n".join(f"  {pattern}" for pattern in unmatched)
@@ -1710,23 +1738,13 @@ class LicenseFilesExist(BaseTest):
         )
 
 
-def _glob_matches(root: Path, pattern: str) -> bool:
-    """Report whether a license-files pattern matches anything under root."""
-    if not pattern or pattern.startswith("/") or ".." in pattern:
-        # PEP 639 forbids absolute paths and parent traversal, and Path.glob
-        # raises on them rather than returning nothing.
-        return False
-    try:
-        return any(root.glob(pattern))
-    except (NotImplementedError, ValueError, OSError):
-        return False
-
-
+# PEP 621 infers the content type from these suffixes. ".txt" is deliberately
+# absent: it is an unrecognised suffix whose content type must be declared,
+# so a README.txt declared as text/x-rst or text/markdown is legitimate.
 _README_SUFFIX_TYPES = {
     ".md": "text/markdown",
     ".markdown": "text/markdown",
     ".rst": "text/x-rst",
-    ".txt": "text/plain",
 }
 
 
@@ -1765,10 +1783,11 @@ class ReadmeContentTypeMatch(BaseTest):
         actual = str(raw).split(";")[0].strip().lower()
         if expected is None or not actual or actual == expected:
             return self._passed()
+        source = "your readme table declares" if explicit_type else "your build backend emitted"
         return self._failed(
-            f"Your readme is '{filename}', which is {expected}, but its content type is "
-            f"'{actual}'. PyPI renders the description using the declared type, so the page "
-            f'will come out mangled. Set content-type = "{expected}".'
+            f"Your readme is '{filename}', whose suffix means {expected}, but {source} the content "
+            f"type '{actual}'. PyPI renders the description with the declared type, so the two must "
+            f'agree: set content-type = "{expected}", or rename the file if it really is {actual}.'
         )
 
 
@@ -1850,6 +1869,8 @@ ALL_TESTS: "list[BaseTest]" = [
     AuthorEmail(),
     Url(),
     Licensing(),
+    DirectUrlDependency(),
+    SummaryFormat(),
     DescriptionContentType(),
     DependencySpecifiers(),
     SDist(),
@@ -1858,8 +1879,6 @@ ALL_TESTS: "list[BaseTest]" = [
     DevStatusClassifier(),
     DeprecatedMetadataFields(),
     # Advisory checks. Reported but not scored; see RatedProject.advisories.
-    DirectUrlDependency(),
-    SummaryFormat(),
     ProjectUrlLabelCollision(),
     PythonRequiresUpperBound(),
     DependencyUpperBounds(),

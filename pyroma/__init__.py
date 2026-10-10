@@ -69,6 +69,17 @@ def get_all_tests() -> "list[str]":
     return [x.__class__.__name__ for x in ratings.ALL_TESTS]
 
 
+def _selectable_names() -> "set[str]":
+    """Return every token a skip list accepts: a test class name or a category."""
+    return set(get_all_tests()) | set(get_all_categories())
+
+
+def _available_names_message() -> str:
+    tests = ", ".join(get_all_tests())
+    categories = ", ".join(get_all_categories())
+    return f"Available tests: {tests}. Available categories: {categories}"
+
+
 def parse_tests(arg: str) -> "list[str] | None":
     """Parse a separated list of rating-test names."""
     if not arg:
@@ -84,8 +95,7 @@ def parse_tests(arg: str) -> "list[str] | None":
     # Trailing or doubled separators leave empty tokens behind.
     names = [name for name in names if name]
 
-    # A token is either a test class name or a whole category.
-    selectable = set(get_all_tests()) | set(get_all_categories())
+    selectable = _selectable_names()
     for skip in names:
         if skip not in selectable:
             # Invalid test mentioned, fail and print valid tests
@@ -101,10 +111,17 @@ def skip_tests(arg: str) -> "list[str]":
         return test_to_skip
 
     # It returned None, so there was an invalid test mentioned, or none at all
-    tests = ", ".join(get_all_tests())
-    categories = ", ".join(get_all_categories())
-    message = f"Invalid tests listed. Available tests: {tests}. Available categories: {categories}"
+    message = f"Invalid tests listed. {_available_names_message()}"
     raise ArgumentTypeError(message)
+
+
+def _validate_config_skips(names: "list[str]") -> None:
+    """Reject [tool.pyroma] skip-tests entries that name nothing, as the CLI does."""
+    unknown = sorted(set(names) - _selectable_names())
+    if unknown:
+        listed = ", ".join(repr(name) for name in unknown)
+        message = f"[tool.pyroma] skip-tests names unknown tests: {listed}. {_available_names_message()}"
+        raise config_module.ConfigError(message)
 
 
 def _build_parser() -> ArgumentParser:
@@ -179,19 +196,38 @@ def _build_parser() -> ArgumentParser:
     parser.add_argument(
         "--skip-tests",
         type=skip_tests,
-        help="Skip the named tests",
+        help="Skip the named tests or whole categories, separated by commas or spaces",
     )
     parser.add_argument(
         "--index-url",
         dest="index_url",
         help="Base URL of a PyPI-compatible package index (default: https://pypi.org)",
     )
+    # Each setting that [tool.pyroma] can fix has a flag in both directions,
+    # so that the command line can always override the configuration.
     parser.add_argument(
         "--strict",
         dest="strict",
         action="store_true",
         default=None,
-        help="Score the advisory checks as well, instead of only reporting them",
+        help=(
+            "Score the advisory checks too, instead of only reporting them. "
+            "Combine with --skip-tests practice to score everything except opinions"
+        ),
+    )
+    parser.add_argument(
+        "--no-strict",
+        dest="strict",
+        action="store_false",
+        default=None,
+        help="Only report the advisory checks, overriding strict = true in [tool.pyroma]",
+    )
+    parser.add_argument(
+        "--advisories",
+        dest="show_advisories",
+        action="store_true",
+        default=None,
+        help="Report advisory findings, overriding advisories = false in [tool.pyroma]",
     )
     parser.add_argument(
         "--no-advisories",
@@ -219,6 +255,7 @@ def _resolve_config(args: Namespace, mode: str) -> config_module.Config:
     settings = config_module.Config()
     if args.use_config and mode == "directory":
         settings = config_module.from_directory(args.package)
+        _validate_config_skips(settings.skip_tests)
 
     skip = args.skip_tests or settings.skip_tests
     return config_module.Config(

@@ -10,16 +10,16 @@ downloaded artifact is a less trustworthy source for settings that change
 pyroma's own exit code.
 """
 
-import tomllib
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Union
+from typing import Any
+
+from pyroma import projectdata
 
 DEFAULT_MIN_RATING = 8
 _LOWEST_RATING = 1
 _HIGHEST_RATING = 10
 
-Pathish = Union[str, "Path"]
+Pathish = projectdata.Pathish
 
 
 class ConfigError(Exception):
@@ -90,13 +90,10 @@ def from_table(table: object) -> Config:
 
 def from_directory(path: Pathish) -> Config:
     """Read ``[tool.pyroma]`` from a project directory's pyproject.toml."""
-    pyproject_path = Path(path) / "pyproject.toml"
-    try:
-        with pyproject_path.open("rb") as pyproject_file:
-            parsed = tomllib.load(pyproject_file)
-    except (OSError, tomllib.TOMLDecodeError):
-        # An unreadable or broken pyproject.toml is reported by the rating
-        # itself; it must not stop pyroma from running at all.
+    # An unreadable or broken pyproject.toml is reported by the rating
+    # itself; it must not stop pyroma from running at all.
+    parsed, _error = projectdata.read_pyproject(path)
+    if parsed is None:
         return Config()
     tools = parsed.get("tool")
     if not isinstance(tools, dict):

@@ -110,9 +110,56 @@ def read_pyproject(path: Pathish) -> "tuple[dict[str, Any] | None, str | None]":
         return None, str(error)
 
 
+def has_typed_marker(path: Pathish) -> bool:
+    """Report whether the project ships a PEP 561 py.typed marker."""
+    root = Path(path)
+    # Depth-bounded: rglob would walk .git, .venv and node_modules.
+    try:
+        return any(root.glob("*/py.typed")) or any(root.glob("src/*/py.typed"))
+    except OSError:
+        return False
+
+
+def _glob_matches(root: Path, pattern: str) -> bool:
+    """Report whether a license-files pattern matches anything under root."""
+    if not pattern or pattern.startswith("/") or ".." in pattern:
+        # PEP 639 forbids absolute paths and parent traversal, and Path.glob
+        # raises on them rather than returning nothing.
+        return False
+    try:
+        return any(root.glob(pattern))
+    except (NotImplementedError, ValueError, OSError):
+        return False
+
+
+def unmatched_license_files(path: Pathish, patterns: "list[str]") -> "list[str]":
+    """Return the license-files patterns that match nothing under the project."""
+    root = Path(path)
+    return [pattern for pattern in patterns if not _glob_matches(root, pattern)]
+
+
+def _license_file_patterns(table: "dict[str, Any]") -> "list[str] | None":
+    """Return the [project] license-files patterns, or None when not declared."""
+    project = table.get("project")
+    if not isinstance(project, dict) or "license-files" not in project:
+        return None
+    patterns = project.get("license-files")
+    if isinstance(patterns, str):
+        patterns = [patterns]
+    if not isinstance(patterns, list):
+        # Malformed; PyprojectTomlValid reports it against the schema.
+        return None
+    return [str(pattern) for pattern in patterns]
+
+
 def get_build_data(path: Pathish, isolated: "bool | None" = None) -> Metadata:
-    """Return built metadata plus project build-system sentinels."""
+    """Return built metadata plus the facts the checks need from the working tree.
+
+    Everything that has to be read from disk is gathered here, so that rating
+    stays a pure function of the metadata dict.
+    """
     metadata = build_metadata(path, isolated=isolated)
+    metadata["_py_typed"] = has_typed_marker(path)
     # Check if there is a pyproject_toml
     if "pyproject.toml" not in {entry.name for entry in Path(path).iterdir()}:
         metadata["_missing_pyproject_toml"] = True
@@ -122,6 +169,9 @@ def get_build_data(path: Pathish, isolated: "bool | None" = None) -> Metadata:
     table, error = read_pyproject(path)
     if table is not None:
         metadata["_pyproject"] = table
+        patterns = _license_file_patterns(table)
+        if patterns is not None:
+            metadata["_license_files_unmatched"] = unmatched_license_files(path, patterns)
     elif error is not None:
         metadata["_pyproject_error"] = error
     return metadata

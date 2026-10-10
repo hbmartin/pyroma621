@@ -1,5 +1,6 @@
 import contextlib
 import copy
+import datetime
 import io
 import json
 import shutil
@@ -129,6 +130,8 @@ def _metadata_strategy():
             "license-file": _STRING_OR_LIST,
             "dynamic": _STRING_OR_LIST,
             "platform": _STRING_OR_LIST,
+            "provides-dist": _STRING_OR_LIST,
+            "obsoletes-dist": _STRING_OR_LIST,
             "_sdist": st.booleans(),
             "_owners": st.lists(_METADATA_TEXT, max_size=4),
             "_wheel_build_failed": st.booleans(),
@@ -136,6 +139,8 @@ def _metadata_strategy():
             "_missing_build_system": st.booleans(),
             "_no_config_found": st.booleans(),
             "_has_sdist": st.booleans(),
+            "_py_typed": st.booleans(),
+            "_license_files_unmatched": st.lists(_METADATA_TEXT, max_size=4),
         },
     )
 
@@ -156,11 +161,18 @@ class MetadataPropertyTest(unittest.TestCase):
         self.assertGreaterEqual(first.rating, 0)
         self.assertLessEqual(first.rating, 10)
         self.assertEqual(first.level, ratings.LEVELS[first.rating])
-        for problem in first.problems:
+        for problem in [*first.problems, *first.advisories]:
             self.assertTrue(problem.test)
             self.assertTrue(problem.message)
             self.assertGreaterEqual(problem.weight, 0)
             self.assertIsInstance(problem.fatal, bool)
+
+        # Strict mode scores the advisory checks; it must be just as total.
+        strict = ratings.rate_project(testdata, strict=True)
+        self.assertEqual(testdata, original)
+        self.assertEqual(strict.advisories, [])
+        self.assertGreaterEqual(strict.rating, 0)
+        self.assertLessEqual(strict.rating, 10)
 
 
 class RatingsTest(unittest.TestCase):
@@ -913,6 +925,12 @@ class AdvisoryTest(unittest.TestCase):
         with unittest.mock.patch.object(ratings, "ALL_TESTS", stand_ins):
             self.assertEqual(rate({"name": "example"}), (10, []))
 
+    def test_no_advisory_check_is_fatal(self) -> None:
+        # Under --strict an advisory failure must lower the rating by its
+        # weight, never zero it; see BaseTest.advisory.
+        offenders = [test.__class__.__name__ for test in ratings.ALL_TESTS if test.advisory and test.fatal]
+        self.assertEqual(offenders, [])
+
     def _advisory_rating(self) -> ratings.RatedProject:
         return ratings.RatedProject(
             name="example",
@@ -977,15 +995,23 @@ class AdvisoryChecksTest(unittest.TestCase):
     def _assert_silent(self, testdata: Metadata, fragment: str) -> None:
         self.assertFalse(any(fragment in message for message in self._advisories(testdata)))
 
+    def _assert_fatal(self, testdata: Metadata, fragment: str) -> None:
+        """Assert a scored, fatal finding: it zeroes the rating and is no advisory."""
+        rating, messages = rate(testdata)
+        self.assertEqual(rating, 0)
+        self.assertTrue(
+            any(fragment in message for message in messages),
+            f"no problem contained {fragment!r}; got {messages}",
+        )
+        self._assert_silent(testdata, fragment)
+
     def test_direct_url_dependency(self) -> None:
+        # Indices reject the upload outright, so this graduated from advisory
+        # to scored and fatal.
         testdata = COMPLETE.copy()
         testdata["requires-dist"] = ["zope.event @ https://example.com/zope.event-1.0.tar.gz"]
 
-        self._assert_advises(testdata, "declares direct URL dependencies")
-        # It is fatal, so strict mode zeroes the rating...
-        self.assertEqual(ratings.rate_project(testdata, strict=True).rating, 0)
-        # ...while the default rating is completely untouched.
-        self.assertEqual(ratings.rate_project(testdata).rating, 10)
+        self._assert_fatal(testdata, "declares direct URL dependencies")
 
     def test_direct_url_dependency_is_not_also_reported_as_floorless(self) -> None:
         testdata = COMPLETE.copy()
@@ -993,17 +1019,29 @@ class AdvisoryChecksTest(unittest.TestCase):
 
         self._assert_silent(testdata, "have no lower bound")
 
+    def test_provides_dist_urls_are_not_dependencies(self) -> None:
+        # Provides-Dist and Obsoletes-Dist are not dependency fields, and
+        # indices do not reject URLs in them.
+        testdata = COMPLETE.copy()
+        testdata["provides-dist"] = ["zope.event @ https://example.com/zope.event-1.0.tar.gz"]
+        testdata["obsoletes-dist"] = ["zope.old @ https://example.com/zope.old-1.0.tar.gz"]
+
+        rating, messages = rate(testdata)
+        self.assertEqual(rating, 10)
+        self.assertFalse(any("direct URL" in message for message in messages))
+        self._assert_silent(testdata, "direct URL")
+
     def test_summary_must_be_a_single_line(self) -> None:
         testdata = COMPLETE.copy()
         testdata["summary"] = "First line.\nSecond line."
 
-        self._assert_advises(testdata, "must be a single line")
+        self._assert_fatal(testdata, "must be a single line")
 
     def test_summary_length_limit(self) -> None:
         testdata = COMPLETE.copy()
         testdata["summary"] = "x" * 513
 
-        self._assert_advises(testdata, "characters long, but package indices limit")
+        self._assert_fatal(testdata, "characters long, but package indices limit")
 
     def test_project_url_labels_colliding_after_normalization(self) -> None:
         testdata = COMPLETE.copy()
@@ -1033,6 +1071,18 @@ class AdvisoryChecksTest(unittest.TestCase):
 
         self._assert_silent(testdata, "cap or pin their versions")
 
+    def test_marker_values_containing_extra_are_runtime_dependencies(self) -> None:
+        # Only the ``extra`` variable marks an optional dependency; the word
+        # appearing inside a quoted value means nothing.
+        testdata = COMPLETE.copy()
+        testdata["requires-dist"] = [
+            'alpha; platform_system == "extraterrestrial"',
+            "beta; os_name == 'extra'",
+        ]
+
+        message = next(m for m in self._advisories(testdata) if "have no lower bound" in m)
+        self.assertIn("alpha, beta", message)
+
     def test_floorless_runtime_dependency(self) -> None:
         testdata = COMPLETE.copy()
         testdata["requires-dist"] = ["zope.event"]
@@ -1055,6 +1105,19 @@ class AdvisoryChecksTest(unittest.TestCase):
 
         self._assert_silent(testdata, "relative paths")
 
+    def test_malformed_link_targets_do_not_crash(self) -> None:
+        # urlsplit raises on an unclosed IPv6 bracket; rating must stay total.
+        for content_type, description in (
+            ("text/x-rst", "See `docs <http://[::1>`_ for details."),
+            ("text/markdown", "See [the docs](http://[::1) for details."),
+        ):
+            with self.subTest(content_type=content_type):
+                testdata = COMPLETE.copy()
+                testdata["description-content-type"] = content_type
+                testdata["description"] = description
+
+                self._assert_silent(testdata, "relative paths")
+
     def test_classifiers_contradicting_requires_python(self) -> None:
         testdata = COMPLETE.copy()
         # COMPLETE's classifiers name Python 2.6 through 3.3.
@@ -1062,14 +1125,39 @@ class AdvisoryChecksTest(unittest.TestCase):
 
         self._assert_advises(testdata, "but your Requires-Python")
 
+    def test_patch_level_requires_python_floor_is_coherent(self) -> None:
+        # ">=3.8.1" admits 3.8.1 and later, so a 3.8 classifier is honest.
+        testdata = COMPLETE.copy()
+        testdata["classifier"] = [
+            "Programming Language :: Python :: 3.8",
+            "Programming Language :: Python :: 3.11",
+        ]
+        for requires_python in (">=3.8.1", ">=3.8.1,<3.12"):
+            with self.subTest(requires_python=requires_python):
+                testdata["requires-python"] = requires_python
+
+                self._assert_silent(testdata, "but your Requires-Python")
+
+    def test_requires_python_excluding_a_whole_series_is_flagged(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["classifier"] = ["Programming Language :: Python :: 3.9"]
+        for requires_python in (">=3.10", "!=3.9.*", "<3.9"):
+            with self.subTest(requires_python=requires_python):
+                testdata["requires-python"] = requires_python
+
+                self._assert_advises(testdata, "claim support for Python 3.9, but your Requires-Python")
+
     def test_end_of_life_python_classifiers(self) -> None:
-        self._assert_advises(COMPLETE.copy(), "reached end of life")
+        with unittest.mock.patch.object(ratings, "_TODAY", datetime.date(2026, 1, 1)):
+            self._assert_advises(COMPLETE.copy(), "reached end of life")
 
     def test_supported_python_is_not_flagged_as_end_of_life(self) -> None:
         testdata = COMPLETE.copy()
         testdata["classifier"] = ["Programming Language :: Python :: 3.13"]
 
-        self._assert_silent(testdata, "reached end of life")
+        # Pinned, so this keeps passing after 3.13 itself reaches end of life.
+        with unittest.mock.patch.object(ratings, "_TODAY", datetime.date(2026, 1, 1)):
+            self._assert_silent(testdata, "reached end of life")
 
     def test_mature_status_on_a_prerelease_version(self) -> None:
         # COMPLETE is "Development Status :: 6 - Mature" at version 1.0.dev1.
@@ -1088,16 +1176,24 @@ class AdvisoryChecksTest(unittest.TestCase):
 
         self._assert_advises(testdata, "a final release")
 
+    def test_inactive_status_on_a_zero_version_is_coherent(self) -> None:
+        # An abandoned 0.x project makes no claim about API stability.
+        testdata = COMPLETE.copy()
+        testdata["classifier"] = ["Development Status :: 7 - Inactive"]
+        testdata["version"] = "0.5"
+
+        self._assert_silent(testdata, "contradicts the classifier")
+
     def test_typing_classifier_without_a_marker(self) -> None:
         testdata = COMPLETE.copy()
         testdata["classifier"] = ["Typing :: Typed"]
-        testdata["_path"] = TESTDATA_DIR / "complete"
+        testdata["_py_typed"] = False
 
         self._assert_advises(testdata, "no py.typed marker file")
 
     def test_marker_without_a_typing_classifier(self) -> None:
         testdata = COMPLETE.copy()
-        testdata["_path"] = TESTDATA_DIR / "typed_marker"
+        testdata["_py_typed"] = True
 
         self._assert_advises(testdata, "does not advertise it")
 
@@ -1119,20 +1215,56 @@ class AdvisoryChecksTest(unittest.TestCase):
 
         self._assert_silent(testdata, "build backend floor is too low")
 
-    def test_license_files_pattern_matching_nothing(self) -> None:
-        testdata = _attach_pyproject(COMPLETE.copy(), TESTDATA_DIR / "missing_license_file")
+    def _pep639_pyproject(self, requires: "list[str]", backend: str) -> "dict[str, object]":
+        return {
+            "build-system": {"requires": requires, "build-backend": backend},
+            "project": {"name": "example", "license": "MIT"},
+        }
 
-        self._assert_advises(testdata, "match no file in your project")
+    def test_flit_core_floor_for_pep639(self) -> None:
+        # flit-core gained license-expression and license-files in 3.12.
+        testdata = COMPLETE.copy()
+        testdata["_pyproject"] = self._pep639_pyproject(["flit_core>=3.4,<4"], "flit_core.buildapi")
+        self._assert_advises(testdata, "PEP 639 needs flit-core>=3.12")
+
+        testdata["_pyproject"] = self._pep639_pyproject(["flit_core>=3.12,<4"], "flit_core.buildapi")
+        self._assert_silent(testdata, "PEP 639 needs")
+
+    def test_missing_build_backend_floor_has_its_own_message(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["_pyproject"] = self._pep639_pyproject(["setuptools"], "setuptools.build_meta")
+
+        message = next(m for m in self._advisories(testdata) if "PEP 639 needs setuptools>=77.0.0" in m)
+        self.assertIn("declares no minimum version for setuptools", message)
+        # There is no floor to raise, so the message must not say there is.
+        self.assertNotIn("too low", message)
+
+    def test_license_files_pattern_matching_nothing(self) -> None:
+        testdata = COMPLETE.copy()
+        testdata["_license_files_unmatched"] = ["LICENCE-DOES-NOT-EXIST*"]
+
+        message = next(m for m in self._advisories(testdata) if "match no file in your project" in m)
+        self.assertIn("LICENCE-DOES-NOT-EXIST*", message)
 
     def test_license_files_pattern_that_matches(self) -> None:
-        testdata = _attach_pyproject(COMPLETE.copy(), TESTDATA_DIR / "complete")
+        testdata = COMPLETE.copy()
+        testdata["_license_files_unmatched"] = []
 
         self._assert_silent(testdata, "match no file in your project")
 
     def test_readme_content_type_mismatch(self) -> None:
         testdata = _attach_pyproject(COMPLETE.copy(), TESTDATA_DIR / "readme_type_mismatch")
 
-        self._assert_advises(testdata, "which is text/markdown, but its content type is 'text/x-rst'")
+        message = next(m for m in self._advisories(testdata) if "whose suffix means text/markdown" in m)
+        self.assertIn("your readme table declares the content type 'text/x-rst'", message)
+
+    def test_readme_txt_with_an_explicit_content_type_is_legitimate(self) -> None:
+        # PEP 621 does not recognise .txt, so its content type must be
+        # declared, and whatever is declared is deliberate.
+        testdata = COMPLETE.copy()
+        testdata["_pyproject"] = {"project": {"readme": {"file": "README.txt", "content-type": "text/x-rst"}}}
+
+        self._assert_silent(testdata, "whose suffix means")
 
     def test_development_dependencies_declared_as_extras(self) -> None:
         testdata = _attach_pyproject(COMPLETE.copy(), TESTDATA_DIR / "dev_extras")
@@ -1261,6 +1393,33 @@ class ConfigTest(unittest.TestCase):
             Path(tmp, "pyproject.toml").write_text("[tool.pyroma]\nmin-rating = 3\n", encoding="UTF-8")
 
             self.assertEqual(self._resolve([tmp], mode="pypi").min_rating, 8)
+
+    def test_either_direction_of_a_boolean_flag_beats_configuration(self) -> None:
+        # "An explicit flag always wins" needs a flag for both values, or a
+        # project that sets strict = true can only be overridden by dropping
+        # the whole configuration with --no-config.
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "pyproject.toml").write_text(
+                "[tool.pyroma]\nstrict = true\nadvisories = false\n",
+                encoding="UTF-8",
+            )
+
+            configured = self._resolve([tmp])
+            overridden = self._resolve(["--no-strict", "--advisories", tmp])
+
+        self.assertTrue(configured.strict)
+        self.assertFalse(configured.show_advisories)
+        self.assertFalse(overridden.strict)
+        self.assertTrue(overridden.show_advisories)
+
+    def test_unknown_skip_test_in_configuration_is_an_error(self) -> None:
+        # The CLI rejects a typo'd --skip-tests; the configuration must too,
+        # or the typo silently skips nothing while the user believes it does.
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "pyproject.toml").write_text('[tool.pyroma]\nskip-tests = ["Licencing"]\n', encoding="UTF-8")
+
+            with self.assertRaisesRegex(config.ConfigError, "unknown tests: 'Licencing'.*Licensing"):
+                self._resolve([tmp])
 
 
 class PyPITest(unittest.TestCase):
@@ -1596,6 +1755,36 @@ class MainTest(unittest.TestCase):
         self.assertIn("Did not find 'nosuch'", document["error"]["message"])
         self.assertEqual(document["_meta"]["mode"], "pypi")
 
+    def test_main_rejects_unknown_skip_tests_in_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "pyproject.toml").write_text('[tool.pyroma]\nskip-tests = ["Licencing"]\n', encoding="UTF-8")
+
+            code, _stdout, stderr = self._run_main([tmp])
+
+        self.assertEqual(code, 3)
+        self.assertIn("skip-tests names unknown tests: 'Licencing'", stderr)
+        # The message lists what would have been accepted.
+        self.assertIn("Licensing", stderr)
+
+    @unittest.mock.patch("pyroma.projectdata.get_data")
+    def test_strict_and_advisory_flags_on_the_command_line(self, datamock: unittest.mock.Mock) -> None:
+        testdata = COMPLETE.copy()
+        # PythonRequiresUpperBound is advisory.
+        testdata["requires-python"] = ">=3.11,<4.0"
+        datamock.return_value = testdata
+        with tempfile.TemporaryDirectory() as tmp:
+            _code, default_out, _stderr = self._run_main([tmp])
+            _code, strict_out, _stderr = self._run_main(["--strict", tmp])
+            _code, hidden_out, _stderr = self._run_main(["--no-advisories", tmp])
+
+        self.assertIn("Advisory (not scored", default_out)
+        self.assertIn("has an upper bound", default_out)
+        # --strict scores the finding, so it is a problem, not an advisory.
+        self.assertNotIn("Advisory (not scored", strict_out)
+        self.assertIn("has an upper bound", strict_out)
+        self.assertNotIn("Advisory", hidden_out)
+        self.assertNotIn("has an upper bound", hidden_out)
+
     @unittest.mock.patch("pyroma.package_version", return_value="6.0.0")
     def test_json_meta_uses_published_distribution_name(self, versionmock: unittest.mock.Mock) -> None:
         self.assertEqual(
@@ -1631,8 +1820,25 @@ class ProjectDataTest(unittest.TestCase):
         data = projectdata.get_data(directory)
         del data["_path"]  # This changes, so I just ignore it
         del data["_pyproject"]  # Parsed on the fly, not part of the metadata
+        # Gathered from the working tree for the coherence checks.
+        self.assertFalse(data.pop("_py_typed"))
+        self.assertEqual(data.pop("_license_files_unmatched"), [])
 
         self.assertEqual(data, COMPLETE)
+
+    def test_typed_marker_is_found_at_a_bounded_depth(self) -> None:
+        self.assertTrue(projectdata.has_typed_marker(TESTDATA_DIR / "typed_marker"))
+        self.assertFalse(projectdata.has_typed_marker(TESTDATA_DIR / "complete"))
+
+    def test_unmatched_license_files(self) -> None:
+        self.assertEqual(
+            projectdata.unmatched_license_files(TESTDATA_DIR / "missing_license_file", ["LICENCE-DOES-NOT-EXIST*"]),
+            ["LICENCE-DOES-NOT-EXIST*"],
+        )
+        self.assertEqual(projectdata.unmatched_license_files(TESTDATA_DIR / "complete", ["LICENSE.txt"]), [])
+        # PEP 639 forbids these, and Path.glob would raise on them.
+        forbidden = ["/etc/passwd", "../LICENSE.txt", ""]
+        self.assertEqual(projectdata.unmatched_license_files(TESTDATA_DIR / "complete", forbidden), forbidden)
 
     @unittest.mock.patch("pyroma.projectdata.wheel_metadata")
     def test_single_classifier_remains_a_list(self, metadatamock: unittest.mock.Mock) -> None:
@@ -1662,6 +1868,8 @@ class DistroDataTest(unittest.TestCase):
                     self.assertTrue(data.pop("_sdist"), distribution_path.name)
                     self.assertTrue(Path(data.pop("_path")).is_dir(), distribution_path.name)
                     self.assertTrue(data.pop("_pyproject"), distribution_path.name)
+                    self.assertFalse(data.pop("_py_typed"), distribution_path.name)
+                    self.assertEqual(data.pop("_license_files_unmatched"), [], distribution_path.name)
                     self.assertEqual(data, COMPLETE)
                 finally:
                     distributiondata.cleanup(data)

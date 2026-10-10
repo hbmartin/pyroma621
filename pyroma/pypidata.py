@@ -93,10 +93,14 @@ def _http_get(url: str) -> requests.Response:
     try:
         return requests.get(url, timeout=REQUEST_TIMEOUT)
     except requests.exceptions.Timeout:
+        # The original exception carries the URL, which may hold credentials,
+        # so it goes to the debug log only; the user sees a URL-free message.
+        logger.debug("Timed out fetching package data", exc_info=True)
         message = f"Timed out after {REQUEST_TIMEOUT} seconds while fetching package data."
         raise ValueError(message) from None
-    except requests.exceptions.ConnectionError:
-        message = "Could not connect to the package index."
+    except requests.exceptions.ConnectionError as error:
+        logger.debug("Could not connect to the package index", exc_info=True)
+        message = f"Could not connect to the package index ({type(error).__name__})."
         raise ValueError(message) from None
 
 

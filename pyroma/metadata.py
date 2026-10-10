@@ -60,6 +60,10 @@ Metadata = TypedDict(
         # a pyproject.toml exists. Treat the table as read-only.
         "_pyproject": "dict[str, Any]",
         "_pyproject_error": str,
+        # Facts projectdata gathers from the working tree, so that no rating
+        # test has to look at the disk itself.
+        "_py_typed": bool,
+        "_license_files_unmatched": "list[str]",
         "_sdist": bool,
         "_owners": "list[str]",
         "_wheel_build_failed": bool,

@@ -7,10 +7,22 @@ as `test`.
 ## Scored and advisory checks
 
 **Scored** checks decide the 1&ndash;10 rating. **Advisory** checks are reported
-below the rating but deliberately kept out of the arithmetic, so that adding
-a new check can never change an existing package's score. Run with
-`--strict` to score the advisory checks too, or `--no-advisories` to hide
-them.
+below the rating but kept out of the arithmetic.
+
+A check is advisory because it is new. Every check lands as advisory and
+stays that way for at least one minor release, so an upgrade shows you what
+pyroma would say about your project before it can move your rating. Once a
+check has been through a release without reports of false positives, it
+graduates to scored, and the changelog says so. An upgrade can therefore
+change your rating, but never unannounced.
+
+An advisory check is never fatal. Under `--strict`, which scores the advisory
+checks right away, a failing advisory check lowers the rating by its weight
+like any other check; it cannot zero it. `--strict` scores opinions too, so
+combine it with `--skip-tests practice` to score everything except the
+`practice` category. `--no-advisories` hides advisory findings from the text
+report. `--no-strict` and `--advisories` undo a `[tool.pyroma]` setting from
+the command line.
 
 Advisory findings always appear in `--format json`, under an `advisories`
 key, regardless of `--no-advisories`.
@@ -43,6 +55,12 @@ advisories = true
 skip-tests = ["practice", "CheckManifest"]
 ```
 
+Every boolean setting has a flag in both directions, `--strict`/`--no-strict`
+and `--advisories`/`--no-advisories`, so the command line can always override
+the table without resorting to `--no-config`. Names in `skip-tests` are
+validated the same way `--skip-tests` is: an unknown test or category is an
+error, not a silent no-op.
+
 Configuration is read in directory mode only. In file and PyPI modes the
 project is an archive that has not been unpacked when the settings are
 needed, and a downloaded artifact is a poor source for settings that change
@@ -65,8 +83,8 @@ pyroma's own exit code.
 | `MetadataVersion` | `Metadata-Version` must be one an index accepts. |
 | `PEPVersion` | The version must be valid under the version specifiers specification. |
 | `Licensing` | `License` and `License-Expression` together are forbidden; the expression must be valid SPDX. |
-| `DirectUrlDependency` | *Advisory.* A `name @ https://…` dependency is rejected outright. `twine check` does not catch this. |
-| `SummaryFormat` | *Advisory.* The summary must be one line of at most 512 characters. |
+| `DirectUrlDependency` | A `name @ https://…` dependency is rejected outright. `twine check` does not catch this. Fatal. |
+| `SummaryFormat` | The summary must be one line of at most 512 characters. Fatal. |
 
 ## `metadata` &mdash; missing or uninformative fields
 
@@ -91,7 +109,7 @@ pyroma's own exit code.
 | `DeprecatedMetadataFields` | Deprecated fields should give way to their replacements. |
 | `PythonVersionCoherence` | *Advisory.* Python classifiers must agree with `Requires-Python`. Installers trust `Requires-Python` and ignore classifiers. |
 | `DevelopmentStatusCoherence` | *Advisory.* A stable Development Status contradicts a `0.x` or pre-release version. |
-| `BuildBackendVersionFloor` | *Advisory.* PEP 639 licensing needs `setuptools>=77.0.0`, `hatchling>=1.27` or `flit-core>=1.11`. Older backends emit the wrong metadata silently. |
+| `BuildBackendVersionFloor` | *Advisory.* PEP 639 licensing needs `setuptools>=77.0.0`, `hatchling>=1.27` or `flit-core>=3.12`. Older backends emit the wrong metadata silently. |
 | `LicenseFilesExist` | *Advisory.* Every `license-files` pattern should match a real file. |
 | `ReadmeContentTypeMatch` | *Advisory.* The readme's content type should match its file extension. |
 | `TypedMarker` | *Advisory.* A `py.typed` marker and the `Typing :: Typed` classifier should agree. |
@@ -104,7 +122,7 @@ pyroma's own exit code.
 | `SDist` | A source distribution should be published. |
 | `BusFactor` | A project should have three or more owners on PyPI. |
 | `CheckManifest` | Version-controlled files and the sdist should match. Requires `check-manifest`. |
-| `EndOfLifePython` | *Advisory.* Do not advertise support for end-of-life Python versions. |
+| `EndOfLifePython` | *Advisory.* Do not advertise support for end-of-life Python versions. The verdict depends on the date pyroma runs. |
 | `PythonRequiresUpperBound` | *Advisory.* Capping `Requires-Python` breaks on every new Python release. |
 | `DependencyUpperBounds` | *Advisory.* Capped or pinned runtime dependencies cause resolution conflicts downstream. Skip this if you publish an application. |
 | `DependencyLowerBounds` | *Advisory.* A dependency with no floor may resolve to something far older than you tested. |

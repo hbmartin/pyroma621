@@ -4,13 +4,18 @@
 
 - Added an advisory tier. Checks are now either scored, deciding the 1-10
   rating as before, or advisory, reported below the rating but kept out of
-  the arithmetic. Every check added in this release is advisory, so
-  upgrading pyroma cannot change an existing package's rating. `--strict`
-  scores the advisory checks as well, and `--no-advisories` hides them.
-  Advisory findings always appear in JSON output under an `advisories` key.
-- Added sixteen checks, all advisory: direct URL dependencies, which package
-  indices reject and `twine check` does not catch; the 512-character
-  single-line Summary limit; Python classifiers contradicting
+  the arithmetic. A new check lands as advisory and graduates to scored,
+  announced here, once it has been through a minor release without
+  false-positive reports, so an upgrade never changes a rating unannounced.
+  An advisory check is never fatal. `--strict` scores the advisory checks
+  right away, `--no-advisories` hides them, and `--no-strict` and
+  `--advisories` override the `[tool.pyroma]` settings from the command
+  line. Advisory findings always appear in JSON output under an
+  `advisories` key.
+- Added two scored, fatal checks for conditions package indices reject
+  outright and `twine check` does not catch: direct URL dependencies, and a
+  Summary longer than 512 characters or spanning more than one line.
+- Added fourteen advisory checks: Python classifiers contradicting
   `Requires-Python`; end-of-life Python versions; a Development Status
   classifier contradicting the version; a build backend floor too low for
   the PEP 639 licensing in use; `license-files` patterns matching no file; a
@@ -26,8 +31,10 @@
   example `--skip-tests practice`, and the category appears in JSON output.
 - Added `[tool.pyroma]` configuration, read from the rated project's own
   `pyproject.toml` in directory mode. Supports `min-rating`, `strict`,
-  `advisories` and `skip-tests`. An explicit command-line flag always wins;
-  `--no-config` ignores the table entirely.
+  `advisories` and `skip-tests`. An explicit command-line flag always wins,
+  and every boolean setting has a flag in both directions; `--no-config`
+  ignores the table entirely. Unknown names in `skip-tests` are rejected the
+  same way `--skip-tests` rejects them, instead of silently skipping nothing.
 - Corrected the `Licensing` message. It claimed that a `License-Expression`
   alongside license classifiers may be rejected by package indices; PyPI
   implements no such check. It is now worded as the opinionated
@@ -36,7 +43,15 @@
   reported as a non-standard classifier that should use the `Private ::`
   namespace.
 - `pyproject.toml` is now parsed once, by `projectdata`, and handed to the
-  checks. `ratings` no longer reads from disk at all.
+  checks, as are the `py.typed` and `license-files` lookups. The checks are
+  a pure function of the metadata they are given; `CheckManifest`, which
+  runs check-manifest against the working tree, is the one exception.
+- Connection failures against a package index now name the exception class,
+  for example `SSLError`, and log the original error at debug level. The URL
+  stays out of both, since it may carry credentials; a Semgrep rule in CI
+  keeps URL-bearing values out of user-facing exceptions.
+- CI runs pyroma on itself with `--strict` as a non-blocking job, to surface
+  what the advisory checks say before any of them graduate.
 - Added a rules reference page documenting every check, its category and
   whether it is scored.
 
