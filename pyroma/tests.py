@@ -3,14 +3,19 @@ import copy
 import io
 import json
 import shutil
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
 import unittest.mock
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from typing import Never
 from xmlrpc import client as xmlrpclib
 
+import build
+import build.util
 from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
@@ -646,6 +651,126 @@ class BugFixTest(unittest.TestCase):
         self.assertIn("support. You", no_python.message)
         self.assertIn("may fail.\nSee", missing_build.message)
         self.assertIn("Are you checking", no_config.problems[0].message)
+
+
+class CLITest(unittest.TestCase):
+    """Exercise the ``pyroma`` command through ``main()``."""
+
+    def _run_cli(self, *argv: str) -> "tuple[int, str, str]":
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            unittest.mock.patch.object(sys, "argv", ["pyroma", *argv]),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            pyroma.main()
+        return int(raised.exception.code or 0), stdout.getvalue(), stderr.getvalue()
+
+    @staticmethod
+    def _write_malformed_project(directory: str) -> None:
+        (Path(directory) / "pyproject.toml").write_text("[project\n", encoding="UTF-8")
+
+    def test_malformed_pyproject_json_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_malformed_project(tmp)
+            code, out, err = self._run_cli("--directory", "--format", "json", tmp)
+
+        self.assertEqual(code, 3)
+        self.assertNotIn("Traceback", err)
+        document = json.loads(out)
+        self.assertEqual(document["error"]["type"], "BuildError")
+        self.assertIn("pyproject.toml", document["error"]["message"])
+        self.assertEqual(document["_meta"]["mode"], "directory")
+        self.assertEqual(document["_meta"]["pyroma"], pyroma.package_version("pyroma621"))
+
+    def test_malformed_pyproject_text_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_malformed_project(tmp)
+            code, _out, err = self._run_cli("--directory", tmp)
+
+        self.assertEqual(code, 3)
+        self.assertNotIn("Traceback", err)
+        self.assertIn("Error: Failed to parse", err)
+        self.assertIn("pyproject.toml", err)
+
+    def test_malformed_pyproject_in_sdist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "broken-1.0"
+            project.mkdir()
+            self._write_malformed_project(str(project))
+            sdist = Path(tmp) / "broken-1.0.tar.gz"
+            with tarfile.open(sdist, "w:gz") as tar:
+                tar.add(project, arcname=project.name)
+            code, out, err = self._run_cli("--file", "--format", "json", str(sdist))
+
+        self.assertEqual(code, 3)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(json.loads(out)["error"]["type"], "BuildError")
+
+    def test_json_report_includes_version(self) -> None:
+        code, out, _err = self._run_cli("--directory", "--format", "json", str(TESTDATA_DIR / "complete"))
+
+        self.assertEqual(code, 0)
+        document = json.loads(out)
+        self.assertEqual(document["rating"], 10)
+        self.assertEqual(document["_meta"]["pyroma"], pyroma.package_version("pyroma621"))
+
+    def test_json_error_includes_version(self) -> None:
+        code, out, _err = self._run_cli(
+            "--directory",
+            "--format",
+            "json",
+            "--skip-tests",
+            ",".join(pyroma.get_all_tests()),
+            str(TESTDATA_DIR / "complete"),
+        )
+
+        self.assertEqual(code, 3)
+        document = json.loads(out)
+        self.assertEqual(document["error"]["type"], "ConfigurationError")
+        self.assertEqual(document["_meta"]["pyroma"], pyroma.package_version("pyroma621"))
+
+    def test_json_meta_queries_the_installed_distribution(self) -> None:
+        with unittest.mock.patch.object(pyroma, "package_version", return_value="1.2.3") as lookup:
+            meta = pyroma._json_meta("directory", ".")
+
+        lookup.assert_called_once_with("pyroma621")
+        self.assertEqual(meta, {"package": ".", "mode": "directory", "pyroma": "1.2.3"})
+
+    def test_json_meta_without_installed_distribution(self) -> None:
+        with unittest.mock.patch.object(pyroma, "package_version", side_effect=PackageNotFoundError):
+            meta = pyroma._json_meta("directory", ".")
+
+        self.assertEqual(meta, {"package": ".", "mode": "directory"})
+
+
+class BuildFailureTest(unittest.TestCase):
+    """Map build-frontend failures to errors or the wheel-build-failed marker."""
+
+    def _metadata_with(self, error: Exception) -> Metadata:
+        with unittest.mock.patch.object(build.util, "project_wheel_metadata", side_effect=error):
+            return projectdata.build_metadata(".", isolated=True)
+
+    def test_backend_exception_is_not_fatal(self) -> None:
+        data = self._metadata_with(build.BuildBackendException("Backend 'nope' is not available."))
+        self.assertEqual(data, {"_wheel_build_failed": True})
+
+    def test_isolated_install_failure_is_not_fatal(self) -> None:
+        data = self._metadata_with(subprocess.CalledProcessError(1, ["pip", "install"]))
+        self.assertEqual(data, {"_wheel_build_failed": True})
+
+    def test_build_exception_becomes_build_error(self) -> None:
+        with self.assertRaises(projectdata.BuildError) as raised:
+            self._metadata_with(build.BuildException("Failed to parse pyproject.toml"))
+        self.assertEqual(str(raised.exception), "Failed to parse pyproject.toml")
+
+    def test_retry_in_isolation_handles_build_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "pyproject.toml").write_text("[project\n", encoding="UTF-8")
+            with self.assertRaises(projectdata.BuildError):
+                projectdata.get_data(tmp)
 
 
 class ReportTest(unittest.TestCase):
