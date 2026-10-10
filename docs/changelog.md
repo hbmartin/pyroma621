@@ -2,6 +2,15 @@
 
 ## 5.1b3 (unreleased)
 
+- A project whose `pyproject.toml` cannot be parsed no longer crashes the
+  CLI with a traceback and exit status 1. The failure is now reported like
+  other fatal errors: a short message in text mode, a JSON error document
+  with `--format json`, and exit status 3. A build backend that cannot be
+  installed into the isolated build environment is treated like any other
+  failing backend and rated accordingly instead of crashing.
+- JSON reports and error documents again carry the checker's version under
+  `_meta.pyroma`. The lookup used the upstream `pyroma` distribution name,
+  which is not installed, so the key was silently omitted.
 - Pyroma itself is now built by the native `uv_build` backend. Its flat
   `pyroma` module and source-distribution extras are declared directly in
   `pyproject.toml`; the Setuptools-only root configuration and `MANIFEST.in`

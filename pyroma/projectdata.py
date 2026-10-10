@@ -2,16 +2,32 @@
 
 # Kept at runtime so the public Pathish alias resolves through get_type_hints.
 import os  # noqa: TC003
+import subprocess
 from email.message import Message
 from pathlib import Path
 from typing import Any, Union, cast
 
+import build
 import build.util
 
-import build
 from pyroma.metadata import Metadata, normalize
 
 Pathish = Union[str, "os.PathLike[str]"]
+
+# Failures of the isolated build environment itself (its creation or the
+# installation of the build requirements) surface as process errors rather
+# than as build exceptions.
+_BACKEND_UNAVAILABLE = (build.BuildBackendException, build.FailedProcessError, subprocess.CalledProcessError)
+
+
+class BuildError(Exception):
+    """The project's build configuration could not be read, so no metadata exists.
+
+    Raised when the build frontend rejects the project before any backend
+    runs, for example because ``pyproject.toml`` is not valid TOML or its
+    ``[build-system]`` table is malformed. Unlike a failing build backend,
+    which still lets Pyroma rate what it knows, this leaves nothing to rate.
+    """
 
 
 def wheel_metadata(path: Pathish, isolated: "bool | None" = None) -> Message:
@@ -32,12 +48,18 @@ def build_metadata(path: Pathish, isolated: "bool | None" = None) -> Metadata:
     """Build and normalize the Core Metadata for a project."""
     try:
         metadata = wheel_metadata(path, isolated)
-    except build.BuildBackendException:
-        # The backend failed spectacularily. This happens with old packages,
-        # when we can't build a wheel. It's not always a fatal error. F ex, if
-        # you are getting info for a package from PyPI, we already have the
-        # metadata from PyPI, we just couldn't get the additional build data.
+    except _BACKEND_UNAVAILABLE:
+        # The backend failed spectacularily, or could not even be installed.
+        # This happens with old packages, when we can't build a wheel. It's
+        # not always a fatal error. F ex, if you are getting info for a
+        # package from PyPI, we already have the metadata from PyPI, we just
+        # couldn't get the additional build data.
         return {"_wheel_build_failed": True}
+    except build.BuildException as e:
+        # The frontend could not even read the project configuration, so
+        # there is no metadata at all. Report it as an error instead of a
+        # traceback.
+        raise BuildError(str(e)) from e
 
     # As far as I can tell, we can't trust that the builders normalize the keys,
     # so we do it here. Definitely most builders do not lower case them, which

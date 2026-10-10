@@ -80,10 +80,10 @@ $ pyroma --format json .
 - `1`: Used by the `zest.releaser` integration when you choose to abort
   the release after a low rating.
 - `3`: An error prevented rating the package: it could not be found or
-  downloaded, or the configuration (for example a `--skip-tests` value
-  that skips every rated test) made rating impossible. With
-  `--format json` the error is reported as a JSON document with an
-  `error` key.
+  downloaded, its `pyproject.toml` could not be parsed, or the
+  configuration (for example a `--skip-tests` value that skips every
+  rated test) made rating impossible. With `--format json` the error is
+  reported as a JSON document with an `error` key.
 
 ## Tests
 

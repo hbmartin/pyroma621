@@ -14,6 +14,9 @@ from pyroma import metadata as metadata_types
 _MIN_RATING = 1
 _MAX_RATING = 10
 _RELEASE_MIN_RATING = 8
+# The distribution name differs from the import name; version lookups must
+# use the former.
+_DISTRIBUTION_NAME = "pyroma621"
 
 
 def zester(data: "dict[str, Any]") -> None:
@@ -188,7 +191,7 @@ def main() -> None:
 
     try:
         rating = run(mode, args.package, args.quiet, args.skip_tests, args.index_url, args.output_format)
-    except (OSError, ratings.ConfigurationError, ValueError) as e:
+    except (OSError, projectdata.BuildError, ratings.ConfigurationError, ValueError) as e:
         if args.output_format == "json":
             print(report.format_json_error(e, _json_meta(mode, args.package)))
         else:
@@ -202,7 +205,7 @@ def main() -> None:
 def _json_meta(mode: str, argument: str) -> "dict[str, str]":
     meta = {"package": argument, "mode": mode}
     with suppress(PackageNotFoundError):
-        meta["pyroma"] = package_version("pyroma")
+        meta["pyroma"] = package_version(_DISTRIBUTION_NAME)
     return meta
 
 
