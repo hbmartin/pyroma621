@@ -71,8 +71,6 @@ jobs:
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: '0.13.0'
-      - name: Check lockfile
-        run: uv lock --check
       - name: Audit lockfile
         run: uv run --locked --only-group audit python ci/audit_dependencies.py
       - name: Upload audit report
@@ -83,7 +81,7 @@ jobs:
           path: |
             audit-report.json
             audit-report.requirements.txt
-          if-no-files-found: error
+          if-no-files-found: warn
 
   garuff:
     name: Run garuff
@@ -148,8 +146,6 @@ jobs:
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: '0.13.0'
-      - name: Check lockfile
-        run: uv lock --check
       - name: Run ty
         run: uv run --locked --group test --group typecheck ty check
       - name: Run pyrefly
@@ -169,8 +165,6 @@ jobs:
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: '0.13.0'
-      - name: Check lockfile
-        run: uv lock --check
       - name: Run pyroma
         run: uv run --locked --no-default-groups --group test pyroma --min 10 .
 
@@ -188,8 +182,6 @@ jobs:
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: '0.13.0'
-      - name: Check lockfile
-        run: uv lock --check
       - name: Run pyroma with advisory checks scored
         run: uv run --locked --no-default-groups --group test pyroma --no-config --strict --min 10 .
 
@@ -207,8 +199,6 @@ jobs:
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: '0.13.0'
-      - name: Check lockfile
-        run: uv lock --check
       - name: Check cyclomatic complexity
         run: uv run --locked --only-group quality lizard pyroma --exclude "pyroma/testdata/*" --warnings_only
 
@@ -226,8 +216,6 @@ jobs:
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: '0.13.0'
-      - name: Check lockfile
-        run: uv lock --check
       - name: Check dependencies
         run: uv run --locked --no-default-groups --group quality deptry . --github-output
       - name: Check sensitive exception data

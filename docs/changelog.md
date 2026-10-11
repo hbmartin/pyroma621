@@ -10,11 +10,23 @@
 - Release distributions are tested outside the checkout before publishing;
   dependency audits cover every locked registry package version and enforce
   expiring, reviewed exceptions. Malformed exception entries produce controlled
-  audit failures. Workflow linting and tool versions are pinned.
+  audit failures. Conflicting locked versions are audited in separate batches
+  and merged into one complete report. Tool failures retain their diagnostics;
+  unused exceptions report new vulnerabilities alongside the cleanup error.
+  Workflow linting and tool versions are pinned.
+- Artifact validation rejects generated metadata, caches, and build outputs;
+  builds exclude those files while retaining intentional distribution fixtures.
+  Release and metadata versions use PEP 440 equivalence, including prerelease
+  spellings. Local artifact validation supports Windows executable paths.
+- Package validation runs on pull requests, `master` pushes, and tags.
+  Redundant lock checks are removed where locked commands enforce the gate;
+  missing diagnostic uploads warn without obscuring an earlier failure.
 - Test fixture setup publishes its temporary path after preparation succeeds;
   teardown restores the original source path so repeated module runs work.
   Failed setup cleans up its temporary directory, and teardown restores state
-  even when cleanup raises.
+  even when cleanup raises. Fixture Git commands isolate inherited repository
+  variables and global excludes. Legacy fixture builds allow backend warnings
+  by category without depending on setuptools warning prose.
 - Hypothesis profiles load before pytest resolves command-line options,
   including invocations with `.` or individual test files. The default profile
   runs 100 examples without deadlines; the deep profile runs 1,000 and both

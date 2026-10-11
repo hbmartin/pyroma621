@@ -41,14 +41,19 @@ def setUpModule() -> None:
     global TESTDATA_DIR, _FIXTURE_DIRECTORY  # noqa: PLW0603 - module fixture lifecycle
     directory = tempfile.TemporaryDirectory(prefix="pyroma-fixtures-")
     target = Path(directory.name) / "testdata"
+    environment = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
     try:
         shutil.copytree(
             _SOURCE_TESTDATA_DIR,
             target,
             ignore=shutil.ignore_patterns("__pycache__", "*.egg-info", "dist", "build", ".DS_Store"),
         )
-        subprocess.run(["git", "init", "--quiet", str(target)], check=True)  # noqa: S603, S607 - fixed Git commands with temporary fixture paths
-        subprocess.run(["git", "-C", str(target), "-c", "core.autocrlf=false", "add", "."], check=True)  # noqa: S603, S607 - fixed fixture Git command
+        subprocess.run(["git", "-c", "core.excludesFile=", "init", "--quiet", str(target)], env=environment, check=True)  # noqa: S603, S607 - fixed Git commands with temporary fixture paths
+        subprocess.run(  # noqa: S603 - fixed fixture Git command
+            ["git", "-C", str(target), "-c", "core.excludesFile=", "-c", "core.autocrlf=false", "add", "."],  # noqa: S607 - fixed Git executable
+            env=environment,
+            check=True,
+        )
     except BaseException:
         directory.cleanup()
         raise
@@ -276,20 +281,10 @@ class RatingsTest(unittest.TestCase):
         skip_tests: "list[str] | str | None" = None,
     ) -> "tuple[int, list[str]]":
         directory = TESTDATA_DIR / dirname
-        expected = {
-            "custom_test": "The test command is disabled and references to it are deprecated.",
-            "pep517": "License classifiers are deprecated.",
-            "private_classifier": "License classifiers are deprecated.",
-            "setup_config": "License classifiers are deprecated.",
-        }
-        if dirname in expected:
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.filterwarnings("always", message="^" + expected[dirname], category=BuildBackendWarning)
+        if dirname in {"custom_test", "pep517", "private_classifier", "setup_config"}:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=BuildBackendWarning)
                 data = projectdata.get_data(directory)
-            self.assertTrue(caught, f"Expected legacy backend warning for {dirname}")
-            for warning in caught:
-                self.assertIs(warning.category, BuildBackendWarning)
-                self.assertTrue(str(warning.message).startswith(expected[dirname]))
         else:
             data = projectdata.get_data(directory)
         return rate(data, skip_tests)

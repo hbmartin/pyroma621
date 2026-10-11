@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tomllib
 import zipfile
 from pathlib import Path
 from unittest.mock import Mock
@@ -170,15 +171,24 @@ def test_incomplete_audit_fails(dependencies: list[dict[str, str]]) -> None:
         evaluate({"dependencies": dependencies}, {("dependency", "1")}, [])
 
 
-def distributions(tmp_path: Path, *, marker: bool = True) -> Path:
+def distributions(
+    tmp_path: Path,
+    *,
+    marker: bool = True,
+    version: str = "6.1.0",
+    wheel_version: str | None = None,
+    source_version: str | None = None,
+) -> Path:
     project = tmp_path / "pyproject.toml"
-    project.write_text('[project]\nversion="6.1.0"\n')
+    project.write_text(f'[project]\nversion="{version}"\n')
     with zipfile.ZipFile(tmp_path / "package.whl", "w") as archive:
         for name in ("__init__.py", "__main__.py", "tests.py", *(("py.typed",) if marker else ())):
             archive.writestr("pyroma/" + name, "")
-        archive.writestr("pyroma621-6.1.0.dist-info/METADATA", "Name: pyroma621\nVersion: 6.1.0\n")
+        archive.writestr(
+            "pyroma621-6.1.0.dist-info/METADATA", f"Name: pyroma621\nVersion: {wheel_version or version}\n"
+        )
     with tarfile.open(tmp_path / "package.tar.gz", "w:gz") as archive:
-        data = b"Name: pyroma621\nVersion: 6.1.0\n"
+        data = f"Name: pyroma621\nVersion: {source_version or version}\n".encode()
         member = tarfile.TarInfo("pyroma621-6.1.0/PKG-INFO")
         member.size = len(data)
         archive.addfile(member, io.BytesIO(data))
@@ -229,11 +239,105 @@ def test_stale_lock_fails(tmp_path: Path) -> None:
     uv = shutil.which("uv")
     assert uv is not None
     root = Path(__file__).resolve().parents[2]
-    shutil.copy(root / "uv.lock", tmp_path / "uv.lock")
-    config = (root / "pyproject.toml").read_text().replace('version = "6.1.0"', 'version = "99.0.0"', 1)
-    (tmp_path / "pyproject.toml").write_text(config)
+    version = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+    project = tmp_path / "pyproject.toml"
+    config = f'[project]\nname="lock-probe"\nversion="{version}"\nrequires-python=">=3.11"\n'
+    project.write_text(config)
+    command = [
+        uv,
+        "lock",
+        "--offline",
+        "--no-python-downloads",
+        "--cache-dir",
+        str(tmp_path / "cache"),
+        "--python",
+        sys.executable,
+    ]
+    subprocess.run(  # noqa: S603 - fixed executable and isolated offline lock probe
+        command, cwd=tmp_path, capture_output=True, text=True, timeout=30, check=True
+    )
+    lock = (tmp_path / "uv.lock").read_bytes()
+    replacement = "99.0.0" if version != "99.0.0" else "99.0.1"
+    changed = config.replace(f'version="{version}"', f'version="{replacement}"', 1)
+    assert changed != config
+    project.write_text(changed)
     result = subprocess.run(  # noqa: S603 - fixed executables and isolated CI probe arguments
-        [uv, "lock", "--check"], cwd=tmp_path, capture_output=True, text=True, timeout=30, check=False
+        [*command, "--check"], cwd=tmp_path, capture_output=True, text=True, timeout=30, check=False
     )
     assert result.returncode != 0
-    assert "lockfile" in (result.stdout + result.stderr).lower()
+    assert "lockfile" in result.stderr.lower()
+    assert "needs to be updated" in result.stderr
+    assert (tmp_path / "uv.lock").read_bytes() == lock
+
+
+@pytest.mark.parametrize("tag", ["v6.2.0-rc1", "6.2.0rc1", "v6.2.0RC1"])
+def test_artifact_versions_accept_equivalent_prereleases(tmp_path: Path, tag: str) -> None:
+    project = distributions(tmp_path, version="6.2.0-rc1", wheel_version="6.2.0rc1", source_version="6.2.0RC1")
+    assert inspect(tmp_path, project, tag)[2] == "6.2.0rc1"
+
+
+@pytest.mark.parametrize("field", ["project", "tag", "wheel", "source"])
+def test_invalid_artifact_versions_fail(tmp_path: Path, field: str) -> None:
+    project = distributions(
+        tmp_path,
+        version="invalid" if field == "project" else "6.1.0",
+        wheel_version="invalid" if field == "wheel" else None,
+        source_version="invalid" if field == "source" else None,
+    )
+    with pytest.raises(ValueError, match="Invalid version"):
+        inspect(tmp_path, project, "invalid" if field == "tag" else "")
+
+
+@pytest.mark.parametrize("field", ["wheel", "source"])
+def test_artifact_metadata_version_mismatch_fails(tmp_path: Path, field: str) -> None:
+    project = distributions(
+        tmp_path,
+        wheel_version="6.2.0" if field == "wheel" else None,
+        source_version="6.2.0" if field == "source" else None,
+    )
+    with pytest.raises(ValueError, match="name/version"):
+        inspect(tmp_path, project)
+
+
+def add_archive_member(tmp_path: Path, archive_type: str, name: str) -> None:
+    if archive_type == "wheel":
+        with zipfile.ZipFile(tmp_path / "package.whl", "a") as archive:
+            archive.writestr("pyroma/" + name, "fixture")
+    else:
+        path = tmp_path / "package.tar.gz"
+        with tarfile.open(path) as archive:
+            entries = [(member, archive.extractfile(member).read()) for member in archive.getmembers()]
+        with tarfile.open(path, "w:gz") as archive:
+            for member, data in entries:
+                archive.addfile(member, io.BytesIO(data))
+            member = tarfile.TarInfo("pyroma621-6.1.0/pyroma/" + name)
+            member.size = len(b"fixture")
+            archive.addfile(member, io.BytesIO(b"fixture"))
+
+
+@pytest.mark.parametrize("archive_type", ["wheel", "source"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "testdata/example.egg-info/PKG-INFO",
+        "__pycache__/x.pyc",
+        "cache.pyc",
+        "cache.pyo",
+        ".DS_Store",
+        "build/x.py",
+        "dist/x.whl",
+    ],
+)
+def test_generated_members_block_artifacts(tmp_path: Path, archive_type: str, name: str) -> None:
+    project = distributions(tmp_path)
+    add_archive_member(tmp_path, archive_type, name)
+    with pytest.raises(ValueError, match="Generated files") as failure:
+        inspect(tmp_path, project)
+    assert name in str(failure.value)
+
+
+def test_intentional_distribution_fixtures_remain_allowed(tmp_path: Path) -> None:
+    project = distributions(tmp_path)
+    for archive_type in ("wheel", "source"):
+        add_archive_member(tmp_path, archive_type, "testdata/distributions/complete-1.0.tar.gz")
+    inspect(tmp_path, project)

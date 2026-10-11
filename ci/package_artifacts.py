@@ -2,17 +2,49 @@
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tarfile
 import tomllib
 import zipfile
+from collections.abc import Iterable
 from email.parser import BytesParser
 from importlib import metadata
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+from packaging.version import Version
 
 _MAX_RATING = 10
+
+
+def parsed_version(value: object) -> Version:
+    """Normalize a version while rejecting missing or non-string metadata."""
+    if not isinstance(value, str):
+        message = f"Expected a version string, got {value!r}"
+        raise TypeError(message)
+    return Version(value)
+
+
+def reject_generated(names: Iterable[str]) -> None:
+    """Reject generated metadata, caches, and build outputs in an archive."""
+    forbidden = sorted(
+        name
+        for name in names
+        if any(
+            part in {"__pycache__", ".DS_Store", "build", "dist"} or part.endswith((".egg-info", ".pyc", ".pyo"))
+            for part in PurePosixPath(name).parts
+        )
+    )
+    if forbidden:
+        message = "Generated files in distribution:\n" + "\n".join(forbidden)
+        raise ValueError(message)
+
+
+def script_path(root: Path, name: str, *, windows: bool) -> Path:
+    """Locate a virtual environment's interpreter or console executable."""
+    return root / "Scripts" / f"{name}.exe" if windows else root / "bin" / name
 
 
 def inspect(dist: Path, project: Path, release_tag: str = "") -> tuple[Path, Path, str]:
@@ -21,11 +53,12 @@ def inspect(dist: Path, project: Path, release_tag: str = "") -> tuple[Path, Pat
     if len(wheels) != 1 or len(sdists) != 1:
         message = "Expected exactly one wheel and one source distribution"
         raise ValueError(message)
-    version = tomllib.loads(project.read_text())["project"]["version"]
-    if release_tag and release_tag.removeprefix("v") != version:
+    version = parsed_version(tomllib.loads(project.read_text())["project"]["version"])
+    if release_tag and parsed_version(release_tag.removeprefix("v")) != version:
         message = f"Release tag {release_tag!r} does not match project version {version}"
         raise ValueError(message)
     with zipfile.ZipFile(wheels[0]) as archive:
+        reject_generated(archive.namelist())
         required = {"pyroma/__init__.py", "pyroma/__main__.py", "pyroma/tests.py", "pyroma/py.typed"}
         if not required <= set(archive.namelist()):
             message = f"Missing wheel files: {required - set(archive.namelist())}"
@@ -35,10 +68,11 @@ def inspect(dist: Path, project: Path, release_tag: str = "") -> tuple[Path, Pat
             message = "Expected one wheel metadata document"
             raise ValueError(message)
         wheel_metadata = BytesParser().parsebytes(archive.read(metadatas[0]))
-        if wheel_metadata["Name"] != "pyroma621" or wheel_metadata["Version"] != version:
+        if wheel_metadata["Name"] != "pyroma621" or parsed_version(wheel_metadata["Version"]) != version:
             message = "Wheel name/version does not match the project"
             raise ValueError(message)
     with tarfile.open(sdists[0]) as archive:
+        reject_generated(archive.getnames())
         metadata_files = [
             member
             for member in archive.getmembers()
@@ -52,10 +86,10 @@ def inspect(dist: Path, project: Path, release_tag: str = "") -> tuple[Path, Pat
             message = "Source-distribution metadata is not a file"
             raise ValueError(message)
         source_metadata = BytesParser().parsebytes(stream.read())
-        if source_metadata["Name"] != "pyroma621" or source_metadata["Version"] != version:
+        if source_metadata["Name"] != "pyroma621" or parsed_version(source_metadata["Version"]) != version:
             message = "Source-distribution name/version does not match the project"
             raise ValueError(message)
-    return wheels[0].resolve(), sdists[0].resolve(), version
+    return wheels[0].resolve(), sdists[0].resolve(), str(version)
 
 
 def stage(sdist: Path, work: Path) -> Path:
@@ -97,7 +131,7 @@ def environment(work: Path, python: str, wheel: Path, project: Path, *, tests: b
     name = "test-env" if tests else "runtime-env"
     root = work / name
     run([uv, "venv", "--python", python, str(root)], work)
-    executable = root / "bin" / "python"
+    executable = script_path(root, "python", windows=os.name == "nt")
     requirements = work / f"{name}.requirements.txt"
     export = [
         uv,
@@ -121,6 +155,7 @@ def smoke(version: str) -> None:
     """Check installed origin, metadata, runtime files, and both CLI forms."""
     import pyroma  # noqa: PLC0415 - import only inside the runtime-only environment
 
+    expected_version = parsed_version(version)
     distribution = metadata.distribution("pyroma621")
     package = Path(pyroma.__file__).resolve().parent
     if (
@@ -129,7 +164,7 @@ def smoke(version: str) -> None:
     ):
         message = "Imported pyroma is not the installed release distribution"
         raise ValueError(message)
-    if distribution.version != version or not (package / "py.typed").is_file():
+    if parsed_version(distribution.version) != expected_version or not (package / "py.typed").is_file():
         message = "Installed version or typing marker is incorrect"
         raise ValueError(message)
     licenses = [file for file in distribution.files or [] if str(file).endswith("/licenses/LICENSE.txt")]
@@ -149,14 +184,15 @@ def smoke(version: str) -> None:
     if distribution.metadata.get_all("Provides-Extra"):
         message = "Development extras leaked into published metadata"
         raise ValueError(message)
-    for invocation in ([str(Path(sys.executable).with_name("pyroma"))], [sys.executable, "-m", "pyroma"]):
+    console = script_path(Path(sys.prefix), "pyroma", windows=os.name == "nt")
+    for invocation in ([str(console)], [sys.executable, "-m", "pyroma"]):
         run([*invocation, "--help"], Path.cwd())
         output = run(
             [*invocation, "--directory", "--format", "json", "--min", "10", str(package / "testdata" / "complete")],
             Path.cwd(),
         )
         document = json.loads(output)
-        if document["rating"] != _MAX_RATING or document["_meta"]["pyroma"] != version:
+        if document["rating"] != _MAX_RATING or parsed_version(document["_meta"]["pyroma"]) != expected_version:
             message = "Installed CLI did not return the expected JSON rating/version"
             raise ValueError(message)
 
@@ -166,10 +202,6 @@ def validate(dist: Path, project: Path, work: Path, python: str, release_tag: st
     wheel, sdist, version = inspect(dist, project, release_tag)
     work.mkdir(parents=True)
     staging = stage(sdist, work)
-    uv = shutil.which("uv")
-    if uv is None:
-        message = "uv must be installed"
-        raise ValueError(message)
     executable = environment(work, python, wheel, project, tests=True)
     installed = run([str(executable), "-c", "import pyroma; print(pyroma.__file__)"], staging).strip()
     package = Path(installed).parent
@@ -219,7 +251,7 @@ def main() -> None:
             inspect(args.dist, args.project, args.release_tag)
         else:
             smoke(args.version)
-    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Artifact validation failed: {error}\n")
 
 

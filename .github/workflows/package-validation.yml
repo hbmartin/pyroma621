@@ -2,6 +2,8 @@ name: Validate package artifacts
 
 on:
   push:
+    branches: [master]
+    tags: ['*']
   pull_request:
   workflow_dispatch:
     inputs:
@@ -42,7 +44,7 @@ jobs:
       - name: Inspect distributions and release version
         env:
           RELEASE_TAG: ${{ inputs.release-tag || '' }}
-        run: python ci/package_artifacts.py inspect --release-tag "$RELEASE_TAG"
+        run: uv run --locked --no-default-groups python ci/package_artifacts.py inspect --release-tag "$RELEASE_TAG"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: python-package-distributions
@@ -75,14 +77,12 @@ jobs:
         with:
           name: python-package-distributions
           path: dist
-      - name: Check lockfile
-        run: uv lock --check
       - name: Test wheel and runtime CLI outside checkout
         env:
           RELEASE_TAG: ${{ inputs.release-tag || '' }}
           PYTHON_VERSION: ${{ matrix.python }}
         run: >-
-          python ci/package_artifacts.py validate --python "$PYTHON_VERSION"
+          uv run --locked --no-default-groups python ci/package_artifacts.py validate --python "$PYTHON_VERSION"
           --work "$RUNNER_TEMP/package-validation-$PYTHON_VERSION"
           --release-tag "$RELEASE_TAG"
       - name: Upload artifact coverage
@@ -91,4 +91,4 @@ jobs:
         with:
           name: artifact-coverage-${{ matrix.python }}
           path: ${{ runner.temp }}/package-validation-${{ matrix.python }}/coverage.xml
-          if-no-files-found: error
+          if-no-files-found: warn

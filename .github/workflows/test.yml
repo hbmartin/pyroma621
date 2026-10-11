@@ -37,8 +37,6 @@ jobs:
         with:
           version: '0.13.0'
           python-version: ${{ matrix.python-version }}
-      - name: Check lockfile
-        run: uv lock --check
       - name: Run tests
         run: uv run --locked --no-default-groups --group test python -bb -X dev -m pytest --cov --cov-report=term-missing --cov-report=xml
       - name: Upload coverage
@@ -47,4 +45,4 @@ jobs:
         with:
           name: coverage-${{ matrix.os }}-${{ matrix.python-version }}
           path: coverage.xml
-          if-no-files-found: error
+          if-no-files-found: warn

@@ -99,7 +99,7 @@ def check_copy(*args, **kwargs):
 def check_git(arguments, **kwargs):
     assert module.TESTDATA_DIR == original
     assert module._FIXTURE_DIRECTORY is None
-    if (operation == 'git-init' and arguments[1] == 'init') or (
+    if (operation == 'git-init' and 'init' in arguments) or (
         operation == 'git-add' and arguments[-2:] == ['add', '.']
     ):
         raise subprocess.CalledProcessError(1, arguments)
@@ -156,4 +156,97 @@ finally:
     fixture.cleanup()
 assert not directory.exists()
 """,
+    )
+
+
+def test_fixture_git_commands_isolate_environment_index_and_exclusions(tmp_path: Path) -> None:
+    run_fixture_probe(
+        tmp_path,
+        """
+import os
+
+foreign = Path.cwd() / 'foreign'
+foreign.mkdir()
+clean = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+subprocess.run(['git', 'init', '--quiet', str(foreign)], env=clean, check=True)
+(foreign / 'sentinel').write_text('keep')
+subprocess.run(['git', '-C', str(foreign), 'add', 'sentinel'], env=clean, check=True)
+index = foreign / '.git' / 'index'
+before = index.read_bytes()
+config_root = Path.cwd() / 'config'
+(config_root / 'git').mkdir(parents=True)
+excludes = Path.cwd() / 'excludes'
+excludes.write_text('*.tar*\\n*.zip\\nREADME.txt\\n')
+(config_root / 'git' / 'config').write_text('[core]\\nexcludesFile = ' + str(excludes).replace('\\\\', '/') + '\\n')
+variables = {
+    'GIT_DIR': str(foreign / '.git'),
+    'GIT_WORK_TREE': str(foreign),
+    'GIT_INDEX_FILE': str(index),
+    'GIT_CONFIG_COUNT': '1',
+    'GIT_CONFIG_KEY_0': 'core.excludesFile',
+    'GIT_CONFIG_VALUE_0': str(excludes),
+    'XDG_CONFIG_HOME': str(config_root),
+}
+with patch.dict(os.environ, variables):
+    parent = dict(os.environ)
+    try:
+        module.setUpModule()
+        target = module.TESTDATA_DIR
+        assert (target / '.git').is_dir()
+        assert dict(os.environ) == parent
+        assert index.read_bytes() == before
+        result = subprocess.run(
+            ['git', '-C', str(target), 'ls-files', '-z'], env=clean,
+            capture_output=True, text=True, check=True,
+        )
+        tracked = set(result.stdout.split('\\0'))
+        assert 'complete/README.txt' in tracked
+        archives = {
+            str(path.relative_to(original)).replace('\\\\', '/')
+            for path in (original / 'distributions').iterdir()
+        }
+        assert archives <= tracked
+    finally:
+        module.tearDownModule()
+assert index.read_bytes() == before
+assert module.TESTDATA_DIR == original
+assert module._FIXTURE_DIRECTORY is None
+""",
+    )
+
+
+@pytest.mark.parametrize("dirname", ["custom_test", "pep517", "private_classifier", "setup_config"])
+@pytest.mark.parametrize("warning", ["changed", "absent", "unrelated"])
+def test_fixture_backend_warning_policy(tmp_path: Path, dirname: str, warning: str) -> None:
+    run_fixture_probe(
+        tmp_path,
+        """
+import warnings
+from pyproject_hooks import BuildBackendWarning
+
+dirname, kind = sys.argv[1:]
+def data(*args, **kwargs):
+    if kind != 'absent':
+        category = BuildBackendWarning if kind == 'changed' else UserWarning
+        warnings.warn('New backend warning wording', category, stacklevel=1)
+    return {}
+
+with (
+    warnings.catch_warnings(),
+    patch.object(module.projectdata, 'get_data', side_effect=data),
+    patch.object(module, 'rate', return_value=(10, [])),
+):
+    warnings.simplefilter('error')
+    if kind == 'unrelated':
+        try:
+            module.RatingsTest()._get_file_rating(dirname)
+        except UserWarning:
+            pass
+        else:
+            raise AssertionError('Unrelated warnings must fail')
+    else:
+        assert module.RatingsTest()._get_file_rating(dirname) == (10, [])
+""",
+        dirname,
+        warning,
     )
