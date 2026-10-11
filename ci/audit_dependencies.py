@@ -47,6 +47,9 @@ def load_exceptions(path: Path, today: datetime.date) -> list[dict[str, Any]]:
         raise TypeError(message)
     seen = set()
     for entry in entries:
+        if not isinstance(entry, dict):
+            message = "Each audit exception must be a TOML table."
+            raise TypeError(message)
         for field in ("advisory", "package", "version", "reason"):
             if not isinstance(entry.get(field), str) or not entry[field].strip():
                 message = f"Exception needs a nonempty {field}"

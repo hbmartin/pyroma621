@@ -4,11 +4,17 @@
 
 - Removed the published `test` extra. Contributor dependencies now use
   `[dependency-groups].test`; install with `uv sync --group test`.
-- CI requires 94% production-only branch coverage, strict pytest configuration,
-  and unexpected warnings as errors. Garuff and strict self-rating now block.
+- CI requires 94% combined production coverage across statements and branches,
+  strict pytest configuration, and unexpected warnings as errors. Garuff and
+  strict self-rating now block.
 - Release distributions are tested outside the checkout before publishing;
-  dependency audits cover every locked package version and enforce expiring,
-  reviewed exceptions. Workflow linting and tool versions are pinned.
+  dependency audits cover every locked registry package version and enforce
+  expiring, reviewed exceptions. Malformed exception entries produce controlled
+  audit failures. Workflow linting and tool versions are pinned.
+- Test fixture setup publishes its temporary path after preparation succeeds;
+  teardown restores the original source path so repeated module runs work.
+  Failed setup cleans up its temporary directory, and teardown restores state
+  even when cleanup raises.
 - Hypothesis profiles load before pytest resolves command-line options,
   including invocations with `.` or individual test files. The default profile
   runs 100 examples without deadlines; the deep profile runs 1,000 and both

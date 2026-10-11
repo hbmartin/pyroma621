@@ -8,13 +8,23 @@ import sys
 import tarfile
 import zipfile
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
+from ci import audit_dependencies
 from ci.audit_dependencies import evaluate, load_exceptions, locked_requirements
 from ci.package_artifacts import inspect
 
 TODAY = datetime.date(2026, 10, 11)
+_VALID_EXCEPTION = """[[exceptions]]
+advisory="GHSA-example"
+package="dependency"
+version="1"
+reason="No compatible fix; independently reviewed"
+created=2026-10-01
+expires=2026-10-20
+"""
 
 
 def test_lock_includes_other_platform_versions(tmp_path: Path) -> None:
@@ -72,6 +82,72 @@ def test_exception_requires_reason(tmp_path: Path) -> None:
     path.write_text('[[exceptions]]\nadvisory="GHSA-example"\npackage="dependency"\nversion="1"\n')
     with pytest.raises(ValueError, match="reason"):
         load_exceptions(path, TODAY)
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        "[1]",
+        '["bad"]',
+        "[true]",
+        "[[1]]",
+        '[{advisory="GHSA-example", package="dependency", version="1", reason="Reviewed", '
+        "created=2026-10-01, expires=2026-10-20}, 1]",
+    ],
+    ids=["integer", "string", "boolean", "array", "mixed"],
+)
+def test_exception_entries_must_be_tables(tmp_path: Path, entries: str) -> None:
+    path = tmp_path / "exceptions.toml"
+    path.write_text(f"exceptions={entries}\n", encoding="utf-8")
+    with pytest.raises(TypeError, match=r"^Each audit exception must be a TOML table\.$"):
+        load_exceptions(path, TODAY)
+
+
+@pytest.mark.parametrize(("owner_field", "expected"), [("", "hbmartin"), ('owner="maintainer"\n', "maintainer")])
+def test_exception_accepts_default_and_explicit_owners(tmp_path: Path, owner_field: str, expected: str) -> None:
+    path = tmp_path / "exceptions.toml"
+    path.write_text(_VALID_EXCEPTION + owner_field, encoding="utf-8")
+    entries = load_exceptions(path, TODAY)
+    assert len(entries) == 1
+    assert entries[0]["owner"] == expected
+
+
+@pytest.mark.parametrize("owner", ['" "', "1", "true"])
+def test_exception_rejects_invalid_owners(tmp_path: Path, owner: str) -> None:
+    path = tmp_path / "exceptions.toml"
+    path.write_text(_VALID_EXCEPTION + f"owner={owner}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Exception needs an owner"):
+        load_exceptions(path, TODAY)
+
+
+def test_malformed_exception_uses_controlled_main_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    lock = tmp_path / "uv.lock"
+    lock.write_text(
+        '[[package]]\nname="dependency"\nversion="1"\nsource={registry="https://pypi.org/simple"}\n'
+        'wheels=[{hash="sha256:' + "0" * 64 + '"}]\n',
+        encoding="utf-8",
+    )
+    exceptions = tmp_path / "exceptions.toml"
+    exceptions.write_text("exceptions=[1]\n", encoding="utf-8")
+    report = tmp_path / "audit-report.json"
+    runner = Mock(side_effect=AssertionError("Unexpected audit subprocess"))
+    monkeypatch.setattr(audit_dependencies.subprocess, "run", runner)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["audit_dependencies", "--lock", str(lock), "--exceptions", str(exceptions), "--report", str(report)],
+    )
+    with pytest.raises(SystemExit) as failure:
+        audit_dependencies.main()
+    assert failure.value.code == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "Audit failed: Each audit exception must be a TOML table.\n"
+    runner.assert_not_called()
+    assert not report.exists()
+    assert not report.with_suffix(".requirements.txt").exists()
 
 
 def test_audit_finding_alias_and_exact_version() -> None:

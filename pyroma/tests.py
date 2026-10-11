@@ -30,7 +30,8 @@ from pyroma import config, distributiondata, projectdata, pypidata, ratings, rep
 from pyroma.metadata import Metadata
 from pyroma.ratings import rate
 
-TESTDATA_DIR = Path(__file__).parent / "testdata"
+_SOURCE_TESTDATA_DIR = Path(__file__).parent / "testdata"
+TESTDATA_DIR = _SOURCE_TESTDATA_DIR
 PYROMA_ROOT = Path(pyroma.__file__).resolve().parent.parent
 _FIXTURE_DIRECTORY: tempfile.TemporaryDirectory[str] | None = None
 
@@ -38,20 +39,32 @@ _FIXTURE_DIRECTORY: tempfile.TemporaryDirectory[str] | None = None
 def setUpModule() -> None:
     """Track copied wheel fixtures in Git so manifest tests need no checkout."""
     global TESTDATA_DIR, _FIXTURE_DIRECTORY  # noqa: PLW0603 - module fixture lifecycle
-    _FIXTURE_DIRECTORY = tempfile.TemporaryDirectory(prefix="pyroma-fixtures-")
-    source = TESTDATA_DIR
-    TESTDATA_DIR = Path(_FIXTURE_DIRECTORY.name) / "testdata"
-    shutil.copytree(
-        source, TESTDATA_DIR, ignore=shutil.ignore_patterns("__pycache__", "*.egg-info", "dist", "build", ".DS_Store")
-    )
-    subprocess.run(["git", "init", "--quiet", str(TESTDATA_DIR)], check=True)  # noqa: S603, S607 - fixed Git commands with temporary fixture paths
-    subprocess.run(["git", "-C", str(TESTDATA_DIR), "-c", "core.autocrlf=false", "add", "."], check=True)  # noqa: S603, S607 - fixed fixture Git command
+    directory = tempfile.TemporaryDirectory(prefix="pyroma-fixtures-")
+    target = Path(directory.name) / "testdata"
+    try:
+        shutil.copytree(
+            _SOURCE_TESTDATA_DIR,
+            target,
+            ignore=shutil.ignore_patterns("__pycache__", "*.egg-info", "dist", "build", ".DS_Store"),
+        )
+        subprocess.run(["git", "init", "--quiet", str(target)], check=True)  # noqa: S603, S607 - fixed Git commands with temporary fixture paths
+        subprocess.run(["git", "-C", str(target), "-c", "core.autocrlf=false", "add", "."], check=True)  # noqa: S603, S607 - fixed fixture Git command
+    except BaseException:
+        directory.cleanup()
+        raise
+    TESTDATA_DIR = target
+    _FIXTURE_DIRECTORY = directory
 
 
 def tearDownModule() -> None:
-    """Release the independent fixture repository."""
-    if _FIXTURE_DIRECTORY is not None:
-        _FIXTURE_DIRECTORY.cleanup()
+    """Release the fixture repository and restore the source directory."""
+    global TESTDATA_DIR, _FIXTURE_DIRECTORY  # noqa: PLW0603 - module fixture lifecycle
+    try:
+        if _FIXTURE_DIRECTORY is not None:
+            _FIXTURE_DIRECTORY.cleanup()
+    finally:
+        TESTDATA_DIR = _SOURCE_TESTDATA_DIR
+        _FIXTURE_DIRECTORY = None
 
 
 def _attach_pyproject(testdata: Metadata, path: "Path | str") -> Metadata:

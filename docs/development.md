@@ -248,11 +248,15 @@ workflow also accepts a release tag through manual dispatch and never publishes.
 
 Coverage measures production `pyroma` modules, including the CLI entry module,
 with branches enabled. Tests and packaging fixtures are excluded. Every matrix
-entry must reach 94%, displayed with two decimal places, and uploads coverage XML.
+entry must reach 94% combined coverage across statements and branches, displayed
+with two decimal places, and uploads coverage XML. The threshold applies to the
+combined metric; statement and branch percentages have no independent floors.
 Pytest rejects unknown configuration, unknown markers, and unexpected warnings.
 The legacy backend warnings are asserted only by the four tests that need them.
 Fixtures are copied into temporary Git repositories so manifest tests work with
-an installed wheel as well as a checkout.
+an installed wheel as well as a checkout. Setup publishes the temporary path
+after copying and Git initialization succeed. Teardown restores the original
+source path, supporting repeated module runs and harmless repeated cleanup.
 
 CI pins uv 0.13.0, actionlint 1.7.12, and ShellCheck 0.11.0. Workflow-checker
 archives are verified against pinned SHA-256 digests. Strict self-rating and
