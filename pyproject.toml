@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "pyroma621"
-version = "6.0.0"
+version = "6.1.0"
 description = "Test your project's packaging friendliness"
 readme = "README.md"
 authors = [
@@ -33,6 +33,7 @@ requires-python = ">=3.11"
 dependencies = [
     "build>=0.7.0",
     "docutils>=0.22",
+    "markdown-it-py>=4.2.0",
     "packaging>=26.3",
     "pygments>=2.19",
     "requests>=2.32",
@@ -72,7 +73,8 @@ typecheck = ["pyrefly>=1.1.1", "ty>=0.0.61", "types-docutils"]
 [tool.uv.build-backend]
 module-name = "pyroma"
 module-root = ""
-source-include = ["docs/**", "Makefile", "tox.ini", "zensical.toml"]
+source-include = ["docs/**", "Makefile", "tox.ini", "uv.lock", "zensical.toml"]
+source-exclude = ["**/.DS_Store"]
 
 [project.urls]
 Homepage = "https://github.com/hbmartin/pyroma621"

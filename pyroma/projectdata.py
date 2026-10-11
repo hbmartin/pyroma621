@@ -6,6 +6,7 @@ import subprocess
 import tomllib
 from email.message import Message
 from pathlib import Path
+from stat import S_ISDIR, S_ISREG
 from typing import TYPE_CHECKING, Any, Union, cast
 
 import build
@@ -113,33 +114,79 @@ def read_pyproject(path: Pathish) -> "tuple[dict[str, Any] | None, str | None]":
         return None, str(error)
 
 
-_EXCLUDED_SOURCE_DIRS = frozenset(
-    {"venv", "env", "virtualenv", "__pycache__", "__pypackages__", "build", "dist", "_build", "node_modules"}
-)
+_EXCLUDED_SOURCE_DIRS = frozenset({"__pycache__", "__pypackages__", "node_modules"})
+_GENERATED_SOURCE_DIRS = frozenset({"build", "dist", "_build"})
 
 
-def _source_directories(path: Pathish) -> "Iterator[tuple[Path, list[str]]]":
+def _regular_file(path: Path) -> bool:
+    """Check a candidate once, without following symlinks or raising IO errors."""
+    try:
+        return S_ISREG(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
+def _has_direct_sources(path: Path) -> bool:
+    """Distinguish a root source package from conventional generated output."""
+    try:
+        with os.scandir(path) as entries:
+            for entry in entries:
+                if not entry.name.endswith((".py", ".pyi")):
+                    continue
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        return True
+                except OSError:
+                    continue
+    except OSError:
+        return False
+    return False
+
+
+def _source_child(root: Path, child: str, project_root: Path) -> bool:
+    """Retain source directories, skipping inaccessible entries individually."""
+    if child.startswith(".") or child in _EXCLUDED_SOURCE_DIRS:
+        return False
+    path = root / child
+    try:
+        if not S_ISDIR(path.lstat().st_mode):
+            return False
+    except OSError:
+        return False
+    try:
+        if S_ISREG((path / "pyvenv.cfg").stat().st_mode):
+            return False
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    return root != project_root or child not in _GENERATED_SOURCE_DIRS or _has_direct_sources(path)
+
+
+def _source_directories(path: Path) -> "Iterator[tuple[Path, list[str]]]":
     """Walk source directories without generated trees, environments or symlinks."""
     for directory, children, files in os.walk(path, followlinks=False):
         root = Path(directory)
-        children[:] = [
-            child
-            for child in children
-            if not child.startswith(".")
-            and child not in _EXCLUDED_SOURCE_DIRS
-            and not (root / child).is_symlink()
-            and not (root / child / "pyvenv.cfg").is_file()
-        ]
-        yield root, [name for name in files if (root / name).is_file() and not (root / name).is_symlink()]
+        children[:] = [child for child in children if _source_child(root, child, path)]
+        yield (
+            root,
+            [
+                name
+                for name in files
+                if (name == "py.typed" or name.endswith((".py", ".pyi"))) and _regular_file(root / name)
+            ],
+        )
 
 
 def _complete_stub(root: Path) -> bool:
     marker = root / "py.typed"
-    if marker.is_symlink():
-        return False
-    if not marker.exists():
+    try:
+        mode = marker.lstat().st_mode
+    except FileNotFoundError:
         return True
-    if not marker.is_file():
+    except OSError:
+        return False
+    if not S_ISREG(mode):
         return False
     try:
         return "partial" not in marker.read_text(encoding="utf-8").splitlines()
@@ -152,11 +199,21 @@ def typing_facts(path: Pathish) -> tuple[bool, bool]:
 
     These facts describe sources only; they do not verify wheel contents.
     """
-    has_marker = False
+    markers: set[Path] = set()
+    source_directories: set[Path] = set()
     stub_roots: set[Path] = set()
-    root = Path(path).resolve()
+    try:
+        root = Path(path).resolve()
+    except OSError:
+        return False, False
     for directory, files in _source_directories(root):
-        has_marker |= "py.typed" in files
+        if directory != root and "py.typed" in files:
+            markers.add(directory)
+        if any(name.endswith((".py", ".pyi")) for name in files):
+            parent = directory
+            while parent != root and parent not in source_directories:
+                source_directories.add(parent)
+                parent = parent.parent
         if not any(name.endswith(".pyi") for name in files):
             continue
         parent = directory
@@ -165,7 +222,7 @@ def typing_facts(path: Pathish) -> tuple[bool, bool]:
                 stub_roots.add(parent)
                 break
             parent = parent.parent
-    return has_marker, any(_complete_stub(stub) for stub in stub_roots)
+    return bool(markers & source_directories), any(_complete_stub(stub) for stub in stub_roots)
 
 
 def has_typed_marker(path: Pathish) -> bool:

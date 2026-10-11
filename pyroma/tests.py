@@ -28,6 +28,7 @@ from pyroma.metadata import Metadata
 from pyroma.ratings import rate
 
 TESTDATA_DIR = Path(__file__).parent / "testdata"
+PYROMA_ROOT = Path(pyroma.__file__).resolve().parent.parent
 
 
 def _attach_pyproject(testdata: Metadata, path: "Path | str") -> Metadata:
@@ -567,7 +568,8 @@ class SpecComplianceTest(unittest.TestCase):
         testdata["requires-dist"] = ["zope.event", "broken =="]
 
         messages = self._messages(testdata)
-        self.assertTrue(any("'broken ==' is not a valid dependency specifier" in msg for msg in messages))
+        self.assertTrue(any("Requires-Dist entry #2 is not a valid dependency specifier." in msg for msg in messages))
+        self.assertFalse(any("broken ==" in msg for msg in messages))
 
     def test_requires_dist_style_warnings(self) -> None:
         testdata = COMPLETE.copy()
@@ -1323,7 +1325,7 @@ class AdvisoryChecksTest(unittest.TestCase):
         testdata["_pyproject"] = {"project": {"readme": {"file": "README.txt", "content-type": "text/x-rst"}}}
         testdata["description-content-type"] = "text/x-rst"
 
-        self._assert_silent(testdata, "whose suffix means")
+        self.assertIs(ratings.ReadmeContentTypeMatch().test(testdata).outcome, True)
 
     def test_development_dependencies_declared_as_extras(self) -> None:
         testdata = _attach_pyproject(COMPLETE.copy(), TESTDATA_DIR / "dev_extras")
@@ -1374,6 +1376,12 @@ class AdvisoryChecksTest(unittest.TestCase):
 
 
 class ReviewFixRegressionTest(unittest.TestCase):
+    @staticmethod
+    def _run_subprocess(arguments: list[str]) -> "subprocess.CompletedProcess[str]":
+        return subprocess.run(  # noqa: S603 - fixed interpreter and package root, with test-controlled arguments
+            [sys.executable, *arguments], cwd=PYROMA_ROOT, capture_output=True, text=True, check=False
+        )
+
     def _backend_data(self, requirements: list[str], python: str | None = ">=3.11") -> Metadata:
         data = COMPLETE.copy()
         data.pop("requires-python")
@@ -1388,7 +1396,7 @@ class ReviewFixRegressionTest(unittest.TestCase):
 
     def test_credentials_are_absent_from_real_cli_reports(self) -> None:
         dependency = "example[feature] @ https://review-user:review-password@example.invalid/pkg.whl?token=review-token"
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
             root = Path(directory)
             (root / "example.py").write_text("", encoding="utf-8")
             dependencies = [dependency, dependency + ' ; extra > "test"']
@@ -1398,33 +1406,106 @@ class ReviewFixRegressionTest(unittest.TestCase):
                 f"dependencies = {json.dumps(dependencies)}\n",
                 encoding="utf-8",
             )
-            for output_format in ("text", "json"):
-                with self.subTest(format=output_format):
-                    result = subprocess.run(  # noqa: S603 - fixed CLI arguments and a locally created temporary path
-                        [
-                            sys.executable,
-                            "-m",
-                            "pyroma",
-                            "--format",
-                            output_format,
-                            "--skip-tests",
-                            "CheckManifest",
-                            directory,
-                        ],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-                    self.assertEqual(result.returncode, 2, result.stderr)
-                    for secret in ("review-user", "review-password", "review-token", "example.invalid", "[feature]"):
-                        self.assertNotIn(secret, result.stdout + result.stderr)
-                    self.assertIn("example", result.stdout)
-                    if output_format == "json":
-                        document = json.loads(result.stdout)
-                        self.assertEqual(document["rating"], 0)
-                        problem = next(p for p in document["problems"] if p["test"] == "DirectUrlDependency")
-                        self.assertTrue(problem["fatal"])
-                        self.assertEqual(problem["category"], "index")
+            with contextlib.chdir(outside):
+                for output_format in ("text", "json"):
+                    with self.subTest(format=output_format):
+                        result = self._run_subprocess(
+                            [
+                                "-m",
+                                "pyroma",
+                                "--format",
+                                output_format,
+                                "--skip-tests",
+                                "CheckManifest",
+                                directory,
+                            ],
+                        )
+                        self.assertEqual(result.returncode, 2, result.stderr)
+                        self._assert_no_credentials(result)
+                        self.assertIn("example", result.stdout)
+                        if output_format == "json":
+                            document = json.loads(result.stdout)
+                            self.assertEqual(document["rating"], 0)
+                            problem = next(p for p in document["problems"] if p["test"] == "DirectUrlDependency")
+                            self.assertTrue(problem["fatal"])
+                            self.assertEqual(problem["category"], "index")
+
+    def _assert_no_credentials(self, result: "subprocess.CompletedProcess[str]") -> None:
+        for secret in ("review-user", "review-password", "review-token", "example.invalid", "[feature]"):
+            self.assertNotIn(secret, result.stdout + result.stderr)
+
+    def test_subprocess_import_matches_parent_outside_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as outside, contextlib.chdir(outside):
+            result = self._run_subprocess(["-c", "import pyroma; print(pyroma.__file__)"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(Path(result.stdout.strip()).resolve(), Path(pyroma.__file__).resolve())
+
+    def test_malformed_dependencies_do_not_echo_inputs_or_parser_errors(self) -> None:
+        malformed = (
+            "example[feature] @ https://review-user:review-password@example.invalid/a?token=review-token"
+            ' ; extra >> "test"'
+        )
+        result = ratings.DependencySpecifiers().test({"requires-dist": ["requests>=2", malformed, "bad > >"]})
+        self.assertIs(result.outcome, False)
+        self.assertEqual(
+            result.message,
+            "Your Requires-Dist entries have problems:\n"
+            "Requires-Dist entry #2 is not a valid dependency specifier.\n"
+            "Requires-Dist entry #3 is not a valid dependency specifier.",
+        )
+
+    def test_malformed_dependency_credentials_are_absent_from_real_cli_reports(self) -> None:
+        dependency = "example[feature] @ https://review-user:review-password@example.invalid/a?token=review-token"
+        metadata = (
+            "Metadata-Version: 2.4\nName: credential-test\nVersion: 1.0\n"
+            f'Requires-Dist: {dependency}\nRequires-Dist: {dependency} ; extra >> "test"\n\nDescription.\n'
+        )
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = Path(directory)
+            (root / "pyproject.toml").write_text(
+                '[build-system]\nrequires = []\nbuild-backend = "review_backend"\nbackend-path = ["."]\n',
+                encoding="utf-8",
+            )
+            # Emit raw Core Metadata; ordinary backends reject malformed TOML dependencies before rating.
+            (root / "review_backend.py").write_text(
+                "from pathlib import Path\n\n"
+                "def prepare_metadata_for_build_wheel(metadata_directory, config_settings=None):\n"
+                "    destination = Path(metadata_directory) / 'credential_test-1.0.dist-info'\n"
+                "    destination.mkdir()\n"
+                f"    (destination / 'METADATA').write_text({metadata!r}, encoding='utf-8')\n"
+                "    return destination.name\n",
+                encoding="utf-8",
+            )
+            with contextlib.chdir(outside):
+                for output_format in ("text", "json"):
+                    with self.subTest(format=output_format):
+                        result = self._run_subprocess(
+                            ["-m", "pyroma", "--format", output_format, "--skip-tests", "CheckManifest", directory]
+                        )
+                        self.assertEqual(result.returncode, 2, result.stderr)
+                        self._assert_no_credentials(result)
+                        self.assertIn("Requires-Dist entry #2", result.stdout)
+                        self.assertNotIn("Expected a marker", result.stdout + result.stderr)
+                        if output_format == "json":
+                            problem = next(
+                                p for p in json.loads(result.stdout)["problems"] if p["test"] == "DependencySpecifiers"
+                            )
+                            self.assertEqual(problem["category"], "spec")
+
+    def test_backend_floors_include_wildcard_prereleases(self) -> None:
+        cases = (
+            (["setuptools==77.*"], False),
+            (["setuptools==77.0.*"], False),
+            (["setuptools>=77rc1"], False),
+            (["setuptools>=77"], True),
+            (["setuptools~=77.0"], True),
+            (["setuptools==77.*", "setuptools>=77"], True),
+        )
+        for requirements, expected in cases:
+            with self.subTest(requirements=requirements):
+                self.assertIs(
+                    ratings.BuildBackendVersionFloor().test(self._backend_data(requirements)).outcome, expected
+                )
 
     def test_direct_url_names_are_sorted_and_deduplicated(self) -> None:
         data = COMPLETE.copy()
@@ -1588,10 +1669,46 @@ class ReviewFixRegressionTest(unittest.TestCase):
             ('[x](docs/a.md "unclosed)', []),
             ("[unknown][missing]", []),
             ("[x](#section) [x](//example.com/x) [x](mailto:a@example.com)", []),
+            ("[![logo](images/logo.svg)](https://example.org)", ["images/logo.svg"]),
+            ("[![logo][image]][site]\n\n[image]: images/logo.svg\n[site]: https://example.org", ["images/logo.svg"]),
+            ("stray [\n\n[docs](docs/index.md)", ["docs/index.md"]),
+            ("stray [ before [docs](docs/index.md)", ["docs/index.md"]),
+            ("stray `\n\n[docs](docs/index.md)", ["docs/index.md"]),
+            ("stray `\n\n[docs](docs/index.md)\n\n` tail", ["docs/index.md"]),
+            ("intro\n[label]: docs/ref.md\n\n[label]", []),
+            ("# Heading\n[label]: docs/ref.md\n\n[label]", ["docs/ref.md"]),
+            ('<code>[x](docs/code.md)<a href="docs/code.md">x</a></code> [x](docs/real.md)', ["docs/real.md"]),
+            ('<pre><img src="images/code.png"/></pre>\n\n[x](docs/real.md)', ["docs/real.md"]),
+            ('<script><img src="images/code.png"/></script>\n\n[x](docs/real.md)', ["docs/real.md"]),
+            ('<style><a href="docs/code.md">x</a></style>\n\n[x](docs/real.md)', ["docs/real.md"]),
+            ("<code><code>[x](docs/code.md)</code>[x](docs/code.md)</code> [x](docs/real.md)", ["docs/real.md"]),
+            ("<code>[x](docs/code.md)</span>[x](docs/code.md)</code> [x](docs/real.md)", ["docs/real.md"]),
+            ("<code/>[x](docs/real.md)", ["docs/real.md"]),
+            ("<code>\n\n[x](docs/code.md)\n\n</code>\n\n[x](docs/real.md)", ["docs/real.md"]),
+            ("<code>\n\n[ref]: docs/code.md\n\n</code>\n\n[ref]", []),
+            ("<code>\n\n[ref]: docs/code.md\n\n</code>\n\n[ref]: docs/real.md\n\n[ref]", ["docs/real.md"]),
+            ("> <code>\n>\n> [ref]: docs/code.md\n>\n> </code>\n\n[ref]", []),
+            ("`<code>`\n\n[ref]: docs/real.md\n\n[ref]", ["docs/real.md"]),
+            ("intro\u2028text\n\n<code>\n\n[ref]: docs/code.md\n\n</code>\n\n[ref]", []),
+            ("<code>\r\n\r\n[ref]: docs/code.md\r\n\r\n</code>\r\n\r\n[ref]", []),
+            ("![alt [x](docs/alt.md)](images/logo.svg)", ["images/logo.svg"]),
+            (
+                '[x](docs/first.md) <a href="docs/second.md">x</a> ![x](images/third.svg)',
+                ["docs/first.md", "docs/second.md", "images/third.svg"],
+            ),
+            ('[x](docs/a.md) <a href="docs/b.md">x</a> [x](docs/a.md) [x](docs/b.md)', ["docs/a.md", "docs/b.md"]),
         )
         for description, expected in cases:
             with self.subTest(description=description):
                 self.assertEqual(ratings._relative_description_targets(description, "text/markdown"), expected)
+
+    def test_many_unique_markdown_and_html_targets_preserve_order(self) -> None:
+        count = 1000
+        description = " ".join(
+            f'[x](docs/{number}.md) <img src="images/{number}.svg"> [x](docs/{number}.md)' for number in range(count)
+        )
+        expected = [target for number in range(count) for target in (f"docs/{number}.md", f"images/{number}.svg")]
+        self.assertEqual(ratings._relative_description_targets(description, "text/markdown"), expected)
 
     def test_readme_content_type_overrides_and_emission(self) -> None:
         cases = (
@@ -2132,6 +2249,7 @@ class ProjectDataTest(unittest.TestCase):
                 package = Path(directory) / layout
                 package.mkdir(parents=True)
                 (package / "py.typed").write_text("", encoding="utf-8")
+                (package / "module.py").write_text("", encoding="utf-8")
                 self.assertEqual(projectdata.typing_facts(directory), (True, False))
 
     def test_complete_and_partial_stub_layouts(self) -> None:
@@ -2159,10 +2277,186 @@ class ProjectDataTest(unittest.TestCase):
                 package.mkdir(parents=True)
                 (package / "py.typed").write_text("", encoding="utf-8")
                 (package / "__init__.pyi").write_text("", encoding="utf-8")
-            (root / "custom-env" / "pyvenv.cfg").write_text("", encoding="utf-8")
+            for name in ("venv", "env", "custom-env"):
+                (root / name / "pyvenv.cfg").write_text("", encoding="utf-8")
             (root / "linked").symlink_to(root / "build", target_is_directory=True)
             (root / "py.typed").symlink_to(root / "build" / "example-stubs" / "py.typed")
             self.assertEqual(projectdata.typing_facts(root), (False, False))
+
+    def test_reserved_directory_names_can_be_source_packages(self) -> None:
+        layouts = (
+            "src/build",
+            "src/dist",
+            "src/_build",
+            "src/env",
+            "src/venv",
+            "src/virtualenv",
+            "build",
+            "dist",
+            "_build",
+            "env",
+            "venv",
+            "virtualenv",
+            "custom/python/pkg/build",
+        )
+        for layout in layouts:
+            with self.subTest(layout=layout), tempfile.TemporaryDirectory() as directory:
+                package = Path(directory) / layout
+                package.mkdir(parents=True)
+                (package / "module.py").touch()
+                (package / "py.typed").touch()
+                self.assertEqual(projectdata.typing_facts(directory), (True, False))
+
+    def test_isolated_markers_need_source_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "module.py").touch()
+            (root / "py.typed").touch()
+            for name in ("docs", "tests", "pkg"):
+                package = root / name
+                package.mkdir()
+                (package / "py.typed").touch()
+            self.assertEqual(projectdata.typing_facts(root), (False, False))
+            namespace = root / "pkg" / "namespace" / "subpackage"
+            namespace.mkdir(parents=True)
+            (namespace / "module.py").touch()
+            self.assertEqual(projectdata.typing_facts(root), (True, False))
+            (root / "pkg" / "py.typed").unlink()
+            self.assertEqual(projectdata.typing_facts(root), (False, False))
+            # A Python-bearing test package is eligible; this scan does not prove wheel inclusion.
+            (root / "tests" / "module.py").touch()
+            self.assertEqual(projectdata.typing_facts(root), (True, False))
+
+    def test_source_symlinks_do_not_supply_marker_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "pkg"
+            package.mkdir()
+            (package / "py.typed").touch()
+            (root / "real.py").touch()
+            (package / "module.py").symlink_to(root / "real.py")
+            self.assertEqual(projectdata.typing_facts(root), (False, False))
+            (package / "module.py").unlink()
+            (package / "module.py").touch()
+            (package / "py.typed").unlink()
+            (package / "py.typed").mkdir()
+            self.assertEqual(projectdata.typing_facts(root), (False, False))
+
+    def test_inaccessible_typing_entries_do_not_hide_valid_siblings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            for name in ("blocked", "valid"):
+                package = root / name
+                package.mkdir()
+                (package / "module.py").touch()
+                (package / "py.typed").touch()
+            original_lstat = Path.lstat
+            original_stat = Path.stat
+
+            def denied_lstat(path: Path):
+                if path == root / "blocked" / "py.typed":
+                    raise PermissionError
+                return original_lstat(path)
+
+            def denied_stat(path: Path, *, follow_symlinks: bool = True):
+                if path == root / "blocked" / "pyvenv.cfg":
+                    raise PermissionError
+                return original_stat(path, follow_symlinks=follow_symlinks)
+
+            for method, replacement in (("lstat", denied_lstat), ("stat", denied_stat)):
+                with self.subTest(method=method), unittest.mock.patch.object(Path, method, new=replacement):
+                    self.assertEqual(projectdata.typing_facts(root), (True, False))
+                    (root / "valid" / "py.typed").unlink()
+                    self.assertEqual(projectdata.typing_facts(root), (False, False))
+                (root / "valid" / "py.typed").touch()
+
+    def test_inaccessible_source_file_does_not_supply_marker_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            package = root / "pkg"
+            package.mkdir()
+            (package / "module.py").touch()
+            (package / "py.typed").touch()
+            original_lstat = Path.lstat
+
+            def denied_lstat(path: Path):
+                if path == package / "module.py":
+                    raise PermissionError
+                return original_lstat(path)
+
+            with unittest.mock.patch.object(Path, "lstat", new=denied_lstat):
+                self.assertEqual(projectdata.typing_facts(root), (False, False))
+
+    def test_stub_marker_probe_and_read_errors_are_not_complete_stubs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            package = root / "example-stubs"
+            package.mkdir()
+            (package / "__init__.pyi").touch()
+            marker = package / "py.typed"
+            marker.touch()
+            original_lstat = Path.lstat
+
+            def denied_lstat(path: Path):
+                if path == marker:
+                    raise PermissionError
+                return original_lstat(path)
+
+            with unittest.mock.patch.object(Path, "lstat", new=denied_lstat):
+                self.assertEqual(projectdata.typing_facts(root), (False, False))
+            with unittest.mock.patch.object(Path, "read_text", side_effect=PermissionError("stub marker read denied")):
+                self.assertEqual(projectdata.typing_facts(root), (True, False))
+            marker.write_bytes(b"\xff")
+            self.assertEqual(projectdata.typing_facts(root), (True, False))
+
+    def test_missing_and_inaccessible_typing_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(projectdata.typing_facts(Path(directory) / "missing"), (False, False))
+            with unittest.mock.patch.object(Path, "resolve", side_effect=PermissionError("root resolution denied")):
+                self.assertEqual(projectdata.typing_facts(directory), (False, False))
+
+    def test_inaccessible_generated_directory_is_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "build").mkdir()
+            original_scandir = projectdata.os.scandir
+
+            def denied_scandir(path: projectdata.Pathish):
+                if Path(path) == root / "build":
+                    raise PermissionError
+                return original_scandir(path)
+
+            with unittest.mock.patch.object(projectdata.os, "scandir", new=denied_scandir):
+                self.assertEqual(projectdata.typing_facts(root), (False, False))
+
+    def test_irrelevant_files_do_not_incidentally_get_stat_probes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            package = root / "pkg"
+            package.mkdir()
+            module = package / "module.py"
+            marker = package / "py.typed"
+            module.touch()
+            marker.touch()
+            original_lstat = Path.lstat
+            probed: list[Path] = []
+
+            def counted_lstat(path: Path):
+                probed.append(path)
+                return original_lstat(path)
+
+            counts = []
+            for count in (100, 1000):
+                for number in range(count):
+                    (package / f"unrelated-{number}.txt").touch()
+                probed.clear()
+                with unittest.mock.patch.object(Path, "lstat", new=counted_lstat):
+                    self.assertEqual(projectdata.typing_facts(root), (True, False))
+                self.assertEqual(probed.count(module), 1)
+                self.assertEqual(probed.count(marker), 1)
+                self.assertFalse(any(path.suffix == ".txt" for path in probed))
+                counts.append(len(probed))
+            self.assertEqual(counts[0], counts[1])
 
     @unittest.mock.patch("pyroma.projectdata.build_metadata")
     def test_typing_facts_flow_to_rating(self, metadata_mock: unittest.mock.Mock) -> None:

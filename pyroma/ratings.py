@@ -761,12 +761,13 @@ class DependencySpecifiers(BaseTest):
 
         errors = []
         warnings = []
-        for raw_requirement in requirements:
+        for position, raw_requirement in enumerate(requirements, start=1):
             requirement = str(raw_requirement)
             try:
                 parsed = Requirement(requirement)
-            except InvalidRequirement as e:
-                errors.append(f"'{requirement}' is not a valid dependency specifier: {e}")
+            except InvalidRequirement:
+                # Both the input and packaging's error can contain credentials.
+                errors.append(f"Requires-Dist entry #{position} is not a valid dependency specifier.")
                 continue
 
             # Valid direct references may also trigger syntax advisories.
@@ -1349,10 +1350,12 @@ def _relative_description_targets(description: str, content_type: str) -> "list[
         targets = destinations(description)
     else:
         targets = [match[1] for pattern in _REST_TARGET_RES for match in pattern.finditer(description)]
-    # A list rather than a set, so the order is deterministic.
+    # Preserve document order without repeatedly searching the output list.
     found: list[str] = []
+    seen: set[str] = set()
     for target in targets:
-        if target not in found and _is_relative_target(target):
+        if target not in seen and _is_relative_target(target):
+            seen.add(target)
             found.append(target)
     return found
 

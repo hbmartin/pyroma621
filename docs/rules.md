@@ -72,7 +72,7 @@ pyroma's own exit code.
 | --- | --- |
 | `PyprojectTomlValid` | `pyproject.toml` must parse and validate against the registered schemas. |
 | `PyProjectProjectTable` | `[project]` table rules that schema validation does not catch. Fatal. |
-| `DependencySpecifiers` | `Requires-Dist` entries must be valid dependency specifiers. |
+| `DependencySpecifiers` | `Requires-Dist` entries must be valid dependency specifiers. Malformed entries are identified by their one-based position, without echoing input or parser errors that may contain credentials. |
 | `DescriptionContentType` | `Description-Content-Type` must be a known type with valid parameters. |
 
 ## `index` &mdash; a package index will reject this
@@ -112,7 +112,7 @@ pyroma's own exit code.
 | `BuildBackendVersionFloor` | *Advisory.* PEP 639 licensing needs `setuptools>=77.0.0` or `hatchling>=1.27`. Flit needs 3.11 for simple SPDX identifiers and `license-files`, or 3.12 for supported compound or parenthesized expressions. See the conservative handling below. |
 | `LicenseFilesExist` | *Advisory.* Every `license-files` pattern should match a real file. |
 | `ReadmeContentTypeMatch` | *Advisory.* Emitted metadata must match the explicit content type in a readme table, or the extension inferred for a string declaration. Media types are compared independently of parameters. Explicit overrides are allowed. |
-| `TypedMarker` | *Advisory.* Source-tree `py.typed` markers or complete `*-stubs` packages containing `.pyi` files should agree with `Typing :: Typed`. Partial stub packages require a marker. This does not verify wheel contents. |
+| `TypedMarker` | *Advisory.* Source-tree `py.typed` markers with Python/stub source evidence, or complete `*-stubs` packages containing `.pyi` files, should agree with `Typing :: Typed`. Partial stub packages require a marker. This does not verify wheel contents. |
 | `ProjectUrlLabelCollision` | *Advisory.* Two labels that normalize alike collapse into one link. |
 
 ## `practice` &mdash; opinionated recommendations
@@ -142,6 +142,12 @@ unless unconditional constraints already prove the required floor. Unknown
 backends and unknown Flit feature requirements, including `WITH` expressions,
 are skipped rather than assigned a guessed minimum.
 
+Floors are strict guarantees over admitted versions, including prereleases.
+For example, `setuptools==77.*` admits `77rc1`, which is below the final
+`77.0.0` floor, so it warns even though ordinary resolution prefers final
+releases. `setuptools>=77` or `setuptools~=77.0` excludes those older
+prereleases and passes.
+
 Runtime dependency checks exclude a dependency only when every possible marker
 branch requires a selected extra. Conditions such as `extra != "test"`,
 `extra == ""`, and an extra condition joined by `or` to another environment
@@ -149,19 +155,49 @@ condition remain eligible. Uncertain conditions are retained, without using
 the environment of the machine running pyroma to decide applicability.
 
 Typing facts come from a recursive source scan, including namespace subpackages
-and custom source directories. Hidden directories, virtual environments,
-caches, build output and `node_modules` are pruned; directory symlinks are not
-followed and marker symlinks are not counted. Missing source facts skip the
-typing advisory.
+and custom source directories. A marker must be a regular file below the
+project root, with a regular `.py` or `.pyi` file in its directory or a scanned
+descendant. Isolated documentation/test markers do not count; Python-bearing
+documentation/test packages can still qualify, since this does not prove
+wheel inclusion. Hidden directories, caches and `node_modules` are pruned.
+Virtual environments are identified by `pyvenv.cfg`, not their directory
+names. Root `build`, `dist` and `_build` directories are pruned unless they
+contain direct Python/stub source files; nested packages with those names
+are retained. Directory symlinks are not followed, and file symlinks do not
+provide markers or source evidence. Inaccessible entries are skipped without
+discarding accessible siblings, and unrelated filenames are not statted.
+Missing source facts skip the typing advisory.
 
-Markdown link extraction covers unambiguous inline links and images, full,
-collapsed and shortcut reference links, and HTML `href`/`src` attributes.
+Markdown link extraction uses CommonMark tokens from `markdown-it-py`, without
+rendering HTML. It covers inline links and images, images nested inside links,
+full, collapsed and shortcut reference links, and HTML `href`/`src` attributes.
 Reference labels ignore case and normalize whitespace; the first definition
 wins. Angle-delimited destinations, balanced parentheses, optional titles,
 escapes and entities are handled. Fenced and indented code, inline code, HTML
-comments and literal HTML code regions are ignored. This is a conservative
-extractor, not a complete CommonMark renderer: malformed or ambiguous syntax,
-complex block nesting and extension-specific constructs may be skipped.
+comments and literal HTML `pre`, `code`, `script` and `style` regions are
+ignored. Reference definitions respect paragraph boundaries, and unmatched
+brackets or backticks do not hide destinations in later paragraphs. Image
+alt text is not scanned for links. Destinations retain document order, with
+duplicates listed once. Extension-specific syntax is not enabled.
+
+### Markdown extraction performance
+
+The following local measurements use CPython 3.13.15 on macOS arm64 and report
+the median of five calls to `_relative_description_targets`. Input construction
+is outside the timed region. Markdown items are `[x](docs/N.md)`, HTML items
+are `<a href="html/N.md">x</a>`, and mixed items contain one of each. Each
+destination is unique, and items are separated by spaces.
+
+| Input | 2,000 items | 4,000 items | 8,000 items |
+| --- | ---: | ---: | ---: |
+| Markdown links | 20.4 ms | 43.7 ms | 89.7 ms |
+| HTML links | 27.0 ms | 56.8 ms | 131.6 ms |
+| Mixed links | 51.6 ms | 113.9 ms | 246.1 ms |
+
+These inputs show approximately linear scaling after removing repeated document
+copies and list searches. Measurements are informational, rather than fixed CI
+timing thresholds. Regression tests verify extraction order and that increasing
+unrelated source files from 100 to 1,000 does not increase typing-file stat probes.
 
 ## `internal` &mdash; pyroma could not do its job
 

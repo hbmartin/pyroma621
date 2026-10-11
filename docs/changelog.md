@@ -1,5 +1,33 @@
 # Changelog
 
+## 6.1.0 (unreleased)
+
+- Malformed dependency diagnostics identify the one-based `Requires-Dist`
+  entry instead of echoing its contents or the parser error, preventing URL
+  credentials and tokens from appearing in text and JSON reports.
+- Typing markers require Python or stub sources in their directory or a
+  descendant. Isolated markers in documentation and test directories no
+  longer imply package typing. Inaccessible entries are skipped individually,
+  and unrelated files do not incur stat probes. Virtual environments are
+  identified by `pyvenv.cfg`; nested packages named `build`, `dist`, `_build`,
+  `env`, or `venv` are retained. Root build-output names are retained when
+  they contain direct Python or stub sources. These remain source heuristics,
+  not verification of wheel contents.
+- README links and images now use CommonMark parsing through
+  `markdown-it-py>=4.2.0`, including images inside links and block-aware
+  reference definitions. Stray brackets and backticks no longer hide links
+  in subsequent paragraphs. HTML destinations remain supported, excluding
+  comments and literal code regions. Findings follow document order and are
+  deduplicated without repeated linear searches.
+- Backend version floors remain strict: wildcard pins can admit prereleases
+  below a required final release and therefore trigger an advisory. Explicit
+  README content-type overrides remain supported.
+- CLI credential regressions now exercise the package under test even when
+  invoked outside its checkout, including a backend emitting malformed Core
+  Metadata. README content-type regressions assert rule outcomes directly.
+- Source distributions include `uv.lock` and exclude macOS Finder metadata,
+  keeping manifest checks consistent with version-controlled files.
+
 ## 6.0.0 (unreleased)
 
 - Result dataclasses `TestResult`, `Problem`, and `RatedProject` now require
