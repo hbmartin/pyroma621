@@ -3,11 +3,12 @@
 Run the test suite with pytest:
 
 ```console
-$ python -m pytest
+$ uv sync --locked --no-default-groups --group test
+$ uv run --locked --no-default-groups --group test python -bb -X dev -m pytest --cov --cov-report=term-missing --cov-report=xml
 ```
 
-The test extra includes Hypothesis. Its generated metadata cases run as part
-of the normal pytest and tox suites, including the cross-platform CI matrix.
+The test dependency group includes Hypothesis. Its generated metadata cases run as part
+of the normal pytest and tox suites, including the Linux CI matrix.
 
 The separate `tests/property` suite checks metadata boundaries, marker
 semantics, backend constraints, Markdown destinations, rating options, and
@@ -48,10 +49,10 @@ exactly because the project enables every stable rule; CI and pre-commit use
 the same group:
 
 ```console
-$ uv run --only-group lint ruff check --force-exclude .
-$ uv run --only-group lint ruff format --force-exclude .
-$ uv run --extra test --group typecheck ty check
-$ uv run --extra test --group typecheck pyrefly check
+$ uv run --locked --only-group lint ruff check --force-exclude .
+$ uv run --locked --only-group lint ruff format --force-exclude .
+$ uv run --locked --group test --group typecheck ty check
+$ uv run --locked --group test --group typecheck pyrefly check
 ```
 
 Or simply run all the pre-commit hooks:
@@ -68,7 +69,7 @@ them repository-wide.
 
 ### Experimental garuff check
 
-[garuff](https://github.com/gahjelle/garuff) runs in a separate, advisory CI
+[garuff](https://github.com/gahjelle/garuff) runs in a separate, blocking CI
 job. Run the identical check locally with uv installed:
 
 ```console
@@ -85,12 +86,10 @@ the top-level modules explicitly. The project's `[tool.garuff]` configuration
 disables `GAC010` (function docstrings), `GAC008` (positional parameter limits),
 and `GAC011` (possessive example names). The remaining default rules stay enabled.
 
-CI retains the check's nonzero exit status, while job-level
-`continue-on-error` keeps it advisory. Standard output and errors appear in
-the job summary and the downloadable `garuff-report` artifact. Check the
-report before treating a failed run as a code defect: installation errors,
-configuration failures, and checker crashes are also possible. Promote the
-job to a merge gate only after evaluating its rules and stability.
+CI retains the check's nonzero exit status and blocks on findings or setup/checker
+failures. Standard output and errors appear in the job summary and downloadable
+`garuff-report` artifact. Inspect the report to distinguish code findings from
+installation errors, configuration failures, or checker crashes.
 
 Initial evaluation on October 10, 2026, reported **275 findings**:
 
@@ -126,8 +125,8 @@ Both crashes return exit code 1, the same as ordinary lint findings.
 A clean one-file project returns 0, and missing paths or an unknown
 configuration key return 2 with a diagnostic. These probes were run in
 temporary projects; this repository's configuration did not trigger either
-crash. The advisory job and saved stderr make these failures visible without
-blocking unrelated work.
+crash. The blocking job and saved stderr make these failures visible; checker crashes
+fail CI just as violations do.
 
 The first source installation succeeded but uv 0.13.0 warned that upstream's
 `uv_build>=0.11.26,<0.12.0` build requirement does not include its current
@@ -146,8 +145,8 @@ Final validation passes all 152 tests on Python 3.11 with 97% coverage, Ruff
 linting and formatting, ty, pyrefly, actionlint, TOML/YAML/whitespace hooks,
 and wheel/sdist builds. The package rates itself 10/10 with matching source
 and manifest files. Garuff reports zero violations on Python 3.14 and 3.15.
-The workflow has been checked locally; a hosted GitHub Actions run has not
-yet been performed.
+At that initial evaluation, the workflow had been checked locally but had
+not yet run on hosted GitHub Actions.
 
 ## Packaging and quality checks
 
@@ -160,9 +159,9 @@ uv build
 Run the same self-rating, complexity, and dependency checks used in CI:
 
 ```console
-uv run --no-default-groups --extra test pyroma --min 10 .
-uv run --only-group quality lizard pyroma --exclude "pyroma/testdata/*" --warnings_only
-uv run --no-default-groups --group quality deptry . --github-output
+uv run --locked --no-default-groups --group test pyroma --no-config --strict --min 10 .
+uv run --locked --only-group quality lizard pyroma --exclude "pyroma/testdata/*" --warnings_only
+uv run --locked --no-default-groups --group quality deptry . --github-output
 ```
 
 Lizard uses its default strict threshold of 15 and must report no warnings.
@@ -172,7 +171,7 @@ The project-specific Semgrep rule prevents URL credentials and signed query
 parameters from being copied into user-facing exceptions:
 
 ```console
-uv run --only-group quality semgrep scan --config .semgrep.yml --error pyroma
+uv run --locked --only-group quality semgrep scan --config .semgrep.yml --error pyroma
 ```
 
 ## Adding a check
@@ -207,11 +206,67 @@ from the `pyroma/testdata/complete` directory.
 
 ## Publishing
 
-Creating a GitHub release starts `.github/workflows/publish.yml`. The workflow
-builds the distributions without OIDC credentials, then publishes the
-uploaded artifact from the protected `pypi` environment using PyPI Trusted
-Publishing. PyPI must have a trusted publisher configured for this repository,
-the `publish.yml` workflow, and the `pypi` environment.
+Creating a GitHub release starts `.github/workflows/publish.yml`. Its reusable
+package-validation workflow checks the lockfile, builds an sdist and a wheel from
+that sdist, and tests the installed wheel outside the checkout on Python 3.11 and
+3.14. Property and CI gate tests come from the sdist; unit tests and fixtures come
+from the wheel. A separate environment installs only runtime dependencies and
+checks imports, typing/license files, entry points, and both CLI invocation forms.
+
+The release tag (with an optional leading `v`) must match project, wheel, and
+sdist versions. Publishing consumes the same downloaded distributions after all
+validation succeeds, from the `pypi` environment using Trusted Publishing. No
+build/test job receives OIDC credentials. PyPI's publisher must identify this
+repository, `publish.yml`, and the `pypi` environment.
+
+Exercise the identical release validation without publishing:
+
+```console
+uv lock --check
+uv build
+python ci/package_artifacts.py validate --work /tmp/pyroma-release-check --python 3.11 --release-tag v6.1.0
+```
+
+The work directory must not already exist. GitHub's "Validate package artifacts"
+workflow also accepts a release tag through manual dispatch and never publishes.
+
+## CI gates and audits
+
+Coverage measures production `pyroma` modules, including the CLI entry module,
+with branches enabled. Tests and packaging fixtures are excluded. Every matrix
+entry must reach 94%, displayed with two decimal places, and uploads coverage XML.
+Pytest rejects unknown configuration, unknown markers, and unexpected warnings.
+The legacy backend warnings are asserted only by the four tests that need them.
+Fixtures are copied into temporary Git repositories so manifest tests work with
+an installed wheel as well as a checkout.
+
+CI pins uv 0.13.0, actionlint 1.7.12, and ShellCheck 0.11.0. Workflow-checker
+archives are verified against pinned SHA-256 digests. Strict self-rating and
+garuff are blocking. Project commands use `--locked`, so stale `uv.lock` files
+fail rather than being silently updated. Update dependencies intentionally with
+`uv lock` and commit the resulting lockfile.
+
+Audit every locked registry package/version, including versions selected only on
+other platforms or Python versions:
+
+```console
+uv run --locked --only-group audit python ci/audit_dependencies.py
+```
+
+The gate writes `audit-report.json` and hashed requirements, rejects incomplete
+reports and unsupported sources, and blocks every unaccepted advisory. Prefer
+compatible upgrades. `audit-exceptions.toml` starts empty. An exception must name
+an advisory (or alias), package, exact version, evidence-backed reason, owner
+(default `hbmartin`), and TOML `created`/`expires` dates. Dates use UTC; lifetimes
+cannot exceed 30 days. Expired, malformed, duplicate, and unused exceptions fail.
+Audit service failures also fail the job. No automatic fixes or blanket package
+exclusions are performed.
+
+The published `.[test]` extra has been removed. Use
+`uv sync --locked --no-default-groups --group test` for contributor tools.
+Plain `zest.releaser`, explicit `check-manifest`, and `pep440` replace its
+`recommended` extra, which installed upstream `pyroma` into the same namespace.
+Local tox uses the test dependency group and requires tox 4.22 or newer.
 
 ## Future ideas
 

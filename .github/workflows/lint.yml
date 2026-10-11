@@ -27,18 +27,70 @@ jobs:
         with:
           python-version: '3.x'
       - name: Set up uv
-        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: '0.13.0'
+      - name: Check lockfile
+        run: uv lock --check
       - name: Run pre-commit hooks
         uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
 
+  workflows:
+    name: Check workflows and shell scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install pinned workflow checkers
+        run: |
+          mkdir -p "$RUNNER_TEMP/workflow-tools"
+          cd "$RUNNER_TEMP/workflow-tools"
+          curl --fail --location --retry 3 -o actionlint.tar.gz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          curl --fail --location --retry 3 -o shellcheck.tar.xz https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz' | sha256sum --check
+          echo '8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  shellcheck.tar.xz' | sha256sum --check
+          tar -xzf actionlint.tar.gz actionlint
+          tar -xJf shellcheck.tar.xz --strip-components=1 shellcheck-v0.11.0/shellcheck
+          echo "$RUNNER_TEMP/workflow-tools" >> "$GITHUB_PATH"
+      - name: Check all workflows
+        run: actionlint -color
+
+  audit:
+    name: Audit all locked dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: '0.13.0'
+      - name: Check lockfile
+        run: uv lock --check
+      - name: Audit lockfile
+        run: uv run --locked --only-group audit python ci/audit_dependencies.py
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dependency-audit
+          path: |
+            audit-report.json
+            audit-report.requirements.txt
+          if-no-files-found: error
+
   garuff:
-    name: Run garuff (experimental, advisory)
+    name: Run garuff
 
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Evaluate the new checker without making findings or upstream failures
-    # a merge gate. The check retains its exit code and publishes its output.
-    continue-on-error: true
+    # Findings and checker/setup failures are blocking; retain diagnostics.
 
     steps:
       - name: Checkout
@@ -46,7 +98,11 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up uv
-        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: '0.13.0'
+      - name: Check lockfile
+        run: uv lock --check
       - name: Run garuff
         id: garuff
         run: |
@@ -58,9 +114,9 @@ jobs:
           GARUFF_OUTCOME: ${{ steps.garuff.outcome }}
         run: |
           {
-            echo '### garuff (experimental, advisory)'
+            echo '### garuff'
             printf 'Check outcome: %s\n\n' "$GARUFF_OUTCOME"
-            echo 'Findings and checker failures are advisory while garuff is evaluated.'
+            echo 'Findings and checker failures block this job.'
             echo '```text'
             if [ -f garuff-report.txt ]; then
               cat garuff-report.txt
@@ -89,11 +145,15 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up uv
-        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: '0.13.0'
+      - name: Check lockfile
+        run: uv lock --check
       - name: Run ty
-        run: uv run --extra test --group typecheck ty check
+        run: uv run --locked --group test --group typecheck ty check
       - name: Run pyrefly
-        run: uv run --extra test --group typecheck pyrefly check
+        run: uv run --locked --group test --group typecheck pyrefly check
 
   selfcheck:
     name: Run pyroma on itself
@@ -106,18 +166,18 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up uv
-        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: '0.13.0'
+      - name: Check lockfile
+        run: uv lock --check
       - name: Run pyroma
-        run: uv run --no-default-groups --extra test pyroma --min 10 .
+        run: uv run --locked --no-default-groups --group test pyroma --min 10 .
 
   selfcheck-strict:
     name: Run pyroma on itself, scoring advisory checks
 
     runs-on: ubuntu-latest
-    # Advisory checks are not a merge gate. This job surfaces what pyroma
-    # would say about itself under --strict; promote it to blocking once
-    # the remaining findings are addressed.
-    continue-on-error: true
 
     steps:
       - name: Checkout
@@ -125,9 +185,13 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up uv
-        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: '0.13.0'
+      - name: Check lockfile
+        run: uv lock --check
       - name: Run pyroma with advisory checks scored
-        run: uv run --no-default-groups --extra test pyroma --strict --min 10 .
+        run: uv run --locked --no-default-groups --group test pyroma --no-config --strict --min 10 .
 
   complexity:
     name: Run Lizard
@@ -140,9 +204,13 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up uv
-        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: '0.13.0'
+      - name: Check lockfile
+        run: uv lock --check
       - name: Check cyclomatic complexity
-        run: uv run --only-group quality lizard pyroma --exclude "pyroma/testdata/*" --warnings_only
+        run: uv run --locked --only-group quality lizard pyroma --exclude "pyroma/testdata/*" --warnings_only
 
   dependencies:
     name: Run deptry and Semgrep
@@ -155,8 +223,12 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up uv
-        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: '0.13.0'
+      - name: Check lockfile
+        run: uv lock --check
       - name: Check dependencies
-        run: uv run --no-default-groups --group quality deptry . --github-output
+        run: uv run --locked --no-default-groups --group quality deptry . --github-output
       - name: Check sensitive exception data
-        run: uv run --only-group quality semgrep scan --config .semgrep.yml --error pyroma
+        run: uv run --locked --only-group quality semgrep scan --config .semgrep.yml --error pyroma

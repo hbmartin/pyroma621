@@ -1,0 +1,4 @@
+# No accepted vulnerabilities. Upgrade compatible dependencies before adding an exception.
+# Each [[exceptions]] needs advisory, package, version, reason, owner, created, expires.
+# Dates are TOML dates in UTC; owner defaults to hbmartin. Maximum lifetime: 30 days.
+exceptions = []

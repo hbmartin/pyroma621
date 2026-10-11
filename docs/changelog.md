@@ -2,6 +2,14 @@
 
 ## 6.1.0 (unreleased)
 
+- Removed the published `test` extra. Contributor dependencies now use
+  `[dependency-groups].test`; install with `uv sync --group test`.
+- CI requires 94% production-only branch coverage, strict pytest configuration,
+  and unexpected warnings as errors. Garuff and strict self-rating now block.
+- Release distributions are tested outside the checkout before publishing;
+  dependency audits cover every locked package version and enforce expiring,
+  reviewed exceptions. Workflow linting and tool versions are pinned.
+
 - Malformed dependency diagnostics identify the one-based `Requires-Dist`
   entry instead of echoing its contents or the parser error, preventing URL
   credentials and tokens from appearing in text and JSON reports.
