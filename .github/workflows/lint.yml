@@ -191,7 +191,7 @@ jobs:
       - name: Check lockfile
         run: uv lock --check
       - name: Run pyroma with advisory checks scored
-        run: uv run --locked --no-default-groups --group test pyroma --strict --min 10 .
+        run: uv run --locked --no-default-groups --group test pyroma --no-config --strict --min 10 .
 
   complexity:
     name: Run Lizard
