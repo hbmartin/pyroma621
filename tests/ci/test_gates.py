@@ -6,15 +6,26 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tomllib
 import zipfile
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
+from ci import audit_dependencies
 from ci.audit_dependencies import evaluate, load_exceptions, locked_requirements
 from ci.package_artifacts import inspect
 
 TODAY = datetime.date(2026, 10, 11)
+_VALID_EXCEPTION = """[[exceptions]]
+advisory="GHSA-example"
+package="dependency"
+version="1"
+reason="No compatible fix; independently reviewed"
+created=2026-10-01
+expires=2026-10-20
+"""
 
 
 def test_lock_includes_other_platform_versions(tmp_path: Path) -> None:
@@ -74,6 +85,72 @@ def test_exception_requires_reason(tmp_path: Path) -> None:
         load_exceptions(path, TODAY)
 
 
+@pytest.mark.parametrize(
+    "entries",
+    [
+        "[1]",
+        '["bad"]',
+        "[true]",
+        "[[1]]",
+        '[{advisory="GHSA-example", package="dependency", version="1", reason="Reviewed", '
+        "created=2026-10-01, expires=2026-10-20}, 1]",
+    ],
+    ids=["integer", "string", "boolean", "array", "mixed"],
+)
+def test_exception_entries_must_be_tables(tmp_path: Path, entries: str) -> None:
+    path = tmp_path / "exceptions.toml"
+    path.write_text(f"exceptions={entries}\n", encoding="utf-8")
+    with pytest.raises(TypeError, match=r"^Each audit exception must be a TOML table\.$"):
+        load_exceptions(path, TODAY)
+
+
+@pytest.mark.parametrize(("owner_field", "expected"), [("", "hbmartin"), ('owner="maintainer"\n', "maintainer")])
+def test_exception_accepts_default_and_explicit_owners(tmp_path: Path, owner_field: str, expected: str) -> None:
+    path = tmp_path / "exceptions.toml"
+    path.write_text(_VALID_EXCEPTION + owner_field, encoding="utf-8")
+    entries = load_exceptions(path, TODAY)
+    assert len(entries) == 1
+    assert entries[0]["owner"] == expected
+
+
+@pytest.mark.parametrize("owner", ['" "', "1", "true"])
+def test_exception_rejects_invalid_owners(tmp_path: Path, owner: str) -> None:
+    path = tmp_path / "exceptions.toml"
+    path.write_text(_VALID_EXCEPTION + f"owner={owner}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Exception needs an owner"):
+        load_exceptions(path, TODAY)
+
+
+def test_malformed_exception_uses_controlled_main_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    lock = tmp_path / "uv.lock"
+    lock.write_text(
+        '[[package]]\nname="dependency"\nversion="1"\nsource={registry="https://pypi.org/simple"}\n'
+        'wheels=[{hash="sha256:' + "0" * 64 + '"}]\n',
+        encoding="utf-8",
+    )
+    exceptions = tmp_path / "exceptions.toml"
+    exceptions.write_text("exceptions=[1]\n", encoding="utf-8")
+    report = tmp_path / "audit-report.json"
+    runner = Mock(side_effect=AssertionError("Unexpected audit subprocess"))
+    monkeypatch.setattr(audit_dependencies.subprocess, "run", runner)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["audit_dependencies", "--lock", str(lock), "--exceptions", str(exceptions), "--report", str(report)],
+    )
+    with pytest.raises(SystemExit) as failure:
+        audit_dependencies.main()
+    assert failure.value.code == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "Audit failed: Each audit exception must be a TOML table.\n"
+    runner.assert_not_called()
+    assert not report.exists()
+    assert not report.with_suffix(".requirements.txt").exists()
+
+
 def test_audit_finding_alias_and_exact_version() -> None:
     report = {
         "dependencies": [
@@ -94,15 +171,24 @@ def test_incomplete_audit_fails(dependencies: list[dict[str, str]]) -> None:
         evaluate({"dependencies": dependencies}, {("dependency", "1")}, [])
 
 
-def distributions(tmp_path: Path, *, marker: bool = True) -> Path:
+def distributions(
+    tmp_path: Path,
+    *,
+    marker: bool = True,
+    version: str = "6.1.0",
+    wheel_version: str | None = None,
+    source_version: str | None = None,
+) -> Path:
     project = tmp_path / "pyproject.toml"
-    project.write_text('[project]\nversion="6.1.0"\n')
+    project.write_text(f'[project]\nversion="{version}"\n')
     with zipfile.ZipFile(tmp_path / "package.whl", "w") as archive:
         for name in ("__init__.py", "__main__.py", "tests.py", *(("py.typed",) if marker else ())):
             archive.writestr("pyroma/" + name, "")
-        archive.writestr("pyroma621-6.1.0.dist-info/METADATA", "Name: pyroma621\nVersion: 6.1.0\n")
+        archive.writestr(
+            "pyroma621-6.1.0.dist-info/METADATA", f"Name: pyroma621\nVersion: {wheel_version or version}\n"
+        )
     with tarfile.open(tmp_path / "package.tar.gz", "w:gz") as archive:
-        data = b"Name: pyroma621\nVersion: 6.1.0\n"
+        data = f"Name: pyroma621\nVersion: {source_version or version}\n".encode()
         member = tarfile.TarInfo("pyroma621-6.1.0/PKG-INFO")
         member.size = len(data)
         archive.addfile(member, io.BytesIO(data))
@@ -153,11 +239,105 @@ def test_stale_lock_fails(tmp_path: Path) -> None:
     uv = shutil.which("uv")
     assert uv is not None
     root = Path(__file__).resolve().parents[2]
-    shutil.copy(root / "uv.lock", tmp_path / "uv.lock")
-    config = (root / "pyproject.toml").read_text().replace('version = "6.1.0"', 'version = "99.0.0"', 1)
-    (tmp_path / "pyproject.toml").write_text(config)
+    version = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+    project = tmp_path / "pyproject.toml"
+    config = f'[project]\nname="lock-probe"\nversion="{version}"\nrequires-python=">=3.11"\n'
+    project.write_text(config)
+    command = [
+        uv,
+        "lock",
+        "--offline",
+        "--no-python-downloads",
+        "--cache-dir",
+        str(tmp_path / "cache"),
+        "--python",
+        sys.executable,
+    ]
+    subprocess.run(  # noqa: S603 - fixed executable and isolated offline lock probe
+        command, cwd=tmp_path, capture_output=True, text=True, timeout=30, check=True
+    )
+    lock = (tmp_path / "uv.lock").read_bytes()
+    replacement = "99.0.0" if version != "99.0.0" else "99.0.1"
+    changed = config.replace(f'version="{version}"', f'version="{replacement}"', 1)
+    assert changed != config
+    project.write_text(changed)
     result = subprocess.run(  # noqa: S603 - fixed executables and isolated CI probe arguments
-        [uv, "lock", "--check"], cwd=tmp_path, capture_output=True, text=True, timeout=30, check=False
+        [*command, "--check"], cwd=tmp_path, capture_output=True, text=True, timeout=30, check=False
     )
     assert result.returncode != 0
-    assert "lockfile" in (result.stdout + result.stderr).lower()
+    assert "lockfile" in result.stderr.lower()
+    assert "needs to be updated" in result.stderr
+    assert (tmp_path / "uv.lock").read_bytes() == lock
+
+
+@pytest.mark.parametrize("tag", ["v6.2.0-rc1", "6.2.0rc1", "v6.2.0RC1"])
+def test_artifact_versions_accept_equivalent_prereleases(tmp_path: Path, tag: str) -> None:
+    project = distributions(tmp_path, version="6.2.0-rc1", wheel_version="6.2.0rc1", source_version="6.2.0RC1")
+    assert inspect(tmp_path, project, tag)[2] == "6.2.0rc1"
+
+
+@pytest.mark.parametrize("field", ["project", "tag", "wheel", "source"])
+def test_invalid_artifact_versions_fail(tmp_path: Path, field: str) -> None:
+    project = distributions(
+        tmp_path,
+        version="invalid" if field == "project" else "6.1.0",
+        wheel_version="invalid" if field == "wheel" else None,
+        source_version="invalid" if field == "source" else None,
+    )
+    with pytest.raises(ValueError, match="Invalid version"):
+        inspect(tmp_path, project, "invalid" if field == "tag" else "")
+
+
+@pytest.mark.parametrize("field", ["wheel", "source"])
+def test_artifact_metadata_version_mismatch_fails(tmp_path: Path, field: str) -> None:
+    project = distributions(
+        tmp_path,
+        wheel_version="6.2.0" if field == "wheel" else None,
+        source_version="6.2.0" if field == "source" else None,
+    )
+    with pytest.raises(ValueError, match="name/version"):
+        inspect(tmp_path, project)
+
+
+def add_archive_member(tmp_path: Path, archive_type: str, name: str) -> None:
+    if archive_type == "wheel":
+        with zipfile.ZipFile(tmp_path / "package.whl", "a") as archive:
+            archive.writestr("pyroma/" + name, "fixture")
+    else:
+        path = tmp_path / "package.tar.gz"
+        with tarfile.open(path) as archive:
+            entries = [(member, archive.extractfile(member).read()) for member in archive.getmembers()]
+        with tarfile.open(path, "w:gz") as archive:
+            for member, data in entries:
+                archive.addfile(member, io.BytesIO(data))
+            member = tarfile.TarInfo("pyroma621-6.1.0/pyroma/" + name)
+            member.size = len(b"fixture")
+            archive.addfile(member, io.BytesIO(b"fixture"))
+
+
+@pytest.mark.parametrize("archive_type", ["wheel", "source"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "testdata/example.egg-info/PKG-INFO",
+        "__pycache__/x.pyc",
+        "cache.pyc",
+        "cache.pyo",
+        ".DS_Store",
+        "build/x.py",
+        "dist/x.whl",
+    ],
+)
+def test_generated_members_block_artifacts(tmp_path: Path, archive_type: str, name: str) -> None:
+    project = distributions(tmp_path)
+    add_archive_member(tmp_path, archive_type, name)
+    with pytest.raises(ValueError, match="Generated files") as failure:
+        inspect(tmp_path, project)
+    assert name in str(failure.value)
+
+
+def test_intentional_distribution_fixtures_remain_allowed(tmp_path: Path) -> None:
+    project = distributions(tmp_path)
+    for archive_type in ("wheel", "source"):
+        add_archive_member(tmp_path, archive_type, "testdata/distributions/complete-1.0.tar.gz")
+    inspect(tmp_path, project)

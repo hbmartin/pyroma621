@@ -16,12 +16,10 @@ from .strategies import (
     comparisons,
     environment,
     expressions,
-    property_settings,
     python_atoms,
 )
 
 
-@property_settings
 @given(expressions(python_atoms()))
 @example(Comparison("python_version", ">", "3.11"))
 @example(Comparison("python_full_version", ">=", "3.11.5", reversed=True))
@@ -44,7 +42,6 @@ def test_python_ranges_match_packaging(expression: Expression) -> None:
         assert versions.contains(Version(version)) is marker.evaluate(environment(version)), (marker, version)
 
 
-@property_settings
 @given(expressions(EXTRA_ATOMS))
 @example(Comparison("extra", "==", "test"))
 @example(Comparison("extra", "!=", "test"))
@@ -54,7 +51,6 @@ def test_extra_only_conditions_are_exact(expression: Expression) -> None:
     assert active_without_extra(marker) is marker.evaluate(environment("3.11.5"))
 
 
-@property_settings
 @given(expressions(EXTRA_ATOMS | ENVIRONMENT_ATOMS | python_atoms()))
 @example(Boolean(Comparison("extra", "==", "test"), "and", Comparison("os_name", "==", "posix")))
 @example(Boolean(Comparison("extra", "==", "test"), "or", Comparison("python_version", ">=", "3.11")))

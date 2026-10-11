@@ -1,7 +1,12 @@
 """Generated email and index inputs with all external providers mocked."""
 
 import copy
+import json
+import os
+import subprocess
+import sys
 from email.message import Message
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -12,13 +17,17 @@ from packaging.utils import canonicalize_name
 from pyroma import projectdata, pypidata
 from pyroma.metadata import Metadata, normalize
 
-from .strategies import TEXT, WORDS, property_settings
+from .strategies import TEXT, WORDS
 
 
 @st.composite
 def header_cases(draw: st.DrawFn) -> tuple[Message, dict[str, object]]:
     fields = {"Name": ["package-" + draw(WORDS)], "Version": ["1.0"]}
-    for field in draw(st.sets(st.sampled_from(("Author-Email", "Classifier", "Requires-Dist", "License-File")))):
+    for field in draw(
+        st.lists(
+            st.sampled_from(("Author-Email", "Classifier", "Requires-Dist", "License-File")), max_size=4, unique=True
+        )
+    ):
         fields[field] = draw(st.lists(TEXT.map(lambda text: "value-" + text[:1018]), min_size=1, max_size=4))
     variant = draw(st.sampled_from(("lower", "upper", "underscore", "dot")))
     message = Message()
@@ -32,6 +41,40 @@ def header_cases(draw: st.DrawFn) -> tuple[Message, dict[str, object]]:
         key = field.lower()
         expected[key] = values if field == "Classifier" or len(values) > 1 else values[0]
     return message, expected
+
+
+def test_header_choices_are_reproducible_across_hash_seeds() -> None:
+    source = """
+import json
+from hypothesis import given, settings, seed, Phase
+from tests.property.test_ingestion import header_cases
+
+snapshots = []
+@seed(1234)
+@settings(max_examples=25, deadline=None, database=None, phases=[Phase.generate])
+@given(header_cases())
+def probe(case):
+    message, expected = case
+    snapshots.append((list(message.raw_items()), expected))
+
+probe()
+print(json.dumps(snapshots, sort_keys=True))
+"""
+    snapshots = []
+    for hash_seed in ("1", "2"):
+        result = subprocess.run(  # noqa: S603 - fixed Python probe with an explicit hash seed
+            [sys.executable, "-c", source],
+            cwd=Path(__file__).resolve().parents[2],
+            env={**os.environ, "PYTHONHASHSEED": hash_seed},
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        snapshots.append(json.loads(result.stdout))
+    assert len(snapshots[0]) == 25
+    assert any("classifier" in expected for _headers, expected in snapshots[0])
+    assert snapshots[0] == snapshots[1]
 
 
 def extract(message: Message) -> Metadata:
@@ -57,7 +100,6 @@ def index_metadata(info: dict[str, object]) -> Metadata:
     return result
 
 
-@property_settings
 @given(header_cases())
 def test_header_spellings_repeated_values_and_order(case: tuple[Message, dict[str, object]]) -> None:
     message, expected = case
@@ -72,7 +114,6 @@ def test_header_spellings_repeated_values_and_order(case: tuple[Message, dict[st
     assert (list(message.raw_items()), message.get_payload()) == original
 
 
-@property_settings
 @given(first=WORDS, second=WORDS, separator=st.sampled_from(("-", "_", ".", "-_..")))
 def test_name_normalization_is_idempotent_and_matches_packaging(first: str, second: str, separator: str) -> None:
     raw = first.upper() + separator + second.upper()
@@ -82,7 +123,6 @@ def test_name_normalization_is_idempotent_and_matches_packaging(first: str, seco
 
 
 @pytest.mark.parametrize("field", ["Summary", "Classifier", "License-File", "Author-Email"])
-@property_settings
 @given(padding=st.sampled_from(("", " ", "  ")))
 def test_singleton_unknown_is_omitted(field: str, padding: str) -> None:
     message = Message()
@@ -93,7 +133,6 @@ def test_singleton_unknown_is_omitted(field: str, padding: str) -> None:
 
 
 @pytest.mark.parametrize("has_header", [False, True])
-@property_settings
 @given(payload=TEXT, header=WORDS)
 def test_description_header_precedence_and_payload_newline(payload: str, header: str, has_header: bool) -> None:
     message = Message()
@@ -105,7 +144,6 @@ def test_description_header_precedence_and_payload_newline(payload: str, header:
     assert result.get("description") == expected
 
 
-@property_settings
 @given(name=WORDS, classifiers=st.lists(WORDS, min_size=1, max_size=4), separator=st.sampled_from(("_", "-", ".")))
 def test_pypi_aliases_and_synthesized_keys(name: str, classifiers: list[str], separator: str) -> None:
     info: dict[str, object] = {
@@ -125,7 +163,6 @@ def test_pypi_aliases_and_synthesized_keys(name: str, classifiers: list[str], se
     assert info == original
 
 
-@property_settings
 @given(name=WORDS, classifiers=st.lists(WORDS, min_size=1, max_size=4), count=st.integers(1, 4))
 def test_shared_metadata_matches_between_email_and_index(name: str, classifiers: list[str], count: int) -> None:
     requirements = [f"dependency{index}>=1" for index in range(count)]

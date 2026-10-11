@@ -4,11 +4,36 @@
 
 - Removed the published `test` extra. Contributor dependencies now use
   `[dependency-groups].test`; install with `uv sync --group test`.
-- CI requires 94% production-only branch coverage, strict pytest configuration,
-  and unexpected warnings as errors. Garuff and strict self-rating now block.
+- CI requires 94% combined production coverage across statements and branches,
+  strict pytest configuration, and unexpected warnings as errors. Garuff and
+  strict self-rating now block.
 - Release distributions are tested outside the checkout before publishing;
-  dependency audits cover every locked package version and enforce expiring,
-  reviewed exceptions. Workflow linting and tool versions are pinned.
+  dependency audits cover every locked registry package version and enforce
+  expiring, reviewed exceptions. Malformed exception entries produce controlled
+  audit failures. Conflicting locked versions are audited in separate batches
+  and merged into one complete report. Tool failures retain their diagnostics;
+  unused exceptions report new vulnerabilities alongside the cleanup error.
+  Workflow linting and tool versions are pinned.
+- Artifact validation rejects generated metadata, caches, and build outputs;
+  builds exclude those files while retaining intentional distribution fixtures.
+  Release and metadata versions use PEP 440 equivalence, including prerelease
+  spellings. Local artifact validation supports Windows executable paths.
+- Package validation runs on pull requests, `master` pushes, and tags.
+  Redundant lock checks are removed where locked commands enforce the gate;
+  missing diagnostic uploads warn without obscuring an earlier failure.
+- Test fixture setup publishes its temporary path after preparation succeeds;
+  teardown restores the original source path so repeated module runs work.
+  Failed setup cleans up its temporary directory, and teardown restores state
+  even when cleanup raises. Fixture Git commands isolate inherited repository
+  variables and global excludes. Legacy fixture builds allow backend warnings
+  by category without depending on setuptools warning prose.
+- Hypothesis profiles load before pytest resolves command-line options,
+  including invocations with `.` or individual test files. The default profile
+  runs 100 examples without deadlines; the deep profile runs 1,000 and both
+  preserve inherited CI settings. Installed-wheel validation stages the shared
+  configuration. Header generation is reproducible across string hash seeds,
+  and rule assertions share a fixed date and handle advisory findings. Coherent
+  generated metadata excludes whitespace-only text; production scoring is unchanged.
 
 - Malformed dependency diagnostics identify the one-based `Requires-Dist`
   entry instead of echoing its contents or the parser error, preventing URL
@@ -16,25 +41,33 @@
 - Typing markers require Python or stub sources in their directory or a
   descendant. Isolated markers in documentation and test directories no
   longer imply package typing. Inaccessible entries are skipped individually,
-  and unrelated files do not incur stat probes. Virtual environments are
-  identified by `pyvenv.cfg`; nested packages named `build`, `dist`, `_build`,
-  `env`, or `venv` are retained. Root build-output names are retained when
-  they contain direct Python or stub sources. These remain source heuristics,
-  not verification of wheel contents.
+  and unrelated files do not incur stat probes. Virtual and Conda environments
+  are identified by `pyvenv.cfg` and `conda-meta/history`. Build-output names
+  are pruned at the scan root and nested project boundaries unless they contain
+  direct Python or stub sources. Packages and namespaces named `build`, `dist`,
+  `_build`, `env`, or `venv` elsewhere are retained. These remain source
+  heuristics, not verification of wheel contents.
 - README links and images now use CommonMark parsing through
   `markdown-it-py>=4.2.0`, including images inside links and block-aware
   reference definitions. Stray brackets and backticks no longer hide links
   in subsequent paragraphs. HTML destinations remain supported, excluding
-  comments and literal code regions. Findings follow document order and are
-  deduplicated without repeated linear searches.
+  comments and literal code regions. Misnested literal tags preserve other
+  open regions, and HTML-looking image alt text cannot change their state.
+  Markdown and HTML URLs normalize consistently before deduplication; findings
+  display readable Unicode while preserving reserved escapes, invalid UTF-8,
+  and encoded ASCII controls. Findings follow document order and are deduplicated
+  without repeated linear searches.
 - Backend version floors remain strict: wildcard pins can admit prereleases
   below a required final release and therefore trigger an advisory. Explicit
   README content-type overrides remain supported.
 - CLI credential regressions now exercise the package under test even when
-  invoked outside its checkout, including a backend emitting malformed Core
-  Metadata. README content-type regressions assert rule outcomes directly.
+  invoked outside its checkout, including a competing import path and a backend
+  emitting malformed Core Metadata. Subprocess tests assert their working
+  directory and preserve inherited import paths. README content-type regressions
+  assert rule outcomes directly.
 - Source distributions include `uv.lock` and exclude macOS Finder metadata,
-  keeping manifest checks consistent with version-controlled files.
+  keeping manifest checks consistent with version-controlled files. Repository
+  ignores also exclude `.DS_Store` for contributors without global ignores.
 
 ## 6.0.0 (unreleased)
 

@@ -1,5 +1,14 @@
 # pyroma
 
+[![PyPI - Version](https://img.shields.io/pypi/v/pyroma621)](https://pypi.org/project/pyroma621/)
+[![Lint](https://github.com/hbmartin/pyroma621/actions/workflows/lint.yml/badge.svg)](https://github.com/hbmartin/pyroma621/actions/workflows/lint.yml)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![ty](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ty/main/assets/badge/v0.json)](https://github.com/astral-sh/ty)
+[![CodeFactor](https://www.codefactor.io/repository/github/hbmartin/pyroma621/badge)](https://www.codefactor.io/repository/github/hbmartin/pyroma621)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/hbmartin/pyroma)
+[![twitter](https://img.shields.io/badge/@hmartin-00aced.svg?logo=twitter&logoColor=black)](https://twitter.com/hmartin)
+
+
 Pyroma rhymes with aroma, and is a product aimed at giving a rating of how well
 a Python project complies with the best practices of the Python packaging
 ecosystem, primarily PyPI, pip, Distribute etc, as well as a list of issues that
@@ -197,27 +206,6 @@ The project was created by Lennart Regebro, <regebro@gmail.com>
 
 The name "Pyroma" was coined by Wichert Akkerman, <wichert@wiggy.net>
 
-Contributors:
+This PEP621 fork maintained by Harold Martin
 
-- David Andreoletti
-- Godefroid Chapelle
-- Dmitry Vakhrushev
-- Hugo van Kemenade
-- Jeff Quast
-- Maurits van Rees
-- Hervé Beraud
-- Érico Andrei
-- Jakub Wilk
-- Andreas Lutro
-- Scott Colby
-- Andrew Murray
-- Nikita Sobolev
-- Charles Tapley Hoyt
-- Max Tyulin
-- Michael Howitz
-- Florian Bruhin
-- Christopher A.M. Gerlach
-- RuRo
-- Wesley Barroso Lopes
-- Alexander Bessman
-- Matt Norton
+[![Profile images of all the contributors](https://contrib.rocks/image?repo=hbmartin/pyroma)](https://github.com/hbmartin/pyroma/graphs/contributors)

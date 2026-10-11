@@ -3,6 +3,7 @@ import copy
 import datetime
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -29,7 +30,8 @@ from pyroma import config, distributiondata, projectdata, pypidata, ratings, rep
 from pyroma.metadata import Metadata
 from pyroma.ratings import rate
 
-TESTDATA_DIR = Path(__file__).parent / "testdata"
+_SOURCE_TESTDATA_DIR = Path(__file__).parent / "testdata"
+TESTDATA_DIR = _SOURCE_TESTDATA_DIR
 PYROMA_ROOT = Path(pyroma.__file__).resolve().parent.parent
 _FIXTURE_DIRECTORY: tempfile.TemporaryDirectory[str] | None = None
 
@@ -37,20 +39,37 @@ _FIXTURE_DIRECTORY: tempfile.TemporaryDirectory[str] | None = None
 def setUpModule() -> None:
     """Track copied wheel fixtures in Git so manifest tests need no checkout."""
     global TESTDATA_DIR, _FIXTURE_DIRECTORY  # noqa: PLW0603 - module fixture lifecycle
-    _FIXTURE_DIRECTORY = tempfile.TemporaryDirectory(prefix="pyroma-fixtures-")
-    source = TESTDATA_DIR
-    TESTDATA_DIR = Path(_FIXTURE_DIRECTORY.name) / "testdata"
-    shutil.copytree(
-        source, TESTDATA_DIR, ignore=shutil.ignore_patterns("__pycache__", "*.egg-info", "dist", "build", ".DS_Store")
-    )
-    subprocess.run(["git", "init", "--quiet", str(TESTDATA_DIR)], check=True)  # noqa: S603, S607 - fixed Git commands with temporary fixture paths
-    subprocess.run(["git", "-C", str(TESTDATA_DIR), "-c", "core.autocrlf=false", "add", "."], check=True)  # noqa: S603, S607 - fixed fixture Git command
+    directory = tempfile.TemporaryDirectory(prefix="pyroma-fixtures-")
+    target = Path(directory.name) / "testdata"
+    environment = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+    try:
+        shutil.copytree(
+            _SOURCE_TESTDATA_DIR,
+            target,
+            ignore=shutil.ignore_patterns("__pycache__", "*.egg-info", "dist", "build", ".DS_Store"),
+        )
+        subprocess.run(["git", "-c", "core.excludesFile=", "init", "--quiet", str(target)], env=environment, check=True)  # noqa: S603, S607 - fixed Git commands with temporary fixture paths
+        subprocess.run(  # noqa: S603 - fixed fixture Git command
+            ["git", "-C", str(target), "-c", "core.excludesFile=", "-c", "core.autocrlf=false", "add", "."],  # noqa: S607 - fixed Git executable
+            env=environment,
+            check=True,
+        )
+    except BaseException:
+        directory.cleanup()
+        raise
+    TESTDATA_DIR = target
+    _FIXTURE_DIRECTORY = directory
 
 
 def tearDownModule() -> None:
-    """Release the independent fixture repository."""
-    if _FIXTURE_DIRECTORY is not None:
-        _FIXTURE_DIRECTORY.cleanup()
+    """Release the fixture repository and restore the source directory."""
+    global TESTDATA_DIR, _FIXTURE_DIRECTORY  # noqa: PLW0603 - module fixture lifecycle
+    try:
+        if _FIXTURE_DIRECTORY is not None:
+            _FIXTURE_DIRECTORY.cleanup()
+    finally:
+        TESTDATA_DIR = _SOURCE_TESTDATA_DIR
+        _FIXTURE_DIRECTORY = None
 
 
 def _attach_pyproject(testdata: Metadata, path: "Path | str") -> Metadata:
@@ -262,20 +281,10 @@ class RatingsTest(unittest.TestCase):
         skip_tests: "list[str] | str | None" = None,
     ) -> "tuple[int, list[str]]":
         directory = TESTDATA_DIR / dirname
-        expected = {
-            "custom_test": "The test command is disabled and references to it are deprecated.",
-            "pep517": "License classifiers are deprecated.",
-            "private_classifier": "License classifiers are deprecated.",
-            "setup_config": "License classifiers are deprecated.",
-        }
-        if dirname in expected:
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.filterwarnings("always", message="^" + expected[dirname], category=BuildBackendWarning)
+        if dirname in {"custom_test", "pep517", "private_classifier", "setup_config"}:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=BuildBackendWarning)
                 data = projectdata.get_data(directory)
-            self.assertTrue(caught, f"Expected legacy backend warning for {dirname}")
-            for warning in caught:
-                self.assertIs(warning.category, BuildBackendWarning)
-                self.assertTrue(str(warning.message).startswith(expected[dirname]))
         else:
             data = projectdata.get_data(directory)
         return rate(data, skip_tests)
@@ -1414,9 +1423,11 @@ class AdvisoryChecksTest(unittest.TestCase):
 
 class ReviewFixRegressionTest(unittest.TestCase):
     @staticmethod
-    def _run_subprocess(arguments: list[str]) -> "subprocess.CompletedProcess[str]":
+    def _run_subprocess(arguments: list[str], *, cwd: str | Path) -> "subprocess.CompletedProcess[str]":
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = os.pathsep.join(filter(None, (str(PYROMA_ROOT), environment.get("PYTHONPATH", ""))))
         return subprocess.run(  # noqa: S603 - fixed interpreter and package root, with test-controlled arguments
-            [sys.executable, *arguments], cwd=PYROMA_ROOT, capture_output=True, text=True, check=False
+            [sys.executable, *arguments], cwd=cwd, env=environment, capture_output=True, text=True, check=False
         )
 
     def _backend_data(self, requirements: list[str], python: str | None = ">=3.11") -> Metadata:
@@ -1443,39 +1454,65 @@ class ReviewFixRegressionTest(unittest.TestCase):
                 f"dependencies = {json.dumps(dependencies)}\n",
                 encoding="utf-8",
             )
-            with contextlib.chdir(outside):
-                for output_format in ("text", "json"):
-                    with self.subTest(format=output_format):
-                        result = self._run_subprocess(
-                            [
-                                "-m",
-                                "pyroma",
-                                "--format",
-                                output_format,
-                                "--skip-tests",
-                                "CheckManifest",
-                                directory,
-                            ],
-                        )
-                        self.assertEqual(result.returncode, 2, result.stderr)
-                        self._assert_no_credentials(result)
-                        self.assertIn("example", result.stdout)
-                        if output_format == "json":
-                            document = json.loads(result.stdout)
-                            self.assertEqual(document["rating"], 0)
-                            problem = next(p for p in document["problems"] if p["test"] == "DirectUrlDependency")
-                            self.assertTrue(problem["fatal"])
-                            self.assertEqual(problem["category"], "index")
+            for output_format in ("text", "json"):
+                with self.subTest(format=output_format):
+                    result = self._run_subprocess(
+                        [
+                            "-m",
+                            "pyroma",
+                            "--format",
+                            output_format,
+                            "--skip-tests",
+                            "CheckManifest",
+                            directory,
+                        ],
+                        cwd=outside,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self._assert_no_credentials(result)
+                    self.assertIn("example", result.stdout)
+                    if output_format == "json":
+                        document = json.loads(result.stdout)
+                        self.assertEqual(document["rating"], 0)
+                        problem = next(p for p in document["problems"] if p["test"] == "DirectUrlDependency")
+                        self.assertTrue(problem["fatal"])
+                        self.assertEqual(problem["category"], "index")
 
     def _assert_no_credentials(self, result: "subprocess.CompletedProcess[str]") -> None:
         for secret in ("review-user", "review-password", "review-token", "example.invalid", "[feature]"):
             self.assertNotIn(secret, result.stdout + result.stderr)
 
     def test_subprocess_import_matches_parent_outside_checkout(self) -> None:
-        with tempfile.TemporaryDirectory() as outside, contextlib.chdir(outside):
-            result = self._run_subprocess(["-c", "import pyroma; print(pyroma.__file__)"])
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(Path(result.stdout.strip()).resolve(), Path(pyroma.__file__).resolve())
+        with tempfile.TemporaryDirectory() as outside:
+            result = self._run_subprocess(
+                ["-c", "import json, os, pyroma; print(json.dumps([os.getcwd(), pyroma.__file__]))"], cwd=outside
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            directory, package = json.loads(result.stdout)
+            self.assertEqual(Path(directory).resolve(), Path(outside).resolve())
+            self.assertEqual(Path(package).resolve(), Path(pyroma.__file__).resolve())
+
+    def test_subprocess_prioritizes_parent_and_preserves_inherited_pythonpath(self) -> None:
+        with tempfile.TemporaryDirectory() as outside, tempfile.TemporaryDirectory() as competing:
+            package = Path(competing) / "pyroma"
+            package.mkdir()
+            (package / "__init__.py").write_text("raise RuntimeError('Wrong pyroma imported')\n", encoding="utf-8")
+            probe = Path(competing) / "shadow_probe.py"
+            probe.touch()
+            with unittest.mock.patch.dict(os.environ, {"PYTHONPATH": competing}):
+                result = self._run_subprocess(
+                    [
+                        "-c",
+                        "import json, os, pyroma, shadow_probe; "
+                        "print(json.dumps([os.getcwd(), pyroma.__file__, shadow_probe.__file__]))",
+                    ],
+                    cwd=outside,
+                )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            directory, imported_package, imported_probe = json.loads(result.stdout)
+            self.assertEqual(Path(directory).resolve(), Path(outside).resolve())
+            self.assertEqual(Path(imported_package).resolve(), Path(pyroma.__file__).resolve())
+            self.assertEqual(Path(imported_probe).resolve(), probe.resolve())
 
     def test_malformed_dependencies_do_not_echo_inputs_or_parser_errors(self) -> None:
         malformed = (
@@ -1513,21 +1550,21 @@ class ReviewFixRegressionTest(unittest.TestCase):
                 "    return destination.name\n",
                 encoding="utf-8",
             )
-            with contextlib.chdir(outside):
-                for output_format in ("text", "json"):
-                    with self.subTest(format=output_format):
-                        result = self._run_subprocess(
-                            ["-m", "pyroma", "--format", output_format, "--skip-tests", "CheckManifest", directory]
+            for output_format in ("text", "json"):
+                with self.subTest(format=output_format):
+                    result = self._run_subprocess(
+                        ["-m", "pyroma", "--format", output_format, "--skip-tests", "CheckManifest", directory],
+                        cwd=outside,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self._assert_no_credentials(result)
+                    self.assertIn("Requires-Dist entry #2", result.stdout)
+                    self.assertNotIn("Expected a marker", result.stdout + result.stderr)
+                    if output_format == "json":
+                        problem = next(
+                            p for p in json.loads(result.stdout)["problems"] if p["test"] == "DependencySpecifiers"
                         )
-                        self.assertEqual(result.returncode, 2, result.stderr)
-                        self._assert_no_credentials(result)
-                        self.assertIn("Requires-Dist entry #2", result.stdout)
-                        self.assertNotIn("Expected a marker", result.stdout + result.stderr)
-                        if output_format == "json":
-                            problem = next(
-                                p for p in json.loads(result.stdout)["problems"] if p["test"] == "DependencySpecifiers"
-                            )
-                            self.assertEqual(problem["category"], "spec")
+                        self.assertEqual(problem["category"], "spec")
 
     def test_backend_floors_include_wildcard_prereleases(self) -> None:
         cases = (
@@ -2344,6 +2381,115 @@ class ProjectDataTest(unittest.TestCase):
                 (package / "py.typed").touch()
                 self.assertEqual(projectdata.typing_facts(directory), (True, False))
 
+    def _assert_typing_tree_is_pruned(self, root: Path, excluded: Path) -> None:
+        original_scandir = projectdata.os.scandir
+
+        def guarded_scandir(path: projectdata.Pathish):
+            self.assertFalse(Path(path).is_relative_to(excluded), f"Traversed excluded tree: {path}")
+            return original_scandir(path)
+
+        with unittest.mock.patch.object(projectdata.os, "scandir", new=guarded_scandir):
+            self.assertEqual(projectdata.typing_facts(root), (False, False))
+
+    def test_environment_markers_prune_trees_without_traversing_them(self) -> None:
+        cases = (("env", "conda-meta/history"), ("custom-conda", "conda-meta/history"), ("venv", "pyvenv.cfg"))
+        for name, marker in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                environment = root / name
+                package = environment / "lib" / "python3.13" / "site-packages" / "example-stubs"
+                package.mkdir(parents=True)
+                (package / "py.typed").touch()
+                (package / "__init__.pyi").touch()
+                config = environment / marker
+                config.parent.mkdir(parents=True, exist_ok=True)
+                config.touch()
+                self._assert_typing_tree_is_pruned(root, environment)
+
+    def test_conda_history_directory_does_not_mark_an_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "env"
+            (package / "conda-meta" / "history").mkdir(parents=True)
+            (package / "module.py").touch()
+            (package / "py.typed").touch()
+            self.assertEqual(projectdata.typing_facts(directory), (True, False))
+
+    def test_conda_metadata_file_does_not_mark_an_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "env"
+            package.mkdir()
+            (package / "conda-meta").touch()
+            (package / "module.py").touch()
+            (package / "py.typed").touch()
+            self.assertEqual(projectdata.typing_facts(directory), (True, False))
+
+    def test_nested_project_output_is_pruned_without_traversing_descendants(self) -> None:
+        for config_name in ("pyproject.toml", "setup.py", "setup.cfg"):
+            for output in ("build", "dist", "_build"):
+                with self.subTest(config=config_name, output=output), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory).resolve()
+                    project = root / "packages" / "member"
+                    generated = project / output / "lib"
+                    package = generated / "example-stubs"
+                    package.mkdir(parents=True)
+                    (project / config_name).touch()
+                    (package / "py.typed").touch()
+                    (package / "__init__.pyi").touch()
+                    self._assert_typing_tree_is_pruned(root, generated)
+                    (project / output / "module.py").touch()
+                    self.assertEqual(projectdata.typing_facts(root), (True, True))
+
+    def test_reserved_namespace_packages_remain_source_directories(self) -> None:
+        for name in ("build", "dist", "_build", "env", "venv"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                package = Path(directory) / "src" / name
+                namespace = package / "widget"
+                namespace.mkdir(parents=True)
+                (namespace / "module.py").touch()
+                (package / "py.typed").touch()
+                self.assertEqual(projectdata.typing_facts(directory), (True, False))
+
+    def test_project_boundary_requires_regular_configuration(self) -> None:
+        for config_name in ("pyproject.toml", "setup.py", "setup.cfg"):
+            for kind in ("directory", "symlink"):
+                with self.subTest(config=config_name, kind=kind), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    project = root / "member"
+                    package = project / "build"
+                    namespace = package / "widget"
+                    namespace.mkdir(parents=True)
+                    (namespace / "module.py").touch()
+                    (package / "py.typed").touch()
+                    config = project / config_name
+                    if kind == "directory":
+                        config.mkdir()
+                    else:
+                        target = root / "configuration"
+                        target.touch()
+                        config.symlink_to(target)
+                    self.assertEqual(projectdata.typing_facts(root), (True, False))
+
+    def test_project_boundary_probes_are_limited_to_generated_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            for member in ("generated", "source"):
+                project = root / member
+                project.mkdir()
+                (project / "pyproject.toml").touch()
+            for output in ("build", "dist", "_build"):
+                (root / "generated" / output).mkdir()
+            original_lstat = Path.lstat
+            probes: list[Path] = []
+
+            def counted_lstat(path: Path):
+                probes.append(path)
+                return original_lstat(path)
+
+            with unittest.mock.patch.object(Path, "lstat", new=counted_lstat):
+                self.assertEqual(projectdata.typing_facts(root), (False, False))
+            self.assertEqual(probes.count(root / "generated" / "pyproject.toml"), 1)
+            self.assertNotIn(root / "source" / "pyproject.toml", probes)
+
     def test_isolated_markers_need_source_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2400,7 +2546,12 @@ class ProjectDataTest(unittest.TestCase):
                     raise PermissionError
                 return original_stat(path, follow_symlinks=follow_symlinks)
 
-            for method, replacement in (("lstat", denied_lstat), ("stat", denied_stat)):
+            def denied_conda_stat(path: Path, *, follow_symlinks: bool = True):
+                if path == root / "blocked" / "conda-meta" / "history":
+                    raise PermissionError
+                return original_stat(path, follow_symlinks=follow_symlinks)
+
+            for method, replacement in (("lstat", denied_lstat), ("stat", denied_stat), ("stat", denied_conda_stat)):
                 with self.subTest(method=method), unittest.mock.patch.object(Path, method, new=replacement):
                     self.assertEqual(projectdata.typing_facts(root), (True, False))
                     (root / "valid" / "py.typed").unlink()

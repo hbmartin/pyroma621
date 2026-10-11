@@ -11,14 +11,13 @@ from pyroma import ratings
 from pyroma.metadata import Metadata
 from pyroma.rules import categories
 
-from .strategies import FIXED_TODAY, frozen_rate, property_settings, rating_metadata, rating_outcome, valid_metadata
+from .strategies import FIXED_TODAY, frozen_rate, rating_metadata, rating_outcome, valid_metadata
 
 NAMES = tuple(test.__class__.__name__ for test in ratings.ALL_TESTS)
 CATEGORIES = tuple(categories())
 SKIPS = st.lists(st.sampled_from((*NAMES, *CATEGORIES)), max_size=4)
 
 
-@property_settings
 @given(data=rating_metadata(), skip=SKIPS, strict=st.booleans())
 def test_skip_category_expansion_order_and_duplicates(data: Metadata, skip: list[str], strict: bool) -> None:
     original = copy.deepcopy(data)
@@ -41,13 +40,11 @@ def test_skip_category_expansion_order_and_duplicates(data: Metadata, skip: list
     assert data == original
 
 
-@property_settings
 @given(data=rating_metadata(), selection=st.sampled_from((*NAMES, *CATEGORIES)), strict=st.booleans())
 def test_single_string_skip_matches_singleton_list(data: Metadata, selection: str, strict: bool) -> None:
     assert rating_outcome(data, selection, strict=strict) == rating_outcome(data, [selection], strict=strict)
 
 
-@property_settings
 @given(rating_metadata())
 def test_strict_promotes_findings_and_legacy_api_matches_default(data: Metadata) -> None:
     original = copy.deepcopy(data)
@@ -64,7 +61,6 @@ def test_strict_promotes_findings_and_legacy_api_matches_default(data: Metadata)
     assert data == original
 
 
-@property_settings
 @given(first=rating_metadata(), second=rating_metadata(), skip=SKIPS, strict=st.booleans())
 def test_interleaved_projects_and_options_do_not_leak_state(
     first: Metadata, second: Metadata, skip: list[str], strict: bool
@@ -78,7 +74,6 @@ def test_interleaved_projects_and_options_do_not_leak_state(
 
 
 @pytest.mark.parametrize("field", ["name", "summary", "license-expression"])
-@property_settings
 @given(data=valid_metadata())
 def test_fatal_defects_always_zero_the_rating(data: Metadata, field: str) -> None:
     bad_values = {"name": "invalid name", "summary": "two\nlines", "license-expression": "not-a-license"}
@@ -89,7 +84,6 @@ def test_fatal_defects_always_zero_the_rating(data: Metadata, field: str) -> Non
         assert any(problem.fatal for problem in rated.problems)
 
 
-@property_settings
 @given(data=valid_metadata(), strict=st.booleans())
 def test_no_scoring_contribution_is_a_configuration_error(data: Metadata, strict: bool) -> None:
     selections = [list(NAMES), list(CATEGORIES)]

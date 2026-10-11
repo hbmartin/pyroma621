@@ -4,14 +4,12 @@ import datetime
 from dataclasses import dataclass
 from unittest.mock import patch
 
-from hypothesis import settings
 from hypothesis import strategies as st
 
 from pyroma import ratings
 from pyroma.metadata import Metadata
 
 FIXED_TODAY = datetime.date(2026, 10, 11)
-property_settings = settings(deadline=None)
 WORDS = st.text(alphabet="abcdefghijklmnopqrstuvwxyz", min_size=1, max_size=12)
 TEXT = st.text(alphabet=st.characters(exclude_categories=("Cc", "Cs")), max_size=1024)
 OPERATORS = ("==", "!=", "<", "<=", ">", ">=")
@@ -21,8 +19,8 @@ OPERATORS = ("==", "!=", "<", "<=", ">", ">=")
 def valid_metadata(draw: st.DrawFn) -> Metadata:
     name = "property-" + draw(WORDS)
     version = ".".join(str(draw(st.integers(low, high))) for low, high in ((1, 9), (0, 9), (0, 9)))
-    summary = draw(st.text(alphabet="abcdef ", min_size=11, max_size=80))
-    description = draw(st.text(alphabet="abcdef \n", min_size=101, max_size=200))
+    summary = "a" + draw(st.text(alphabet="abcdef ", min_size=9, max_size=78)) + "b"
+    description = "a" + draw(st.text(alphabet="abcdef \n", min_size=99, max_size=198)) + "b"
     project = {
         "name": name,
         "version": version,
