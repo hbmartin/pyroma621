@@ -29,7 +29,7 @@ from validate_pyproject import api as pyproject_api
 from validate_pyproject import errors as pyproject_errors
 
 from pyroma._backend import backend_floor_satisfied
-from pyroma._markdown import destinations
+from pyroma._markdown import destinations, display_destination
 from pyroma._markers import active_without_extra
 from pyroma.metadata import Metadata, normalize
 from pyroma.rules import Category
@@ -1356,7 +1356,7 @@ def _relative_description_targets(description: str, content_type: str) -> "list[
     for target in targets:
         if target not in seen and _is_relative_target(target):
             seen.add(target)
-            found.append(target)
+            found.append(display_destination(target) if content_type == "text/markdown" else target)
     return found
 
 

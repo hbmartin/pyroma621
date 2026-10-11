@@ -160,10 +160,14 @@ project root, with a regular `.py` or `.pyi` file in its directory or a scanned
 descendant. Isolated documentation/test markers do not count; Python-bearing
 documentation/test packages can still qualify, since this does not prove
 wheel inclusion. Hidden directories, caches and `node_modules` are pruned.
-Virtual environments are identified by `pyvenv.cfg`, not their directory
-names. Root `build`, `dist` and `_build` directories are pruned unless they
-contain direct Python/stub source files; nested packages with those names
-are retained. Directory symlinks are not followed, and file symlinks do not
+Virtual environments are identified by `pyvenv.cfg`, and Conda environments
+by a regular `conda-meta/history` file, not their directory names. At the scan
+root and nested project boundaries, `build`, `dist` and `_build` directories
+are pruned unless they contain direct Python/stub source files. A nested
+boundary contains a regular `pyproject.toml`, `setup.py` or `setup.cfg`;
+its contents are not parsed for this heuristic. Packages and namespaces with
+those directory names elsewhere in the source tree are retained.
+Directory symlinks are not followed, and file symlinks do not
 provide markers or source evidence. Inaccessible entries are skipped without
 discarding accessible siblings, and unrelated filenames are not statted.
 Missing source facts skip the typing advisory.
@@ -177,8 +181,13 @@ escapes and entities are handled. Fenced and indented code, inline code, HTML
 comments and literal HTML `pre`, `code`, `script` and `style` regions are
 ignored. Reference definitions respect paragraph boundaries, and unmatched
 brackets or backticks do not hide destinations in later paragraphs. Image
-alt text is not scanned for links. Destinations retain document order, with
-duplicates listed once. Extension-specific syntax is not enabled.
+alt text is not scanned for links or HTML tags. Misnested literal end tags
+close only their matching literal region; unmatched end tags leave it open.
+Markdown and HTML destinations use the same URL normalization before relative
+classification and deduplication. Findings retain document order and display
+readable Unicode paths, while reserved escapes and ASCII controls remain
+encoded. URLs containing invalid UTF-8 escapes keep their encoded spelling.
+Extension-specific syntax is not enabled.
 
 ### Markdown extraction performance
 

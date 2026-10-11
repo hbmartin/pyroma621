@@ -2,6 +2,7 @@
 
 import html
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import pytest
 from hypothesis import example, given
@@ -105,3 +106,58 @@ def test_relative_filtering_preserves_first_occurrence(targets: list[str]) -> No
 @pytest.mark.parametrize("source", ["[x](<docs/unclosed.md)", '[x](docs/a.md "unclosed)', "[unknown][missing]"])
 def test_ambiguous_or_unresolved_destinations_are_skipped(source: str) -> None:
     assert destinations(source) == []
+
+
+@pytest.mark.parametrize(
+    ("target", "canonical", "display"),
+    [
+        ("docs/café.md", "docs/caf%C3%A9.md", "docs/café.md"),
+        ("docs/a b.md", "docs/a%20b.md", "docs/a b.md"),
+        ("docs/a%2Fb.md", "docs/a%2Fb.md", "docs/a%2Fb.md"),
+        ("docs/a%23b.md", "docs/a%23b.md", "docs/a%23b.md"),
+        ("docs/a%25b.md", "docs/a%25b.md", "docs/a%25b.md"),
+        ("docs/%FF.md", "docs/%FF.md", "docs/%FF.md"),
+        ("docs/%E9.md", "docs/%E9.md", "docs/%E9.md"),
+        ("docs/a%00b.md", "docs/a%00b.md", "docs/a%00b.md"),
+        ("docs/a%0Ab.md", "docs/a%0Ab.md", "docs/a%0Ab.md"),
+        ("docs/a%0Db.md", "docs/a%0Db.md", "docs/a%0Db.md"),
+        ("docs/a%7Fb.md", "docs/a%7Fb.md", "docs/a%7Fb.md"),
+        ("%20https://example.invalid", "%20https://example.invalid", " https://example.invalid"),
+    ],
+)
+def test_markdown_and_html_share_urls_but_display_readable_paths(target: str, canonical: str, display: str) -> None:
+    source = f'[x](<{target}>) <a href="{target}">x</a> ![x](<{canonical}>)'
+    assert destinations(source) == [canonical, canonical, canonical]
+    assert _relative_description_targets(source, "text/markdown") == [display]
+
+
+@property_settings
+@given(st.text(alphabet="abcéñ漢🙂", min_size=1, max_size=12))
+def test_unicode_spellings_deduplicate_across_markdown_html_and_images(stem: str) -> None:
+    target = f"docs/{stem}.md"
+    canonical = quote(target, safe="/")
+    source = f'[x]({target}) <a href="{target}">x</a> ![x]({canonical}) [outside](docs/outside.md)'
+    assert destinations(source) == [canonical, canonical, canonical, "docs/outside.md"]
+    assert _relative_description_targets(source, "text/markdown") == [target, "docs/outside.md"]
+
+
+def test_reserved_url_characters_remain_distinct_after_deduplication() -> None:
+    targets = ["docs/a%2Fb.md", "docs/a/b.md", "docs/a%23b.md", "docs/a#b.md", "docs/a%25b.md", "docs/a%2525b.md"]
+    source = " ".join(f'[x]({target}) <a href="{target}">x</a>' for target in targets)
+    assert _relative_description_targets(source, "text/markdown") == targets
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ('<code><pre></code><a href="docs/hidden.md">x</a></pre> [x](docs/real.md)', ["docs/real.md"]),
+        ('<pre><code></pre><a href="docs/hidden.md">x</a></code>\n\n[x](docs/real.md)', ["docs/real.md"]),
+        ('<pre></code><a href="docs/hidden.md">x</a></pre>\n\n[x](docs/real.md)', ["docs/real.md"]),
+        ("<code>![</code>](images/hidden.png) [x](docs/hidden.md)</code> [x](docs/real.md)", ["docs/real.md"]),
+        ("![<code>](images/real.png) [x](docs/real.md)", ["images/real.png", "docs/real.md"]),
+        ('![<a href="docs/alt.md">x</a>](images/real.png) [x](docs/real.md)', ["images/real.png", "docs/real.md"]),
+        ("<pre><code></pre>\n\n[ref]: docs/hidden.md\n\n</code>\n\n[ref] [x](docs/real.md)", ["docs/real.md"]),
+    ],
+)
+def test_literal_regions_survive_misnested_tags_and_ignore_image_alt_html(source: str, expected: list[str]) -> None:
+    assert destinations(source) == expected

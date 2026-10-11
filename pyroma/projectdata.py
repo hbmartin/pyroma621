@@ -116,6 +116,7 @@ def read_pyproject(path: Pathish) -> "tuple[dict[str, Any] | None, str | None]":
 
 _EXCLUDED_SOURCE_DIRS = frozenset({"__pycache__", "__pypackages__", "node_modules"})
 _GENERATED_SOURCE_DIRS = frozenset({"build", "dist", "_build"})
+_PROJECT_CONFIG_FILES = ("pyproject.toml", "setup.py", "setup.cfg")
 
 
 def _regular_file(path: Path) -> bool:
@@ -143,7 +144,7 @@ def _has_direct_sources(path: Path) -> bool:
     return False
 
 
-def _source_child(root: Path, child: str, project_root: Path) -> bool:
+def _source_child(root: Path, child: str, *, project_boundary: bool) -> bool:
     """Retain source directories, skipping inaccessible entries individually."""
     if child.startswith(".") or child in _EXCLUDED_SOURCE_DIRS:
         return False
@@ -153,21 +154,25 @@ def _source_child(root: Path, child: str, project_root: Path) -> bool:
             return False
     except OSError:
         return False
-    try:
-        if S_ISREG((path / "pyvenv.cfg").stat().st_mode):
+    for marker in (path / "pyvenv.cfg", path / "conda-meta" / "history"):
+        try:
+            if S_ISREG(marker.stat().st_mode):
+                return False
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except OSError:
             return False
-    except FileNotFoundError:
-        pass
-    except OSError:
-        return False
-    return root != project_root or child not in _GENERATED_SOURCE_DIRS or _has_direct_sources(path)
+    return not project_boundary or child not in _GENERATED_SOURCE_DIRS or _has_direct_sources(path)
 
 
 def _source_directories(path: Path) -> "Iterator[tuple[Path, list[str]]]":
     """Walk source directories without generated trees, environments or symlinks."""
     for directory, children, files in os.walk(path, followlinks=False):
         root = Path(directory)
-        children[:] = [child for child in children if _source_child(root, child, path)]
+        project_boundary = bool(_GENERATED_SOURCE_DIRS.intersection(children)) and (
+            root == path or any(_regular_file(root / name) for name in _PROJECT_CONFIG_FILES)
+        )
+        children[:] = [child for child in children if _source_child(root, child, project_boundary=project_boundary)]
         yield (
             root,
             [
@@ -226,7 +231,11 @@ def typing_facts(path: Pathish) -> tuple[bool, bool]:
 
 
 def has_typed_marker(path: Pathish) -> bool:
-    """Report whether a regular PEP 561 marker exists in the source tree."""
+    """Find a regular marker below the root with Python/stub source evidence.
+
+    Sources may be in the marker's directory or a scanned descendant.
+    A marker at the project root does not qualify.
+    """
     return typing_facts(path)[0]
 
 

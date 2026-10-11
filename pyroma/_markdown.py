@@ -2,14 +2,18 @@
 
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote_to_bytes
 
 from markdown_it import MarkdownIt
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from markdown_it.token import Token
 
 _MARKDOWN = MarkdownIt("commonmark", {"html": True})
 _LITERAL_TAGS = frozenset({"pre", "code", "script", "style"})
+_ASCII_CONTROLS = frozenset(chr(value) for value in range(32)) | {"\x7f"}
 
 
 class _HTMLTargets(HTMLParser):
@@ -32,8 +36,34 @@ class _HTMLTargets(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         for position in range(len(self._literal_tags) - 1, -1, -1):
             if self._literal_tags[position] == tag:
-                del self._literal_tags[position:]
+                del self._literal_tags[position]
                 break
+
+
+def _block_tokens(block: "Token") -> "Iterator[Token]":
+    """Visit rendered tokens without descending into image alt text."""
+    if block.type == "html_block":
+        yield block
+    elif block.type == "inline":
+        yield from block.children or []
+
+
+def _feed_html(html: _HTMLTargets, token: "Token") -> bool:
+    """Feed a rendered HTML token and report whether it was consumed."""
+    if token.type in {"html_block", "html_inline"}:
+        html.feed(token.content)
+        return True
+    return False
+
+
+def display_destination(target: str) -> str:
+    """Decode readable URL text, retaining reserved escapes and controls."""
+    try:
+        unquote_to_bytes(target).decode("utf-8")
+    except UnicodeDecodeError:
+        return target
+    readable = _MARKDOWN.normalizeLinkText(target)
+    return "".join(f"%{ord(char):02X}" if char in _ASCII_CONTROLS else char for char in readable)
 
 
 def _without_literal_definitions(source: str, blocks: "list[Token]") -> str:
@@ -53,18 +83,14 @@ def _without_literal_definitions(source: str, blocks: "list[Token]") -> str:
                 if lines[position].strip():
                     lines[position] = ""
                     changed = True
-        if block.type == "html_block":
-            html.feed(block.content)
-        elif block.type == "inline":
-            for token in block.children or []:
-                if token.type == "html_inline":
-                    html.feed(token.content)
+        for token in _block_tokens(block):
+            _feed_html(html, token)
         previous_end = max(previous_end, end)
     return "\n".join(lines) if changed else source
 
 
 def destinations(source: str) -> list[str]:
-    """Return link and image destinations in document order, outside code."""
+    """Return normalized link and image URLs in document order, outside code."""
     environment: dict[str, Any] = {}
     blocks = _MARKDOWN.parse(source, environment)
     if environment.get("references"):
@@ -73,16 +99,12 @@ def destinations(source: str) -> list[str]:
             blocks = _MARKDOWN.parse(filtered)
     html = _HTMLTargets()
     for block in blocks:
-        if block.type == "html_block":
-            html.feed(block.content)
-        elif block.type == "inline":
-            for token in block.children or []:
-                if token.type == "html_inline":
-                    html.feed(token.content)
-                elif not html.in_literal_region and token.type in {"link_open", "image"}:
-                    target = token.attrGet("href" if token.type == "link_open" else "src")
-                    if isinstance(target, str) and target:
-                        html.targets.append(target)
-                # Image children describe alt text, not rendered links.
+        for token in _block_tokens(block):
+            if _feed_html(html, token):
+                continue
+            if not html.in_literal_region and token.type in {"link_open", "image"}:
+                target = token.attrGet("href" if token.type == "link_open" else "src")
+                if isinstance(target, str) and target:
+                    html.targets.append(target)
     html.close()
-    return html.targets
+    return [_MARKDOWN.normalizeLink(target) for target in html.targets]

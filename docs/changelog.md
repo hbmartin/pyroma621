@@ -16,25 +16,33 @@
 - Typing markers require Python or stub sources in their directory or a
   descendant. Isolated markers in documentation and test directories no
   longer imply package typing. Inaccessible entries are skipped individually,
-  and unrelated files do not incur stat probes. Virtual environments are
-  identified by `pyvenv.cfg`; nested packages named `build`, `dist`, `_build`,
-  `env`, or `venv` are retained. Root build-output names are retained when
-  they contain direct Python or stub sources. These remain source heuristics,
-  not verification of wheel contents.
+  and unrelated files do not incur stat probes. Virtual and Conda environments
+  are identified by `pyvenv.cfg` and `conda-meta/history`. Build-output names
+  are pruned at the scan root and nested project boundaries unless they contain
+  direct Python or stub sources. Packages and namespaces named `build`, `dist`,
+  `_build`, `env`, or `venv` elsewhere are retained. These remain source
+  heuristics, not verification of wheel contents.
 - README links and images now use CommonMark parsing through
   `markdown-it-py>=4.2.0`, including images inside links and block-aware
   reference definitions. Stray brackets and backticks no longer hide links
   in subsequent paragraphs. HTML destinations remain supported, excluding
-  comments and literal code regions. Findings follow document order and are
-  deduplicated without repeated linear searches.
+  comments and literal code regions. Misnested literal tags preserve other
+  open regions, and HTML-looking image alt text cannot change their state.
+  Markdown and HTML URLs normalize consistently before deduplication; findings
+  display readable Unicode while preserving reserved escapes, invalid UTF-8,
+  and encoded ASCII controls. Findings follow document order and are deduplicated
+  without repeated linear searches.
 - Backend version floors remain strict: wildcard pins can admit prereleases
   below a required final release and therefore trigger an advisory. Explicit
   README content-type overrides remain supported.
 - CLI credential regressions now exercise the package under test even when
-  invoked outside its checkout, including a backend emitting malformed Core
-  Metadata. README content-type regressions assert rule outcomes directly.
+  invoked outside its checkout, including a competing import path and a backend
+  emitting malformed Core Metadata. Subprocess tests assert their working
+  directory and preserve inherited import paths. README content-type regressions
+  assert rule outcomes directly.
 - Source distributions include `uv.lock` and exclude macOS Finder metadata,
-  keeping manifest checks consistent with version-controlled files.
+  keeping manifest checks consistent with version-controlled files. Repository
+  ignores also exclude `.DS_Store` for contributors without global ignores.
 
 ## 6.0.0 (unreleased)
 
