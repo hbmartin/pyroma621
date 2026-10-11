@@ -46,20 +46,43 @@ them repository-wide.
 Build the wheel and source distribution with uv:
 
 ```console
-$ uv build
+uv build
 ```
 
 Run the same self-rating, complexity, and dependency checks used in CI:
 
 ```console
-$ uv run --no-default-groups --extra test pyroma --min 10 .
-$ uv run --only-group quality lizard pyroma --exclude "pyroma/testdata/*" --warnings_only
-$ uv run --no-default-groups --group quality deptry . --github-output
+uv run --no-default-groups --extra test pyroma --min 10 .
+uv run --only-group quality lizard pyroma --exclude "pyroma/testdata/*" --warnings_only
+uv run --no-default-groups --group quality deptry . --github-output
 ```
 
 Lizard uses its default strict threshold of 15 and must report no warnings.
 Deptry excludes bundled compatibility fixtures and has narrow exceptions for
 optional or indirectly loaded dependencies documented in `pyproject.toml`.
+The project-specific Semgrep rule prevents URL credentials and signed query
+parameters from being copied into user-facing exceptions:
+
+```console
+uv run --only-group quality semgrep scan --config .semgrep.yml --error pyroma
+```
+
+## Adding a check
+
+A check is a `BaseTest` subclass in `pyroma/ratings.py`, registered in
+`ALL_TESTS`. Give it a `category` from `pyroma/rules.py`, and start it with
+`advisory = True`: a new check is reported but not scored until it has been
+through a minor release without false-positive reports. To graduate it, drop
+the `advisory` attribute, move it out of the advisory block in `ALL_TESTS`,
+and note the graduation in the changelog. An advisory check must never set
+`fatal = True`; the test suite enforces this.
+
+Anything a check needs from the working tree is gathered in
+`pyroma/projectdata.py` and attached to the metadata as an underscore
+sentinel declared in `pyroma/metadata.py`, so that rating stays a pure
+function of the metadata dict and the Hypothesis property test can cover it.
+Add a row to `docs/rules.md`, and a regression test in `AdvisoryChecksTest`
+for each message the check can produce.
 
 ## Test data
 

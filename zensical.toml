@@ -2,11 +2,12 @@
 site_name = "Pyroma"
 site_description = "Test your project's packaging friendliness"
 site_author = "Pyroma contributors"
-site_url = "https://hbmartin.github.io/pyroma/"
-repo_url = "https://github.com/hbmartin/pyroma"
+site_url = "https://hbmartin.github.io/pyroma621/"
+repo_url = "https://github.com/hbmartin/pyroma621"
 copyright = "Copyright &copy; Pyroma contributors"
 nav = [
   { "Home" = "index.md" },
+  { "Rules" = "rules.md" },
   { "Development" = "development.md" },
   { "Upgrading" = "upgrading.md" },
   { "Changelog" = "changelog.md" },

@@ -635,7 +635,7 @@ Test/development dependency changes:
 - added Hypothesis metadata fuzzing;
 - added `pytest-cov`;
 - raised test-time setuptools to `>=77`;
-- added `uv_build>=0.8.0,<1.0`; and
+- added `uv_build>=0.11.28,<0.12.0`; and
 - defined uv dependency groups for lint, type-check and quality tools.
 
 The uv build configuration includes the complete `pyroma` module (including
@@ -654,8 +654,9 @@ current pinned tools are:
 
 - uv 0.7.13;
 - Ruff 0.15.22;
-- ty 0.0.61; and
-- pyrefly 1.1.1.
+- ty 0.0.61;
+- pyrefly 1.1.1; and
+- Semgrep 1.170.0.
 
 Run the same commands as CI:
 
