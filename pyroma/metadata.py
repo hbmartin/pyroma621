@@ -63,6 +63,7 @@ Metadata = TypedDict(
         # Facts projectdata gathers from the working tree, so that no rating
         # test has to look at the disk itself.
         "_py_typed": bool,
+        "_stub_only": bool,
         "_license_files_unmatched": "list[str]",
         "_sdist": bool,
         "_owners": "list[str]",

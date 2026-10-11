@@ -83,7 +83,7 @@ pyroma's own exit code.
 | `MetadataVersion` | `Metadata-Version` must be one an index accepts. |
 | `PEPVersion` | The version must be valid under the version specifiers specification. |
 | `Licensing` | `License` and `License-Expression` together are forbidden; the expression must be valid SPDX. |
-| `DirectUrlDependency` | A `name @ https://…` dependency is rejected outright. `twine check` does not catch this. Fatal. |
+| `DirectUrlDependency` | A `name @ https://…` dependency is rejected outright. Diagnostics list sorted, unique dependency names only, keeping credentials, URLs, extras and markers out of reports. `twine check` does not catch this. Fatal. |
 | `SummaryFormat` | The summary must be one line of at most 512 characters. Fatal. |
 
 ## `metadata` &mdash; missing or uninformative fields
@@ -107,12 +107,12 @@ pyroma's own exit code.
 | --- | --- |
 | `ClassifierVerification` | Classifiers must be registered; deprecated ones name their replacement. |
 | `DeprecatedMetadataFields` | Deprecated fields should give way to their replacements. |
-| `PythonVersionCoherence` | *Advisory.* Python classifiers must agree with `Requires-Python`. Installers trust `Requires-Python` and ignore classifiers. |
+| `PythonVersionCoherence` | *Advisory.* A Python classifier contradicts `Requires-Python` only when their version ranges have no intersection, including patch restrictions and wildcard exclusions. Requires `packaging>=26.3`. |
 | `DevelopmentStatusCoherence` | *Advisory.* A stable Development Status contradicts a `0.x` or pre-release version. |
-| `BuildBackendVersionFloor` | *Advisory.* PEP 639 licensing needs `setuptools>=77.0.0`, `hatchling>=1.27` or `flit-core>=3.12`. Older backends emit the wrong metadata silently. |
+| `BuildBackendVersionFloor` | *Advisory.* PEP 639 licensing needs `setuptools>=77.0.0` or `hatchling>=1.27`. Flit needs 3.11 for simple SPDX identifiers and `license-files`, or 3.12 for supported compound or parenthesized expressions. See the conservative handling below. |
 | `LicenseFilesExist` | *Advisory.* Every `license-files` pattern should match a real file. |
-| `ReadmeContentTypeMatch` | *Advisory.* The readme's content type should match its file extension. |
-| `TypedMarker` | *Advisory.* A `py.typed` marker and the `Typing :: Typed` classifier should agree. |
+| `ReadmeContentTypeMatch` | *Advisory.* Emitted metadata must match the explicit content type in a readme table, or the extension inferred for a string declaration. Media types are compared independently of parameters. Explicit overrides are allowed. |
+| `TypedMarker` | *Advisory.* Source-tree `py.typed` markers or complete `*-stubs` packages containing `.pyi` files should agree with `Typing :: Typed`. Partial stub packages require a marker. This does not verify wheel contents. |
 | `ProjectUrlLabelCollision` | *Advisory.* Two labels that normalize alike collapse into one link. |
 
 ## `practice` &mdash; opinionated recommendations
@@ -129,6 +129,39 @@ pyroma's own exit code.
 | `DevelopmentExtras` | *Advisory.* Development dependencies belong in `[dependency-groups]`, not in published extras. |
 | `ReadmeRelativeLinks` | *Advisory.* Relative links and images do not resolve on PyPI. |
 | `BuildBackendDeclared` | *Advisory.* A `[build-system]` table without `build-backend` falls back to legacy behaviour. |
+
+Backend requirements are combined independently of their order. Python-only
+markers divide the project's declared Python range (falling back to built
+`Requires-Python`, or unrestricted when absent) into feasible partitions.
+Conjunctions, disjunctions, parentheses and reversed comparisons are supported;
+`python_version` compares major/minor series, while `python_full_version`
+compares complete versions. A warning requires a feasible partition that
+allows an older backend. Contradictory partitions are skipped. Direct references,
+other environment variables and unsupported comparisons skip the advisory
+unless unconditional constraints already prove the required floor. Unknown
+backends and unknown Flit feature requirements, including `WITH` expressions,
+are skipped rather than assigned a guessed minimum.
+
+Runtime dependency checks exclude a dependency only when every possible marker
+branch requires a selected extra. Conditions such as `extra != "test"`,
+`extra == ""`, and an extra condition joined by `or` to another environment
+condition remain eligible. Uncertain conditions are retained, without using
+the environment of the machine running pyroma to decide applicability.
+
+Typing facts come from a recursive source scan, including namespace subpackages
+and custom source directories. Hidden directories, virtual environments,
+caches, build output and `node_modules` are pruned; directory symlinks are not
+followed and marker symlinks are not counted. Missing source facts skip the
+typing advisory.
+
+Markdown link extraction covers unambiguous inline links and images, full,
+collapsed and shortcut reference links, and HTML `href`/`src` attributes.
+Reference labels ignore case and normalize whitespace; the first definition
+wins. Angle-delimited destinations, balanced parentheses, optional titles,
+escapes and entities are handled. Fenced and indented code, inline code, HTML
+comments and literal HTML code regions are ignored. This is a conservative
+extractor, not a complete CommonMark renderer: malformed or ambiguous syntax,
+complex block nesting and extension-specific constructs may be skipped.
 
 ## `internal` &mdash; pyroma could not do its job
 

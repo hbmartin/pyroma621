@@ -33,7 +33,7 @@ requires-python = ">=3.11"
 dependencies = [
     "build>=0.7.0",
     "docutils>=0.22",
-    "packaging>=24.2",
+    "packaging>=26.3",
     "pygments>=2.19",
     "requests>=2.32",
     "trove-classifiers>=2022.6.26",
