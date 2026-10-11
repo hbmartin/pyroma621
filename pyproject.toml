@@ -73,7 +73,7 @@ typecheck = ["pyrefly>=1.1.1", "ty>=0.0.61", "types-docutils"]
 [tool.uv.build-backend]
 module-name = "pyroma"
 module-root = ""
-source-include = ["docs/**", "Makefile", "tox.ini", "uv.lock", "zensical.toml"]
+source-include = ["docs/**", "tests/**", "Makefile", "tox.ini", "uv.lock", "zensical.toml"]
 source-exclude = ["**/.DS_Store"]
 
 [project.urls]
@@ -90,7 +90,7 @@ pyroma = "pyroma:main"
 pyroma = "pyroma:zester"
 
 [tool.pytest.ini_options]
-testpaths = ["pyroma/tests.py"]
+testpaths = ["pyroma/tests.py", "tests/property"]
 
 [tool.check-manifest]
 # uv_build includes the original TOML alongside its normalized pyproject.toml.
@@ -101,7 +101,7 @@ ignore = [".pre-commit-config.yaml", ".pre-commit-hooks.yaml", ".semgrep.yml", "
 ignore = ["GAC010", "GAC008", "GAC011"]
 
 [tool.deptry]
-extend_exclude = ["pyroma/testdata", "pyroma/tests.py"]
+extend_exclude = ["pyroma/testdata", "pyroma/tests.py", "tests"]
 known_first_party = ["pyroma"]
 optional_dependencies_dev_groups = ["test"]
 
@@ -145,3 +145,5 @@ ignore = ["COM812", "D203", "D213"]
 [tool.ruff.lint.per-file-ignores]
 "pyroma/__init__.py" = ["T201"]
 "pyroma/tests.py" = ["ANN202", "D", "FBT003", "PT009", "PT027", "RUF059", "SLF001"]
+# Pytest assertions/booleans, literal contract boundaries, and private-rule coverage.
+"tests/**/*.py" = ["D", "FBT001", "FBT003", "PLR2004", "S101", "SLF001"]

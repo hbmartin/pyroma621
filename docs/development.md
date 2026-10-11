@@ -9,6 +9,31 @@ $ python -m pytest
 The test extra includes Hypothesis. Its generated metadata cases run as part
 of the normal pytest and tox suites, including the cross-platform CI matrix.
 
+The separate `tests/property` suite checks metadata boundaries, marker
+semantics, backend constraints, Markdown destinations, rating options, and
+metadata ingestion. It uses bounded generators and mocked external providers,
+so generated cases do not fetch packages or build wheels. Calendar-dependent
+ratings use a fixed date, October 11, 2026.
+
+Run the property suite with statistics (100 examples per property by default),
+or select the larger profile for 1,000 examples:
+
+```console
+$ python -m pytest tests/property --hypothesis-show-statistics
+$ python -m pytest tests/property --hypothesis-profile=property-deep --hypothesis-show-statistics
+```
+
+The explicit `property` profile also selects 100 examples. Generated tests
+disable timing deadlines; use pytest's `--durations=10` to inspect runtime
+without making machine speed a correctness requirement. Hypothesis keeps
+minimized failures in its ignored `.hypothesis` database. Turn demonstrated
+bugs into explicit regression examples and narrow fixes.
+
+The backend enumeration oracle is intentionally restricted to integer bounds
+and minor-level Python conditions. Prereleases, wildcard pins, direct URLs,
+and unknown environments have separate examples; finite enumeration does not
+prove arbitrary version constraints.
+
 or across all supported Python versions:
 
 ```console
