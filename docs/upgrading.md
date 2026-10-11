@@ -688,9 +688,9 @@ The documented direct test command is now `python -m pytest` instead of
 - CPython 3.11 through 3.14 plus the generic current Python environment;
 - development-mode and bytes warnings enabled;
 - terminal missing-line coverage reporting; and
-- `--cov-fail-under=80`.
+- minimum 94% production coverage with branches enabled, configured in `pyproject.toml`.
 
-CI exercises Linux, macOS, and Windows with CPython 3.11, CPython 3.14, and
+CI exercises Linux with CPython 3.11, CPython 3.14, and
 PyPy 3.11 matrix entries.
 
 The old executable XML-RPC response fixture was deleted. Network behavior now

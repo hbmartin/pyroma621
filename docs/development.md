@@ -8,7 +8,7 @@ $ uv run --locked --no-default-groups --group test python -bb -X dev -m pytest -
 ```
 
 The test dependency group includes Hypothesis. Its generated metadata cases run as part
-of the normal pytest and tox suites, including the cross-platform CI matrix.
+of the normal pytest and tox suites, including the Linux CI matrix.
 
 The separate `tests/property` suite checks metadata boundaries, marker
 semantics, backend constraints, Markdown destinations, rating options, and
