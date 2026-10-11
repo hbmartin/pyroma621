@@ -1,7 +1,5 @@
 """Conservative Boolean analysis of public, normalized packaging markers."""
 
-from __future__ import annotations
-
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -17,7 +15,7 @@ _SERIES = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\Z")
 _REVERSED = {"==": "==", "!=": "!=", "<": ">", ">": "<", "<=": ">=", ">=": "<="}
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class Atom:
     """One comparison, retaining quoted literals separately from variables."""
 
@@ -26,13 +24,13 @@ class Atom:
     right: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class Junction:
     """A conjunction or disjunction of marker conditions."""
 
     operator: str
-    left: Node
-    right: Node
+    left: "Node"
+    right: "Node"
 
 
 Node = Atom | Junction
@@ -61,7 +59,7 @@ class _Parser:
         while self.position < len(self.tokens) and self.tokens[self.position] == operator:
             self.take()
             right = self.expression("and") if operator == "or" else self.primary()
-            child = Junction(operator, child, right)
+            child = Junction(operator=operator, left=child, right=right)
         return child
 
     def primary(self) -> Node:
@@ -76,7 +74,7 @@ class _Parser:
             if self.take() != "in":
                 raise ValueError
             operator = "not in"
-        return Atom(left, operator, self.take())
+        return Atom(left=left, operator=operator, right=self.take())
 
 
 def _parse(marker: Marker) -> Node | None:
@@ -133,7 +131,7 @@ def _series_specifier(operator: str, value: str) -> str | None:
     return None
 
 
-def _atom_range(atom: Atom) -> VersionRange | None:
+def _atom_range(atom: Atom) -> "VersionRange | None":
     comparison = _python_comparison(atom)
     if comparison is None:
         return None
@@ -150,7 +148,7 @@ def _atom_range(atom: Atom) -> VersionRange | None:
     return ~versions if variable == "python_version" and operator in {">", ">="} else versions
 
 
-def _python_range(node: Node) -> VersionRange | None:
+def _python_range(node: Node) -> "VersionRange | None":
     if isinstance(node, Atom):
         return _atom_range(node)
     left, right = _python_range(node.left), _python_range(node.right)
@@ -159,10 +157,10 @@ def _python_range(node: Node) -> VersionRange | None:
     return left & right if node.operator == "and" else left | right
 
 
-def python_marker_range(marker: Marker) -> VersionRange | None:
+def python_marker_range(marker: Marker) -> "VersionRange | None":
     """Return Python-only applicability, or None for unsupported conditions.
 
-    ``python_version`` compares the major/minor series; ``python_full_version``
+    `python_version` compares the major/minor series; `python_full_version`
     compares the complete version. No host environment is consulted.
     """
     node = _parse(marker)

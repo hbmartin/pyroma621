@@ -1,7 +1,5 @@
 """Evaluate combined build requirements over feasible Python partitions."""
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING
 
 from packaging.specifiers import SpecifierSet
@@ -16,8 +14,8 @@ _MAX_PARTITIONS = 128
 
 
 def _partitions(
-    requirements: list[Requirement], supported: VersionRange
-) -> list[tuple[VersionRange, VersionRange]] | None:
+    requirements: "list[Requirement]", supported: "VersionRange"
+) -> "list[tuple[VersionRange, VersionRange]] | None":
     partitions = [(supported, SpecifierSet().to_range())]
     for requirement in requirements:
         applicability = python_marker_range(requirement.marker) if requirement.marker else SpecifierSet().to_range()
@@ -37,7 +35,7 @@ def _partitions(
     return partitions
 
 
-def backend_floor_satisfied(requirements: list[Requirement], supported: SpecifierSet, floor: str) -> bool | None:
+def backend_floor_satisfied(requirements: "list[Requirement]", supported: SpecifierSet, floor: str) -> bool | None:
     """Prove a floor, find an older feasible backend, or skip uncertainty."""
     if supported.to_range().is_empty:
         return None
