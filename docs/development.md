@@ -159,7 +159,7 @@ uv build
 Run the same self-rating, complexity, and dependency checks used in CI:
 
 ```console
-uv run --locked --no-default-groups --group test pyroma --strict --min 10 .
+uv run --locked --no-default-groups --group test pyroma --no-config --strict --min 10 .
 uv run --locked --only-group quality lizard pyroma --exclude "pyroma/testdata/*" --warnings_only
 uv run --locked --no-default-groups --group quality deptry . --github-output
 ```
