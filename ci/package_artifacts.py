@@ -72,6 +72,7 @@ def stage(sdist: Path, work: Path) -> Path:
     staging.mkdir()
     for directory in ("tests", "ci"):
         shutil.copytree(source / directory, staging / directory)
+    shutil.copy(source / "conftest.py", staging / "conftest.py")
     shutil.copy(source / "pyproject.toml", staging / "pyproject.toml")
     shutil.copy(source / "uv.lock", staging / "uv.lock")
     return staging

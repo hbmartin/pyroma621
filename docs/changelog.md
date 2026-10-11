@@ -9,6 +9,13 @@
 - Release distributions are tested outside the checkout before publishing;
   dependency audits cover every locked package version and enforce expiring,
   reviewed exceptions. Workflow linting and tool versions are pinned.
+- Hypothesis profiles load before pytest resolves command-line options,
+  including invocations with `.` or individual test files. The default profile
+  runs 100 examples without deadlines; the deep profile runs 1,000 and both
+  preserve inherited CI settings. Installed-wheel validation stages the shared
+  configuration. Header generation is reproducible across string hash seeds,
+  and rule assertions share a fixed date and handle advisory findings. Coherent
+  generated metadata excludes whitespace-only text; production scoring is unchanged.
 
 - Malformed dependency diagnostics identify the one-based `Requires-Dist`
   entry instead of echoing its contents or the parser error, preventing URL

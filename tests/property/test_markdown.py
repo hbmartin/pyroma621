@@ -11,7 +11,7 @@ from hypothesis import strategies as st
 from pyroma._markdown import destinations
 from pyroma.ratings import _relative_description_targets
 
-from .strategies import WORDS, markdown_targets, property_settings
+from .strategies import WORDS, markdown_targets
 
 
 @dataclass(frozen=True)
@@ -40,7 +40,6 @@ def fragments(draw: st.DrawFn) -> Fragment:
     return Fragment(source, target)
 
 
-@property_settings
 @given(fragments())
 @example(Fragment('[docs](docs/a(b).md "Title")', "docs/a(b).md"))
 @example(Fragment(r"[docs](docs/a\(b\)&#46;md)", "docs/a(b).md"))
@@ -49,7 +48,6 @@ def test_generated_fragment_has_known_destination(fragment: Fragment) -> None:
     assert destinations(fragment.source) == [fragment.target]
 
 
-@property_settings
 @given(st.lists(fragments(), min_size=1, max_size=4))
 def test_document_order_with_independent_reference_names(parts: list[Fragment]) -> None:
     # Separate each fragment's reference namespace, even when Hypothesis repeats it.
@@ -69,7 +67,6 @@ def test_document_order_with_independent_reference_names(parts: list[Fragment]) 
 
 
 @pytest.mark.parametrize("wrapper", ["span", "backtick", "tilde", "comment"])
-@property_settings
 @given(fragment=fragments())
 def test_literal_regions_suppress_enclosed_destinations(fragment: Fragment, wrapper: str) -> None:
     # Code spans cannot cross paragraph boundaries. Keep reference definitions
@@ -85,14 +82,12 @@ def test_literal_regions_suppress_enclosed_destinations(fragment: Fragment, wrap
     assert destinations(enclosed + "\n\n[outside](docs/outside.md)") == ["docs/outside.md"]
 
 
-@property_settings
 @given(target=markdown_targets(), first=WORDS, second=WORDS, gap=st.sampled_from((" ", "  ", "\t")))
 def test_reference_label_case_and_whitespace_are_normalized(target: str, first: str, second: str, gap: str) -> None:
     source = f"[docs][{first.upper()}{gap}{second.upper()}]\n\n[{first} {second}]: <{html.escape(target)}>"
     assert destinations(source) == [target]
 
 
-@property_settings
 @given(st.lists(markdown_targets(), min_size=1, max_size=4))
 @example(["docs/a.md", "docs/a.md", "https://example.invalid/docs/a.md"])
 def test_relative_filtering_preserves_first_occurrence(targets: list[str]) -> None:
@@ -131,7 +126,6 @@ def test_markdown_and_html_share_urls_but_display_readable_paths(target: str, ca
     assert _relative_description_targets(source, "text/markdown") == [display]
 
 
-@property_settings
 @given(st.text(alphabet="abcéñ漢🙂", min_size=1, max_size=12))
 def test_unicode_spellings_deduplicate_across_markdown_html_and_images(stem: str) -> None:
     target = f"docs/{stem}.md"

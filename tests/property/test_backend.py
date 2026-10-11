@@ -8,7 +8,7 @@ from packaging.specifiers import SpecifierSet
 
 from pyroma._backend import backend_floor_satisfied
 
-from .strategies import backend_cases, environment, property_settings
+from .strategies import backend_cases, environment
 
 BackendCase = tuple[list[str], int, int, int, int, int]
 
@@ -18,9 +18,8 @@ def inputs(case: BackendCase) -> tuple[list[Requirement], SpecifierSet, str]:
     return [Requirement(value) for value in raw], SpecifierSet(f">=3.{python_lower},<3.{python_upper}"), str(floor)
 
 
-def enumerated_floor(case: BackendCase) -> bool | None:
+def enumerated_floor(requirements: list[Requirement], case: BackendCase) -> bool | None:
     """Enumerate the complete representative set for backend_cases' grammar."""
-    requirements, _supported, _floor = inputs(case)
     _raw, python_lower, python_upper, lower, upper, floor = case
     feasible = []
     for minor in range(python_lower, python_upper):
@@ -31,17 +30,15 @@ def enumerated_floor(case: BackendCase) -> bool | None:
     return all(backend >= floor for backend in feasible) if feasible else None
 
 
-@property_settings
 @given(backend_cases())
 @example((["setuptools>=76,<79", "setuptools>=77"], 11, 12, 76, 79, 77))
 @example((["setuptools>=76,<79"], 11, 12, 76, 79, 77))
 @example((["setuptools>=76,<79", "setuptools==80"], 11, 12, 76, 79, 77))
 def test_backend_floor_matches_finite_oracle(case: BackendCase) -> None:
     requirements, supported, floor = inputs(case)
-    assert backend_floor_satisfied(requirements, supported, floor) is enumerated_floor(case)
+    assert backend_floor_satisfied(requirements, supported, floor) is enumerated_floor(requirements, case)
 
 
-@property_settings
 @given(case=backend_cases(), data=st.data())
 def test_order_duplicates_and_unreachable_conditions_preserve_result(case: BackendCase, data: st.DataObject) -> None:
     requirements, supported, floor = inputs(case)

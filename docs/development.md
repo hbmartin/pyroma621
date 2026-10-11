@@ -24,11 +24,25 @@ $ python -m pytest tests/property --hypothesis-show-statistics
 $ python -m pytest tests/property --hypothesis-profile=property-deep --hypothesis-show-statistics
 ```
 
-The explicit `property` profile also selects 100 examples. Generated tests
-disable timing deadlines; use pytest's `--durations=10` to inspect runtime
-without making machine speed a correctness requirement. Hypothesis keeps
+The repository-root conftest registers and loads the `property` profile before
+pytest resolves command-line options. It selects 100 examples and disables
+timing deadlines, while preserving other settings from Hypothesis's initially
+active profile, including its CI defaults. Explicit `--hypothesis-profile`
+selection overrides this baseline. Both profiles work with `pytest .`, an
+individual file, or any test directory; installed-wheel validation stages the
+same configuration. The standalone property test in `pyroma/tests.py` also
+disables deadlines when run outside the repository.
+
+Use pytest's `--durations=10` to inspect runtime without making machine speed
+a correctness requirement. Hypothesis keeps
 minimized failures in its ignored `.hypothesis` database. Turn demonstrated
 bugs into explicit regression examples and narrow fixes.
+
+Header generators draw ordered, unique field names so a fixed Hypothesis seed
+does not depend on Python's string hash seed. Coherent metadata has non-whitespace
+text boundaries; whitespace-only inputs have separate cases documenting current
+scoring. Rule assertions freeze both direct and aggregate evaluations and handle
+scored and advisory findings, including strict mode.
 
 The backend enumeration oracle is intentionally restricted to integer bounds
 and minor-level Python conditions. Prereleases, wildcard pins, direct URLs,
