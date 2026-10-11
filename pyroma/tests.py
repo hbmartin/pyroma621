@@ -12,6 +12,7 @@ import unittest
 import unittest.mock
 from email.message import Message
 from importlib.metadata import PackageNotFoundError
+from itertools import permutations
 from pathlib import Path
 from typing import Never
 from xmlrpc import client as xmlrpclib
@@ -96,6 +97,56 @@ _CLASSIFIER_TEXT = st.one_of(
     _METADATA_TEXT,
 )
 _STRING_OR_LIST = st.one_of(_METADATA_TEXT, st.lists(_METADATA_TEXT, max_size=4))
+_TOML_VALUE = st.recursive(
+    st.one_of(_METADATA_TEXT, st.integers(), st.booleans()),
+    lambda children: st.one_of(
+        st.lists(children, max_size=3),
+        st.dictionaries(
+            st.sampled_from(("license", "readme", "requires-python", "requires", "build-backend")), children
+        ),
+    ),
+    max_leaves=12,
+)
+_PYPROJECT = st.one_of(
+    st.fixed_dictionaries({}, optional={"project": _TOML_VALUE, "build-system": _TOML_VALUE, "tool": _TOML_VALUE}),
+    st.fixed_dictionaries(
+        {
+            "project": st.fixed_dictionaries(
+                {},
+                optional={
+                    "license": st.sampled_from(
+                        ("MIT", "MIT OR Apache-2.0", "(MIT)", "GPL-2.0-only WITH Classpath-exception-2.0")
+                    ),
+                    "requires-python": st.sampled_from((">=3.11", "==3.11.5", "!=3.11.*", "invalid")),
+                    "readme": st.one_of(
+                        _METADATA_TEXT, st.fixed_dictionaries({"file": _METADATA_TEXT, "content-type": _METADATA_TEXT})
+                    ),
+                    "license-files": _STRING_OR_LIST,
+                },
+            ),
+            "build-system": st.fixed_dictionaries(
+                {},
+                optional={
+                    "build-backend": st.sampled_from(
+                        ("setuptools.build_meta", "flit_core.buildapi", "hatchling.build", "unknown")
+                    ),
+                    "requires": st.lists(
+                        st.sampled_from(
+                            (
+                                "setuptools>=61",
+                                "setuptools>=77; python_version >= '3.11'",
+                                "flit_core>=3.11",
+                                "hatchling>=1.27",
+                                "invalid requirement",
+                            )
+                        ),
+                        max_size=4,
+                    ),
+                },
+            ),
+        }
+    ),
+)
 
 
 def _metadata_strategy():
@@ -140,6 +191,9 @@ def _metadata_strategy():
             "_no_config_found": st.booleans(),
             "_has_sdist": st.booleans(),
             "_py_typed": st.booleans(),
+            "_stub_only": st.booleans(),
+            "_pyproject": _PYPROJECT,
+            "_pyproject_error": _METADATA_TEXT,
             "_license_files_unmatched": st.lists(_METADATA_TEXT, max_size=4),
         },
     )
@@ -169,6 +223,7 @@ class MetadataPropertyTest(unittest.TestCase):
 
         # Strict mode scores the advisory checks; it must be just as total.
         strict = ratings.rate_project(testdata, strict=True)
+        self.assertEqual(strict, ratings.rate_project(testdata, strict=True))
         self.assertEqual(testdata, original)
         self.assertEqual(strict.advisories, [])
         self.assertGreaterEqual(strict.rating, 0)
@@ -1210,7 +1265,7 @@ class AdvisoryChecksTest(unittest.TestCase):
         # which needs setuptools>=77.
         testdata = _attach_pyproject(COMPLETE.copy(), TESTDATA_DIR / "complete")
 
-        self._assert_advises(testdata, "PEP 639 needs setuptools>=77.0.0")
+        self._assert_advises(testdata, "licensing features need setuptools>=77.0.0")
 
     def test_unknown_build_backend_is_not_guessed_at(self) -> None:
         # pyroma itself uses uv_build, which is deliberately not in the table.
@@ -1225,19 +1280,19 @@ class AdvisoryChecksTest(unittest.TestCase):
         }
 
     def test_flit_core_floor_for_pep639(self) -> None:
-        # flit-core gained license-expression and license-files in 3.12.
+        # Simple SPDX identifiers and license-files arrived in Flit 3.11.
         testdata = COMPLETE.copy()
         testdata["_pyproject"] = self._pep639_pyproject(["flit_core>=3.4,<4"], "flit_core.buildapi")
-        self._assert_advises(testdata, "PEP 639 needs flit-core>=3.12")
+        self._assert_advises(testdata, "licensing features need flit-core>=3.11")
 
-        testdata["_pyproject"] = self._pep639_pyproject(["flit_core>=3.12,<4"], "flit_core.buildapi")
-        self._assert_silent(testdata, "PEP 639 needs")
+        testdata["_pyproject"] = self._pep639_pyproject(["flit_core>=3.11,<4"], "flit_core.buildapi")
+        self._assert_silent(testdata, "licensing features need")
 
     def test_missing_build_backend_floor_has_its_own_message(self) -> None:
         testdata = COMPLETE.copy()
         testdata["_pyproject"] = self._pep639_pyproject(["setuptools"], "setuptools.build_meta")
 
-        message = next(m for m in self._advisories(testdata) if "PEP 639 needs setuptools>=77.0.0" in m)
+        message = next(m for m in self._advisories(testdata) if "licensing features need setuptools>=77.0.0" in m)
         self.assertIn("declares no minimum version for setuptools", message)
         # There is no floor to raise, so the message must not say there is.
         self.assertNotIn("too low", message)
@@ -1258,14 +1313,15 @@ class AdvisoryChecksTest(unittest.TestCase):
     def test_readme_content_type_mismatch(self) -> None:
         testdata = _attach_pyproject(COMPLETE.copy(), TESTDATA_DIR / "readme_type_mismatch")
 
-        message = next(m for m in self._advisories(testdata) if "whose suffix means text/markdown" in m)
-        self.assertIn("your readme table declares the content type 'text/x-rst'", message)
+        message = next(m for m in self._advisories(testdata) if "your readme table declares 'text/x-rst'" in m)
+        self.assertIn("your build backend emitted 'text/plain'", message)
 
     def test_readme_txt_with_an_explicit_content_type_is_legitimate(self) -> None:
         # PEP 621 does not recognise .txt, so its content type must be
         # declared, and whatever is declared is deliberate.
         testdata = COMPLETE.copy()
         testdata["_pyproject"] = {"project": {"readme": {"file": "README.txt", "content-type": "text/x-rst"}}}
+        testdata["description-content-type"] = "text/x-rst"
 
         self._assert_silent(testdata, "whose suffix means")
 
@@ -1315,6 +1371,242 @@ class AdvisoryChecksTest(unittest.TestCase):
         self.assertIn("two sources of truth", message)
         # Package indices do not in fact reject this combination.
         self.assertNotIn("rejected by package indices", message)
+
+
+class ReviewFixRegressionTest(unittest.TestCase):
+    def _backend_data(self, requirements: list[str], python: str | None = ">=3.11") -> Metadata:
+        data = COMPLETE.copy()
+        data.pop("requires-python")
+        project = {"name": "example", "license": "MIT"}
+        if python is not None:
+            project["requires-python"] = python
+        data["_pyproject"] = {
+            "project": project,
+            "build-system": {"build-backend": "setuptools.build_meta", "requires": requirements},
+        }
+        return data
+
+    def test_credentials_are_absent_from_real_cli_reports(self) -> None:
+        dependency = "example[feature] @ https://review-user:review-password@example.invalid/pkg.whl?token=review-token"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "example.py").write_text("", encoding="utf-8")
+            dependencies = [dependency, dependency + ' ; extra > "test"']
+            (root / "pyproject.toml").write_text(
+                '[build-system]\nrequires = ["setuptools>=77"]\nbuild-backend = "setuptools.build_meta"\n'
+                '[project]\nname = "credential-test"\nversion = "1.0"\n'
+                f"dependencies = {json.dumps(dependencies)}\n",
+                encoding="utf-8",
+            )
+            for output_format in ("text", "json"):
+                with self.subTest(format=output_format):
+                    result = subprocess.run(  # noqa: S603 - fixed CLI arguments and a locally created temporary path
+                        [
+                            sys.executable,
+                            "-m",
+                            "pyroma",
+                            "--format",
+                            output_format,
+                            "--skip-tests",
+                            "CheckManifest",
+                            directory,
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    for secret in ("review-user", "review-password", "review-token", "example.invalid", "[feature]"):
+                        self.assertNotIn(secret, result.stdout + result.stderr)
+                    self.assertIn("example", result.stdout)
+                    if output_format == "json":
+                        document = json.loads(result.stdout)
+                        self.assertEqual(document["rating"], 0)
+                        problem = next(p for p in document["problems"] if p["test"] == "DirectUrlDependency")
+                        self.assertTrue(problem["fatal"])
+                        self.assertEqual(problem["category"], "index")
+
+    def test_direct_url_names_are_sorted_and_deduplicated(self) -> None:
+        data = COMPLETE.copy()
+        data["requires-dist"] = [
+            'zeta[x] @ https://user:password@example.invalid/a ; python_version > "3.11"',
+            "alpha @ https://example.invalid/b?token=secret",
+            "alpha[other] @ https://example.invalid/c",
+        ]
+        result = ratings.DirectUrlDependency().test(data)
+        self.assertIs(result.outcome, False)
+        self.assertTrue(result.fatal)
+        self.assertIn("\n  alpha\n  zeta\n", result.message)
+        for fragment in ("https", "password", "secret", "[x]", "python_version"):
+            self.assertNotIn(fragment, result.message)
+
+    def test_python_patch_intersections(self) -> None:
+        cases = (
+            (">=3.11.1,<3.11.10", True),
+            ("==3.11.5", True),
+            (">=3.11.1,!=3.11.999", True),
+            ("==3.11.*,!=3.11.5", True),
+            ("!=3.11.*", False),
+            ("==3.12.*", False),
+            (">=3.11.5,<3.11.5", False),
+        )
+        for specifier, expected in cases:
+            with self.subTest(specifier=specifier):
+                data = {"requires-python": specifier, "classifier": ["Programming Language :: Python :: 3.11"]}
+                self.assertIs(ratings.PythonVersionCoherence().test(data).outcome, expected)
+
+    def test_combined_backend_constraints_are_order_independent(self) -> None:
+        for requirements in permutations(("setuptools>=61", "setuptools>=77", "setuptools<80")):
+            with self.subTest(requirements=requirements):
+                result = ratings.BuildBackendVersionFloor().test(self._backend_data(list(requirements)))
+                self.assertIs(result.outcome, True)
+
+    def test_backend_python_partitions(self) -> None:
+        cases = (
+            (["setuptools>=61; python_version < '3.9'", "setuptools>=77; python_version >= '3.9'"], ">=3.11", True),
+            (["setuptools>=61; python_version < '3.9'", "setuptools>=77; python_version >= '3.9'"], ">=3.8", False),
+            (
+                ["setuptools>=77; (python_version >= '3.11' and python_version < '3.12') or python_version >= '3.13'"],
+                "==3.11.5",
+                True,
+            ),
+            (["setuptools>=77; '3.11' <= python_version"], ">=3.11", True),
+            (["setuptools>=77; python_version > '3.11'"], "==3.11.5", False),
+            (["setuptools>=77; python_full_version > '3.11'"], "==3.11.5", True),
+            (["setuptools>=77; python_full_version >= '3.11.5'"], ">=3.11.5", True),
+            (["setuptools>=77; python_full_version >= '3.11.5'"], ">=3.11.1", False),
+            (["setuptools>=77; python_version == '3.11'"], "==3.11.*", True),
+            (["setuptools>=77; python_version != '3.11'"], "==3.12.*", True),
+            (["setuptools>=77; python_version <= '3.11'"], "==3.11.5", True),
+            (["setuptools>=77; '3.11.5' <= python_full_version"], "==3.11.5", True),
+            (["setuptools>=77; python_version >= '3.11'"], None, False),
+            (["setuptools>=77"], ">3.12,<3.12", None),
+            (
+                ["setuptools>=61", "setuptools>=77; python_version < '3.9'", "setuptools<70; python_version < '3.9'"],
+                ">=3.8,<3.9",
+                None,
+            ),
+        )
+        for requirements, python, expected in cases:
+            with self.subTest(requirements=requirements, python=python):
+                self.assertIs(
+                    ratings.BuildBackendVersionFloor().test(self._backend_data(requirements, python)).outcome, expected
+                )
+
+    def test_unknown_backend_conditions_are_conservative(self) -> None:
+        cases = (
+            (["setuptools>=77; sys_platform == 'linux'"], None),
+            (["setuptools>=61", "setuptools>=77; os_name == 'posix'"], None),
+            (["setuptools>=77", "setuptools>=61; os_name == 'posix'"], True),
+            (["setuptools @ https://example.invalid/backend.whl"], None),
+            (["setuptools>=77", "setuptools @ https://example.invalid/backend.whl"], True),
+            (["setuptools>=77,<70"], None),
+            (["setuptools>=77", "setuptools<70; python_version >= '3.11'"], None),
+            (["setuptools>=77.0.0rc1"], False),
+            (["setuptools"], False),
+            ([], False),
+        )
+        for requirements, expected in cases:
+            with self.subTest(requirements=requirements):
+                self.assertIs(
+                    ratings.BuildBackendVersionFloor().test(self._backend_data(requirements)).outcome, expected
+                )
+        fallback = self._backend_data(["setuptools>=77; python_version >= '3.11'"], None)
+        fallback["requires-python"] = ">=3.11"
+        self.assertIs(ratings.BuildBackendVersionFloor().test(fallback).outcome, True)
+
+    def test_flit_feature_floors(self) -> None:
+        cases = (
+            ({"license": "MIT"}, "3.11", True),
+            ({"license-files": ["LICENSE"]}, "3.11", True),
+            ({"license": "MIT", "license-files": ["LICENSE"]}, "3.10", False),
+            ({"license": "MIT OR Apache-2.0"}, "3.11", False),
+            ({"license": "MIT AND Apache-2.0"}, "3.12", True),
+            ({"license": "(MIT)"}, "3.11", False),
+            ({"license": "(MIT)"}, "3.12", True),
+            ({"license": "GPL-2.0-only WITH Classpath-exception-2.0"}, "3.12", None),
+            ({"license": "not-a-license"}, "3.12", None),
+        )
+        for features, floor, expected in cases:
+            with self.subTest(features=features, floor=floor):
+                data = {
+                    "_pyproject": {
+                        "project": features,
+                        "build-system": {"build-backend": "flit_core.buildapi", "requires": [f"flit_core>={floor}"]},
+                    }
+                }
+                self.assertIs(ratings.BuildBackendVersionFloor().test(data).outcome, expected)
+
+    def test_runtime_extra_boolean_conditions(self) -> None:
+        cases = (
+            ('extra == "test"', False),
+            ('extra != "test"', True),
+            ('extra == ""', True),
+            ('"test" == extra', False),
+            ('extra == "test" or python_version >= "3.11"', True),
+            ('(extra == "test" or extra == "docs") and os_name == "posix"', False),
+            ('extra == "test" and (python_version >= "3.11" or os_name == "nt")', False),
+            ('(extra == "test" and os_name == "nt") or (extra != "test" and os_name == "posix")', True),
+            ('extra not in "test,docs"', False),
+            ('extra in "test,docs"', True),
+            ('os_name == "unknown-environment"', True),
+        )
+        for marker, expected in cases:
+            with self.subTest(marker=marker):
+                data = {"requires-dist": [f"example<3; {marker}", f"floorless; {marker}"]}
+                self.assertIs(ratings.DependencyUpperBounds().test(data).outcome, not expected)
+                self.assertIs(ratings.DependencyLowerBounds().test(data).outcome, not expected)
+
+    def test_markdown_destinations(self) -> None:
+        cases = (
+            ('[docs](<https://example.com/docs> "Title")', []),
+            ("![image](<https://example.com/i?a=1&amp;b=2>)", []),
+            ('[docs](docs/a(b).md "Title")', ["docs/a(b).md"]),
+            ("[docs](docs/a\\(b\\).md)", ["docs/a(b).md"]),
+            ("[docs](docs/a&#46;md)", ["docs/a.md"]),
+            ('[x][ D o C ]\n\n[d o c]: <docs/ref.md> "Title"', ["docs/ref.md"]),
+            ("[docs][] and [docs]\n\n[docs]: docs/first.md\n[DOCS]: docs/second.md", ["docs/first.md"]),
+            ("![image][img]\n\n[img]: images/example.png", ["images/example.png"]),
+            ("[docs][a\\]b]\n\n[a\\]b]: docs/escaped.md", ["docs/escaped.md"]),
+            ("[docs][a&b]\n\n[a&amp;b]: docs/ambiguous.md", []),
+            ('<a href="docs/html.md">Docs</a><img src="images/a.png"/>', ["docs/html.md", "images/a.png"]),
+            ("```markdown\n[x](docs/code.md)\n```\n~~~\n![x](images/code.png)\n~~~", []),
+            ("> ~~~\n> [x](docs/code.md)\n> ~~~", []),
+            ("- ~~~\n  [x](docs/code.md)\n  ~~~", []),
+            (">     [x](docs/code.md)", []),
+            ("    [x](docs/code.md)\n\t![x](images/code.png)", []),
+            ("`[x](docs/code.md)` and `` code `[x](docs/code.md)` ``", []),
+            ("`\n[ref]: docs/code.md\n`\n[x][ref]", []),
+            ('<a href="docs/`literal`.md">docs</a>', ["docs/`literal`.md"]),
+            ('<!-- [x](docs/comment.md) --><pre>[x](docs/pre.md)</pre><code><a href="code.md">x</a></code>', []),
+            ("\\[x](docs/escaped.md)", []),
+            ('\\<a href="docs/escaped.md">example</a>', []),
+            ('<a title="[example](docs/literal.md)" href="https://example.com">example</a>', []),
+            ('<![unknown]><a href="docs/actual.md">example</a>', ["docs/actual.md"]),
+            ("[x](docs/unclosed(a.md)", []),
+            ("[x](<docs/unclosed.md)", []),
+            ('[x](docs/a.md "unclosed)', []),
+            ("[unknown][missing]", []),
+            ("[x](#section) [x](//example.com/x) [x](mailto:a@example.com)", []),
+        )
+        for description, expected in cases:
+            with self.subTest(description=description):
+                self.assertEqual(ratings._relative_description_targets(description, "text/markdown"), expected)
+
+    def test_readme_content_type_overrides_and_emission(self) -> None:
+        cases = (
+            ("README.md", "text/markdown; charset=UTF-8", True),
+            ("README.md", "text/plain", False),
+            ({"file": "README.md", "content-type": "text/plain"}, "text/plain", True),
+            ({"file": "README.md", "content-type": " Text/X-RST ; charset=utf-8"}, "TEXT/X-RST; variant=foo", True),
+            ({"file": "README.md", "content-type": "text/plain"}, "text/markdown", False),
+            ({"text": "inline", "content-type": "text/plain"}, "text/markdown", False),
+            ({"file": "README.md"}, "text/plain", None),
+        )
+        for readme, emitted, expected in cases:
+            with self.subTest(readme=readme, emitted=emitted):
+                data = {"_pyproject": {"project": {"readme": readme}}, "description-content-type": emitted}
+                self.assertIs(ratings.ReadmeContentTypeMatch().test(data).outcome, expected)
 
 
 class ConfigTest(unittest.TestCase):
@@ -1825,13 +2117,69 @@ class ProjectDataTest(unittest.TestCase):
         del data["_pyproject"]  # Parsed on the fly, not part of the metadata
         # Gathered from the working tree for the coherence checks.
         self.assertFalse(data.pop("_py_typed"))
+        self.assertFalse(data.pop("_stub_only"))
         self.assertEqual(data.pop("_license_files_unmatched"), [])
 
         self.assertEqual(data, COMPLETE)
 
-    def test_typed_marker_is_found_at_a_bounded_depth(self) -> None:
+    def test_typed_marker_is_found_in_source_tree(self) -> None:
         self.assertTrue(projectdata.has_typed_marker(TESTDATA_DIR / "typed_marker"))
         self.assertFalse(projectdata.has_typed_marker(TESTDATA_DIR / "complete"))
+
+    def test_recursive_typing_layouts(self) -> None:
+        for layout in ("pkg", "src/pkg", "src/acme/widget", "custom/python/acme/widget"):
+            with self.subTest(layout=layout), tempfile.TemporaryDirectory() as directory:
+                package = Path(directory) / layout
+                package.mkdir(parents=True)
+                (package / "py.typed").write_text("", encoding="utf-8")
+                self.assertEqual(projectdata.typing_facts(directory), (True, False))
+
+    def test_complete_and_partial_stub_layouts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "custom" / "example-stubs"
+            nested = package / "subpackage"
+            nested.mkdir(parents=True)
+            (nested / "__init__.pyi").write_text("", encoding="utf-8")
+            self.assertEqual(projectdata.typing_facts(directory), (False, True))
+            (package / "py.typed").write_text("partial\n", encoding="utf-8")
+            self.assertEqual(projectdata.typing_facts(directory), (True, False))
+            (package / "py.typed").unlink()
+            (package / "py.typed").mkdir()
+            self.assertEqual(projectdata.typing_facts(directory), (False, False))
+            (package / "py.typed").rmdir()
+            (package / "py.typed").symlink_to(package / "absent-marker")
+            self.assertEqual(projectdata.typing_facts(directory), (False, False))
+
+    def test_excluded_directories_and_symlinks(self) -> None:
+        excluded = (".hidden", ".venv", "venv", "env", "__pycache__", "build", "dist", "node_modules", "custom-env")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in excluded:
+                package = root / name / "example-stubs"
+                package.mkdir(parents=True)
+                (package / "py.typed").write_text("", encoding="utf-8")
+                (package / "__init__.pyi").write_text("", encoding="utf-8")
+            (root / "custom-env" / "pyvenv.cfg").write_text("", encoding="utf-8")
+            (root / "linked").symlink_to(root / "build", target_is_directory=True)
+            (root / "py.typed").symlink_to(root / "build" / "example-stubs" / "py.typed")
+            self.assertEqual(projectdata.typing_facts(root), (False, False))
+
+    @unittest.mock.patch("pyroma.projectdata.build_metadata")
+    def test_typing_facts_flow_to_rating(self, metadata_mock: unittest.mock.Mock) -> None:
+        metadata_mock.side_effect = lambda *_args, **_kwargs: {"classifier": ["Typing :: Typed"]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "pyproject.toml").write_text('[project]\nname = "example"\n', encoding="utf-8")
+            package = root / "src" / "example-stubs"
+            package.mkdir(parents=True)
+            (package / "__init__.pyi").write_text("", encoding="utf-8")
+            data = projectdata.get_build_data(root)
+            self.assertIs(data["_py_typed"], False)
+            self.assertIs(data["_stub_only"], True)
+            self.assertIs(ratings.TypedMarker().test(data).outcome, True)
+            (package / "py.typed").write_text("partial\n", encoding="utf-8")
+            self.assertIs(ratings.TypedMarker().test(projectdata.get_build_data(root)).outcome, True)
+        self.assertIs(ratings.TypedMarker().test({"classifier": ["Typing :: Typed"]}).outcome, None)
 
     def test_unmatched_license_files(self) -> None:
         self.assertEqual(
@@ -1872,6 +2220,7 @@ class DistroDataTest(unittest.TestCase):
                     self.assertTrue(Path(data.pop("_path")).is_dir(), distribution_path.name)
                     self.assertTrue(data.pop("_pyproject"), distribution_path.name)
                     self.assertFalse(data.pop("_py_typed"), distribution_path.name)
+                    self.assertFalse(data.pop("_stub_only"), distribution_path.name)
                     self.assertEqual(data.pop("_license_files_unmatched"), [], distribution_path.name)
                     self.assertEqual(data, COMPLETE)
                 finally:

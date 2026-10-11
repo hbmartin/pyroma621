@@ -1,17 +1,20 @@
 """Extract and normalize package metadata from a local project directory."""
 
 # Kept at runtime so the public Pathish alias resolves through get_type_hints.
-import os  # noqa: TC003
+import os
 import subprocess
 import tomllib
 from email.message import Message
 from pathlib import Path
-from typing import Any, Union, cast
+from typing import TYPE_CHECKING, Any, Union, cast
 
 import build
 import build.util
 
 from pyroma.metadata import Metadata, normalize
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 Pathish = Union[str, "os.PathLike[str]"]
 
@@ -110,14 +113,64 @@ def read_pyproject(path: Pathish) -> "tuple[dict[str, Any] | None, str | None]":
         return None, str(error)
 
 
-def has_typed_marker(path: Pathish) -> bool:
-    """Report whether the project ships a PEP 561 py.typed marker."""
-    root = Path(path)
-    # Depth-bounded: rglob would walk .git, .venv and node_modules.
-    try:
-        return any(root.glob("*/py.typed")) or any(root.glob("src/*/py.typed"))
-    except OSError:
+_EXCLUDED_SOURCE_DIRS = frozenset(
+    {"venv", "env", "virtualenv", "__pycache__", "__pypackages__", "build", "dist", "_build", "node_modules"}
+)
+
+
+def _source_directories(path: Pathish) -> "Iterator[tuple[Path, list[str]]]":
+    """Walk source directories without generated trees, environments or symlinks."""
+    for directory, children, files in os.walk(path, followlinks=False):
+        root = Path(directory)
+        children[:] = [
+            child
+            for child in children
+            if not child.startswith(".")
+            and child not in _EXCLUDED_SOURCE_DIRS
+            and not (root / child).is_symlink()
+            and not (root / child / "pyvenv.cfg").is_file()
+        ]
+        yield root, [name for name in files if (root / name).is_file() and not (root / name).is_symlink()]
+
+
+def _complete_stub(root: Path) -> bool:
+    marker = root / "py.typed"
+    if marker.is_symlink():
         return False
+    if not marker.exists():
+        return True
+    if not marker.is_file():
+        return False
+    try:
+        return "partial" not in marker.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return False
+
+
+def typing_facts(path: Pathish) -> tuple[bool, bool]:
+    """Find regular markers and complete stub packages in the source tree.
+
+    These facts describe sources only; they do not verify wheel contents.
+    """
+    has_marker = False
+    stub_roots: set[Path] = set()
+    root = Path(path).resolve()
+    for directory, files in _source_directories(root):
+        has_marker |= "py.typed" in files
+        if not any(name.endswith(".pyi") for name in files):
+            continue
+        parent = directory
+        while parent != root and parent.is_relative_to(root):
+            if parent.name.endswith("-stubs"):
+                stub_roots.add(parent)
+                break
+            parent = parent.parent
+    return has_marker, any(_complete_stub(stub) for stub in stub_roots)
+
+
+def has_typed_marker(path: Pathish) -> bool:
+    """Report whether a regular PEP 561 marker exists in the source tree."""
+    return typing_facts(path)[0]
 
 
 def _glob_matches(root: Path, pattern: str) -> bool:
@@ -159,7 +212,7 @@ def get_build_data(path: Pathish, isolated: "bool | None" = None) -> Metadata:
     stays a pure function of the metadata dict.
     """
     metadata = build_metadata(path, isolated=isolated)
-    metadata["_py_typed"] = has_typed_marker(path)
+    metadata["_py_typed"], metadata["_stub_only"] = typing_facts(path)
     # Check if there is a pyproject_toml
     if "pyproject.toml" not in {entry.name for entry in Path(path).iterdir()}:
         metadata["_missing_pyproject_toml"] = True

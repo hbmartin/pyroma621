@@ -28,6 +28,9 @@ from packaging.version import Version as PackagingVersion
 from validate_pyproject import api as pyproject_api
 from validate_pyproject import errors as pyproject_errors
 
+from pyroma._backend import backend_floor_satisfied
+from pyroma._markdown import destinations
+from pyroma._markers import active_without_extra
 from pyroma.metadata import Metadata, normalize
 from pyroma.rules import Category
 
@@ -761,21 +764,24 @@ class DependencySpecifiers(BaseTest):
         for raw_requirement in requirements:
             requirement = str(raw_requirement)
             try:
-                Requirement(requirement)
+                parsed = Requirement(requirement)
             except InvalidRequirement as e:
                 errors.append(f"'{requirement}' is not a valid dependency specifier: {e}")
                 continue
 
+            # Valid direct references may also trigger syntax advisories.
+            # Those diagnostics must not restore the URL removed by DirectUrlDependency.
+            display = parsed.name if parsed.url is not None else requirement
             specifier_part, _, marker_part = requirement.partition(";")
             if _PARENTHESIZED_VERSIONS_RE.search(specifier_part):
                 warnings.append(
-                    f"'{requirement}' puts the version specifier in parentheses, "
+                    f"'{display}' puts the version specifier in parentheses, "
                     "a legacy form that the dependency specifiers specification advises against."
                 )
             match = _ORDERED_NON_VERSION_MARKER_RE.search(marker_part)
             if match:
                 warnings.append(
-                    f"'{requirement}' uses an ordered comparison on the '{match.group(1)}' "
+                    f"'{display}' uses an ordered comparison on the '{match.group(1)}' "
                     "environment marker, which is not a version, so the comparison "
                     "is a lexical string comparison and probably not what you want."
                 )
@@ -1116,7 +1122,7 @@ class DirectUrlDependency(BaseTest):
 
     def test(self, data: Metadata) -> TestResult:
         """Check that no dependency is declared as a direct URL reference."""
-        direct = []
+        direct = set()
         for entry in _as_list(cast("dict[str, Any]", data).get("requires-dist")):
             try:
                 requirement = Requirement(entry)
@@ -1124,11 +1130,11 @@ class DirectUrlDependency(BaseTest):
                 # DependencySpecifiers reports malformed specifiers.
                 continue
             if requirement.url is not None:
-                direct.append(entry)
+                direct.add(requirement.name)
 
         if not direct:
             return self._passed()
-        listed = "\n".join(f"  {entry}" for entry in direct)
+        listed = "\n".join(f"  {name}" for name in sorted(direct))
         return self._failed(
             "Your package declares direct URL dependencies, which package indices reject "
             f"outright:\n{listed}\n"
@@ -1248,17 +1254,6 @@ class PythonRequiresUpperBound(BaseTest):
         )
 
 
-# packaging renders every marker value in double quotes, so stripping the
-# quoted strings leaves only variable names, operators and keywords behind.
-_MARKER_STRING_RE = re.compile(r'"[^"]*"')
-_MARKER_EXTRA_RE = re.compile(r"\bextra\b")
-
-
-def _marker_names_extra(marker: object) -> bool:
-    """Report whether an environment marker refers to the `extra` variable."""
-    return _MARKER_EXTRA_RE.search(_MARKER_STRING_RE.sub('""', str(marker))) is not None
-
-
 def _runtime_requirements(data: Metadata) -> "list[Requirement]":
     """Parse the runtime dependencies, skipping extras and malformed entries."""
     requirements = []
@@ -1268,9 +1263,7 @@ def _runtime_requirements(data: Metadata) -> "list[Requirement]":
         except InvalidRequirement:
             # DependencySpecifiers reports malformed specifiers.
             continue
-        # An "extra" marker means this is an optional dependency, not a
-        # dependency every user of the package will install.
-        if requirement.marker is not None and _marker_names_extra(requirement.marker):
+        if requirement.marker is not None and not active_without_extra(requirement.marker):
             continue
         requirements.append(requirement)
     return requirements
@@ -1329,11 +1322,6 @@ class DependencyLowerBounds(BaseTest):
         )
 
 
-_MARKDOWN_TARGET_RES = (
-    re.compile(r"!\[[^\]]*\]\(\s*([^)\s]+)"),
-    re.compile(r"(?<!!)\[[^\]]*\]\(\s*([^)\s]+)"),
-    re.compile(r"<img[^>]+src=[\"']([^\"']+)"),
-)
 _REST_TARGET_RES = (
     re.compile(r"(?m)^\s*\.\.\s+image::\s*(\S+)"),
     re.compile(r"`[^`]+<([^>]+)>`_"),
@@ -1357,14 +1345,15 @@ def _relative_description_targets(description: str, content_type: str) -> "list[
     """Return the relative link and image targets found in a description."""
     if content_type == "text/plain":
         return []
-    patterns = _MARKDOWN_TARGET_RES if content_type == "text/markdown" else _REST_TARGET_RES
+    if content_type == "text/markdown":
+        targets = destinations(description)
+    else:
+        targets = [match[1] for pattern in _REST_TARGET_RES for match in pattern.finditer(description)]
     # A list rather than a set, so the order is deterministic.
     found: list[str] = []
-    for pattern in patterns:
-        for match in pattern.finditer(description):
-            target = match.group(1)
-            if target not in found and _is_relative_target(target):
-                found.append(target)
+    for target in targets:
+        if target not in found and _is_relative_target(target):
+            found.append(target)
     return found
 
 
@@ -1400,18 +1389,10 @@ class ReadmeRelativeLinks(BaseTest):
         )
 
 
-# A probe micro version high enough to clear any real patch-level floor.
-_SERIES_PROBE_MICRO = 999
-
-
 def _series_admitted(specifiers: SpecifierSet, major: int, minor: int) -> bool:
-    """Report whether Requires-Python admits any release in an X.Y series.
-
-    Probing both ends of the series is enough: a floor such as ">=3.9.2"
-    rejects 3.9 but admits 3.9.999, a cap such as "<=3.9" does the reverse,
-    and an exclusion such as "!=3.9.*" or "<3.9" rejects both.
-    """
-    return specifiers.contains(f"{major}.{minor}") or specifiers.contains(f"{major}.{minor}.{_SERIES_PROBE_MICRO}")
+    """Report whether Requires-Python intersects the classifier's series."""
+    series = SpecifierSet(f"=={major}.{minor}.*").to_range()
+    return not (specifiers.to_range() & series).is_empty
 
 
 class PythonVersionCoherence(BaseTest):
@@ -1587,19 +1568,21 @@ class TypedMarker(BaseTest):
         if not isinstance(has_marker, bool):
             return self._skipped()
 
+        has_typing = has_marker or data.get("_stub_only") is True
         has_classifier = "Typing :: Typed" in _as_list(data.get("classifier"))
-        if has_marker and not has_classifier:
+        if has_typing and not has_classifier:
             return self._failed(
-                "Your project ships a py.typed marker but does not advertise it. Add the "
+                "Your source tree contains a py.typed marker or a complete stub package but does not advertise it. "
+                "Add the "
                 "'Typing :: Typed' classifier so users and tools know the package is typed."
             )
-        if has_classifier and not has_marker:
+        if has_classifier and not has_typing:
             return self._failed(
                 "You declare the 'Typing :: Typed' classifier, but no py.typed marker file "
-                "was found in your package. Without it, type checkers ignore your "
-                "annotations entirely. See https://peps.python.org/pep-0561/"
+                "or complete stub package was found in your source tree. Inline annotations "
+                "and partial stub packages need a marker. See https://peps.python.org/pep-0561/"
             )
-        if not has_marker:
+        if not has_typing:
             # An untyped package is neither penalized nor rewarded.
             return self._skipped()
         return self._passed()
@@ -1647,9 +1630,7 @@ _BACKEND_DISTRIBUTIONS = {
     "hatchling.build": "hatchling",
     "flit_core.buildapi": "flit-core",
 }
-# flit-core only learned license-expression and license-files in 3.12; the
-# 3.x releases before it silently emit the legacy License field instead.
-_PEP639_BACKEND_FLOORS = {"setuptools": "77.0.0", "hatchling": "1.27", "flit-core": "3.12"}
+_PEP639_BACKEND_FLOORS = {"setuptools": "77.0.0", "hatchling": "1.27", "flit-core": "3.11"}
 
 
 def _uses_pep639_licensing(project: "dict[str, Any]") -> bool:
@@ -1658,32 +1639,50 @@ def _uses_pep639_licensing(project: "dict[str, Any]") -> bool:
     return isinstance(project.get("license"), str) or "license-files" in project
 
 
-def _declared_backend_floor(build_system: "dict[str, Any]", distribution: str) -> "PackagingVersion | None":
-    """Return the lower bound declared for one build requirement."""
+def _backend_requirements(build_system: "dict[str, Any]", distribution: str) -> "list[Requirement]":
+    """Collect all constraints on the backend distribution."""
+    requirements = []
     for entry in _as_list(build_system.get("requires")):
         try:
             requirement = Requirement(entry)
         except InvalidRequirement:
             continue
         if normalize(requirement.name) == distribution:
-            return _specifier_lower_bound(requirement.specifier)
-    return None
+            requirements.append(requirement)
+    return requirements
 
 
-def _backend_floor_message(distribution: str, floor: str, declared: "PackagingVersion | None") -> str:
+def _backend_floor_message(distribution: str, floor: str, *, has_floor: bool) -> str:
     """Explain a missing or too-low build backend floor for PEP 639 metadata."""
     needed = f"{distribution}>={floor}"
-    if declared is None:
+    if not has_floor:
         problem = f"your [build-system] requires entry declares no minimum version for {distribution}"
         fix = f"add '{needed}' to the [build-system] requires entry"
     else:
-        problem = f"your declared build backend floor is too low: you require {distribution}>={declared}"
+        problem = (
+            f"your combined build requirements allow {distribution} versions below {floor} on supported Python versions"
+        )
         fix = f"raise the [build-system] requires entry to '{needed}'"
     return (
         "Your [project] table uses PEP 639 licensing (an SPDX 'license' string or 'license-files'), "
-        f"but {problem}. PEP 639 needs {needed}; older backends emit the wrong License metadata "
-        f"without telling you. To fix it, {fix}."
+        f"but {problem}. These licensing features need {needed}; older backends may reject them "
+        f"or emit legacy License metadata. To fix it, {fix}."
     )
+
+
+def _licensing_floor(project: "dict[str, Any]", distribution: str) -> "str | None":
+    """Return a known feature-specific minimum, skipping unsupported Flit expressions."""
+    floor = _PEP639_BACKEND_FLOORS[distribution]
+    license_expression = project.get("license")
+    if distribution != "flit-core" or not isinstance(license_expression, str):
+        return floor
+    try:
+        expression = canonicalize_license_expression(license_expression)
+    except InvalidLicenseExpression:
+        return None
+    if " WITH " in expression:
+        return None
+    return "3.12" if any(token in expression for token in (" AND ", " OR ", "(", ")")) else floor
 
 
 class BuildBackendVersionFloor(BaseTest):
@@ -1706,11 +1705,19 @@ class BuildBackendVersionFloor(BaseTest):
             # An unrecognised backend; do not guess at its PEP 639 support.
             return self._skipped()
 
-        floor = _PEP639_BACKEND_FLOORS[distribution]
-        declared = _declared_backend_floor(build_system, distribution)
-        if declared is not None and declared >= PackagingVersion(floor):
-            return self._passed()
-        return self._failed(_backend_floor_message(distribution, floor, declared))
+        floor = _licensing_floor(project, distribution)
+        if floor is None:
+            return self._skipped()
+        raw_python = project.get("requires-python", data.get("requires-python"))
+        supported = _parse_specifier_set(raw_python) if raw_python else SpecifierSet()
+        if supported is None:
+            return self._skipped()
+        requirements = _backend_requirements(build_system, distribution)
+        satisfied = backend_floor_satisfied(requirements, supported, floor)
+        if satisfied is not False:
+            return self._passed() if satisfied else self._skipped()
+        has_floor = any(_specifier_lower_bound(requirement.specifier) is not None for requirement in requirements)
+        return self._failed(_backend_floor_message(distribution, floor, has_floor=has_floor))
 
 
 class LicenseFilesExist(BaseTest):
@@ -1753,22 +1760,22 @@ def _declared_readme(project: "dict[str, Any]") -> "tuple[str, str | None] | Non
     if isinstance(readme, str):
         return readme, None
     if isinstance(readme, dict):
-        filename = readme.get("file")
-        if isinstance(filename, str):
-            content_type = readme.get("content-type")
-            return filename, content_type if isinstance(content_type, str) else None
+        filename = readme.get("file", "inline text" if "text" in readme else None)
+        content_type = readme.get("content-type")
+        if isinstance(filename, str) and isinstance(content_type, str) and content_type:
+            return filename, content_type
     return None
 
 
 class ReadmeContentTypeMatch(BaseTest):
-    """Require the readme's content type to match its file extension."""
+    """Require the emitted readme type to match its declaration or inferred type."""
 
     advisory = True
     category = Category.COHERENCE
     weight = 50
 
     def test(self, data: Metadata) -> TestResult:
-        """Check the declared content type matches the readme's suffix."""
+        """Check emitted metadata against the explicit or inferred readme type."""
         project = _load_project_table(data)
         if project is None:
             return self._skipped()
@@ -1777,17 +1784,25 @@ class ReadmeContentTypeMatch(BaseTest):
             return self._skipped()
 
         filename, explicit_type = declared
-        expected = _README_SUFFIX_TYPES.get(Path(filename).suffix.lower())
-        raw = explicit_type or data.get("description-content-type") or ""
-        actual = str(raw).split(";")[0].strip().lower()
-        if expected is None or not actual or actual == expected:
-            return self._passed()
-        source = "your readme table declares" if explicit_type else "your build backend emitted"
-        return self._failed(
-            f"Your readme is '{filename}', whose suffix means {expected}, but {source} the content "
-            f"type '{actual}'. PyPI renders the description with the declared type, so the two must "
-            f'agree: set content-type = "{expected}", or rename the file if it really is {actual}.'
+        expected = (
+            _media_type(explicit_type) if explicit_type else _README_SUFFIX_TYPES.get(Path(filename).suffix.lower())
         )
+        actual = _media_type(data.get("description-content-type"))
+        if not expected or not actual:
+            return self._skipped()
+        if actual == expected:
+            return self._passed()
+        source = "your readme table declares" if explicit_type else "its suffix implies"
+        return self._failed(
+            f"Your readme is '{filename}': {source} '{expected}', but your build backend emitted "
+            f"'{actual}'. PyPI renders the description with the emitted type, so check your readme "
+            "declaration and backend configuration to make them agree."
+        )
+
+
+def _media_type(value: object) -> str:
+    """Normalize the media type independently of its optional parameters."""
+    return value.split(";", 1)[0].strip().lower() if isinstance(value, str) else ""
 
 
 # Extra names that almost always mean "not for your users".

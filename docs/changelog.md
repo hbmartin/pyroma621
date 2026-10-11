@@ -7,6 +7,26 @@
   `pyroma.run()` retain their existing calling conventions.
 - Upgraded the build and test backend to `uv_build>=0.13.0,<0.14.0`.
   Manifest checks allow its generated `pyproject.toml.orig` file.
+- Direct URL dependency diagnostics now contain sorted, unique names only,
+  keeping credentials and tokens out of text and JSON output.
+- Raised the existing `packaging` minimum to 26.3. Python classifier coherence
+  now uses version-range intersection, including bounded patch intervals.
+- Backend floors combine all applicable requirements across the project's
+  supported Python range. Unknown markers and direct references are skipped
+  unless unconditional constraints prove the floor; contradictory partitions
+  are ignored. Flit 3.11 supports simple SPDX identifiers and license files,
+  while supported compound or parenthesized expressions need 3.12. Unknown
+  Flit feature requirements, including `WITH`, skip this advisory.
+- Runtime dependency checks now retain markers active with the empty extra,
+  including negative comparisons and mixed Boolean expressions.
+- Typing checks recognize recursive namespace/custom source layouts and
+  complete stub packages. Generated trees, environments, caches and symlinks
+  are excluded. These are source facts, not wheel-content verification.
+- README link checks conservatively extract inline/reference Markdown and
+  HTML links outside code and comments without adding a Markdown dependency.
+  Malformed or ambiguous constructs are skipped. Content-type checks honor
+  explicit readme table overrides and compare them with emitted metadata;
+  extension inference applies only to string declarations.
 - Added an advisory tier. Checks are now either scored, deciding the 1-10
   rating as before, or advisory, reported below the rating but kept out of
   the arithmetic. A new check lands as advisory and graduates to scored,
@@ -23,9 +43,9 @@
 - Added fourteen advisory checks: Python classifiers contradicting
   `Requires-Python`; end-of-life Python versions; a Development Status
   classifier contradicting the version; a build backend floor too low for
-  the PEP 639 licensing in use; `license-files` patterns matching no file; a
-  readme content type disagreeing with its extension; a `py.typed` marker
-  disagreeing with the `Typing :: Typed` classifier; capped, pinned and
+  the PEP 639 licensing in use; `license-files` patterns matching no file; an
+  emitted readme content type disagreeing with its declaration; source typing
+  facts disagreeing with the `Typing :: Typed` classifier; capped, pinned and
   floorless runtime dependencies; an upper bound on `Requires-Python`;
   development dependencies published as extras rather than declared in
   `[dependency-groups]`; relative links in the description, which do not
