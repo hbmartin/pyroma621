@@ -2,6 +2,11 @@
 
 ## 6.0.0 (unreleased)
 
+- Result dataclasses `TestResult`, `Problem`, and `RatedProject` now require
+  keyword arguments when constructed directly. `ratings.rate()` and
+  `pyroma.run()` retain their existing calling conventions.
+- Upgraded the build and test backend to `uv_build>=0.13.0,<0.14.0`.
+  Manifest checks allow its generated `pyproject.toml.orig` file.
 - Added an advisory tier. Checks are now either scored, deciding the 1-10
   rating as before, or advisory, reported below the rating but kept out of
   the arithmetic. A new check lands as advisory and graduates to scored,

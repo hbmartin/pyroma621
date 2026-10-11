@@ -297,11 +297,15 @@ for problem in result.problems:
     print(problem.test, problem.weight, problem.fatal, problem.message)
 ```
 
-The result types are frozen dataclasses:
+The result types are frozen dataclasses with keyword-only constructors:
 
-- `TestResult(outcome, weight, fatal, message)` describes one test;
-- `Problem(test, message, weight, fatal)` describes one reported failure;
-- `RatedProject(name, rating, level, problems)` describes the full rating.
+- `TestResult(outcome=..., weight=..., fatal=..., message=...)` describes one test;
+- `Problem(test=..., message=..., weight=..., fatal=...)` describes one reported failure;
+- `RatedProject(name=..., rating=..., level=..., problems=...)` describes the full rating.
+
+Pass field names when constructing these results directly. For example,
+replace `TestResult(True, 10, False, "")` with
+`TestResult(outcome=True, weight=10, fatal=False, message="")`.
 
 `pyroma.run()` still prints a report and returns the integer rating. Its
 signature gains `output_format="text"` after `index_url`.

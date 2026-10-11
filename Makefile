@@ -14,7 +14,12 @@ export PRINT_HELP_PYSCRIPT
 
 all: devenv test
 
-.PHONY: docs
+.PHONY: docs garuff
+
+# Keep the experimental checker isolated from the project's Python 3.11+ tools.
+# Pin its source until a stable ruleset is available; CI uses this same target.
+garuff: ## run the experimental garuff checker (advisory in CI)
+	uvx --python 3.14 --from 'git+https://github.com/gahjelle/garuff.git@7d126c00f13b4d94f39f1107934089241ab7a6a1' garuff check pyroma/*.py docs README.md
 
 devenv:	ve/bin/fullrelease
 

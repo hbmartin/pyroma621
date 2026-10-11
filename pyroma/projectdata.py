@@ -25,8 +25,8 @@ class BuildError(Exception):
     """The project's build configuration could not be read, so no metadata exists.
 
     Raised when the build frontend rejects the project before any backend
-    runs, for example because ``pyproject.toml`` is not valid TOML or its
-    ``[build-system]`` table is malformed. Unlike a failing build backend,
+    runs, for example because `pyproject.toml` is not valid TOML or its
+    `[build-system]` table is malformed. Unlike a failing build backend,
     which still lets Pyroma rate what it knows, this leaves nothing to rate.
     """
 
@@ -98,7 +98,7 @@ def build_metadata(path: Pathish, isolated: "bool | None" = None) -> Metadata:
 def read_pyproject(path: Pathish) -> "tuple[dict[str, Any] | None, str | None]":
     """Read and parse a project's pyproject.toml.
 
-    Returns a ``(table, error)`` pair: exactly one of the two is set. The
+    Returns a `(table, error)` pair: exactly one of the two is set. The
     error is a plain string rather than an exception so that metadata stays
     plain data and rating remains a pure function of it.
     """

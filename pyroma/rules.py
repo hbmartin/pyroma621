@@ -4,8 +4,8 @@ This module deliberately imports nothing from pyroma, so that any other
 module can depend on it without risking an import cycle.
 
 Tests are identified by their class name, which is already a stable public
-identifier: it is what ``--skip-tests`` accepts and what the JSON reporter
-emits as ``test``. A category is the axis that name does not capture --
+identifier: it is what `--skip-tests` accepts and what the JSON reporter
+emits as `test`. A category is the axis that name does not capture --
 whether a finding is a specification violation, something a package index
 will reject, or an opinionated recommendation.
 """

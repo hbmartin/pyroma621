@@ -1,8 +1,8 @@
 """Rate normalized package metadata against packaging best practices.
 
-Each rating test returns a :class:`TestResult` from its ``test`` method.
+Each rating test returns a :class:`TestResult` from its `test` method.
 
-``outcome`` is true for a pass, false for a failure, and ``None`` when the
+`outcome` is true for a pass, false for a failure, and `None` when the
 test does not apply. Tests are stateless and must not store per-run state on
 the shared instances.
 """
@@ -57,7 +57,7 @@ class ConfigurationError(Exception):
     """Raised when pyroma is configured so that no rating can be calculated."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class TestResult:
     """The outcome of running a single rating test."""
 
@@ -67,7 +67,7 @@ class TestResult:
     message: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class Problem:
     """A single problem found while rating a package."""
 
@@ -75,12 +75,11 @@ class Problem:
     message: str
     weight: int
     fatal: bool
-    # Defaulted: several call sites construct a Problem with four arguments,
-    # and the JSON reporter emits every field, so this has to be additive.
+    # Keep category optional for callers that supply only the original fields.
     category: str = Category.INTERNAL
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class RatedProject:
     """The full, structured result of rating a package."""
 
@@ -849,7 +848,7 @@ def _project_table_errors(project: "dict[str, Any]") -> "list[str]":
 
 
 class PyProjectProjectTable(BaseTest):
-    """Spot violations of the pyproject.toml ``project`` table.
+    """Spot violations of the pyproject.toml `project` table.
 
     This covers specification rules that validate-pyproject's schemas do not
     catch.
@@ -1256,7 +1255,7 @@ _MARKER_EXTRA_RE = re.compile(r"\bextra\b")
 
 
 def _marker_names_extra(marker: object) -> bool:
-    """Report whether an environment marker refers to the ``extra`` variable."""
+    """Report whether an environment marker refers to the `extra` variable."""
     return _MARKER_EXTRA_RE.search(_MARKER_STRING_RE.sub('""', str(marker))) is not None
 
 
@@ -1992,7 +1991,7 @@ def _normalized_skip_tests(skip_tests: "list[str] | str | None") -> "set[str]":
     return set(skip_tests)
 
 
-@dataclass
+@dataclass(kw_only=True)
 class _Evaluation:
     """Mutable accumulator for a single rating pass."""
 
@@ -2083,7 +2082,7 @@ def rate_project(
     """Rate a package, returning a structured RatedProject result.
 
     Advisory tests are reported separately and excluded from the rating,
-    unless ``strict`` is set, in which case they are scored like any other.
+    unless `strict` is set, in which case they are scored like any other.
     """
     no_config = _no_config_result(data)
     if no_config is not None:
