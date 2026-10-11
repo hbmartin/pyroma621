@@ -32,7 +32,7 @@ TESTDATA_DIR = Path(__file__).parent / "testdata"
 def _attach_pyproject(testdata: Metadata, path: "Path | str") -> Metadata:
     """Point metadata at a directory the way projectdata would.
 
-    ratings no longer reads from disk, so a test that supplies ``_path`` must
+    ratings no longer reads from disk, so a test that supplies `_path` must
     also supply the parsed pyproject.toml, or every pyproject check silently
     skips and the test passes while asserting nothing.
     """
@@ -685,7 +685,7 @@ class BugFixTest(unittest.TestCase):
 
 
 class CLITest(unittest.TestCase):
-    """Exercise the ``pyroma`` command through ``main()``."""
+    """Exercise the `pyroma` command through `main()`."""
 
     def _run_cli(self, *argv: str) -> "tuple[int, str, str]":
         stdout = io.StringIO()
@@ -960,7 +960,10 @@ class AdvisoryTest(unittest.TestCase):
 
         self.assertNotIn("Advisory", text)
         # Suppressing them restores byte-identical traditional output.
-        self.assertEqual(text, report.format_text(ratings.RatedProject("example", 10, ratings.LEVELS[10], [])))
+        self.assertEqual(
+            text,
+            report.format_text(ratings.RatedProject(name="example", rating=10, level=ratings.LEVELS[10], problems=[])),
+        )
 
     def test_format_json_always_includes_advisories(self) -> None:
         document = json.loads(report.format_json(self._advisory_rating()))

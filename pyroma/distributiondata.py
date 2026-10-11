@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 
 class _ExtractedMetadata(dict[str, Any]):
-    """Metadata that owns the temporary directory backing its ``_path``."""
+    """Metadata that owns the temporary directory backing its `_path`."""
 
     def __init__(self, data: Metadata, temporary_directory: "tempfile.TemporaryDirectory[str]") -> None:
         super().__init__(cast("dict[str, Any]", data))

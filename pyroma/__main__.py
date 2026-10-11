@@ -1,4 +1,4 @@
-"""Run Pyroma through ``python -m pyroma``."""
+"""Run Pyroma through `python -m pyroma`."""
 
 from . import main
 

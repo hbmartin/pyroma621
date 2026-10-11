@@ -1,4 +1,4 @@
-"""Read pyroma's own settings from a project's ``[tool.pyroma]`` table.
+"""Read pyroma's own settings from a project's `[tool.pyroma]` table.
 
 The configuration belongs to the project being rated, not to the directory
 pyroma happens to be invoked from: a project's decision to skip a rule
@@ -23,10 +23,10 @@ Pathish = projectdata.Pathish
 
 
 class ConfigError(Exception):
-    """Raised when a ``[tool.pyroma]`` table cannot be used."""
+    """Raised when a `[tool.pyroma]` table cannot be used."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class Config:
     """Effective pyroma settings for one rating run."""
 
@@ -72,7 +72,7 @@ _COERCIONS = {
 
 
 def from_table(table: object) -> Config:
-    """Build a Config from a parsed ``[tool.pyroma]`` table."""
+    """Build a Config from a parsed `[tool.pyroma]` table."""
     if not isinstance(table, dict):
         return Config()
 
@@ -89,7 +89,7 @@ def from_table(table: object) -> Config:
 
 
 def from_directory(path: Pathish) -> Config:
-    """Read ``[tool.pyroma]`` from a project directory's pyproject.toml."""
+    """Read `[tool.pyroma]` from a project directory's pyproject.toml."""
     # An unreadable or broken pyproject.toml is reported by the rating
     # itself; it must not stop pyroma from running at all.
     parsed, _error = projectdata.read_pyproject(path)

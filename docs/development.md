@@ -41,6 +41,89 @@ unittest style, private test access, and CLI output. Apply safe fixes with
 `ruff check --fix`, but review unsafe fixes individually instead of enabling
 them repository-wide.
 
+### Experimental garuff check
+
+[garuff](https://github.com/gahjelle/garuff) runs in a separate, advisory CI
+job. Run the identical check locally with uv installed:
+
+```console
+$ make garuff
+```
+
+The Makefile pins upstream commit
+`7d126c00f13b4d94f39f1107934089241ab7a6a1` (package version `2026.7.0`).
+`uvx --python 3.14` gives it the Python 3.14+ interpreter it requires without
+adding it to the project's Python 3.11+ dependency groups. The check includes
+the package's Python modules, `pyroma/tests.py`, documentation, and README;
+packaging fixtures in `pyroma/testdata` are deliberately excluded by passing
+the top-level modules explicitly. The project's `[tool.garuff]` configuration
+disables `GAC010` (function docstrings), `GAC008` (positional parameter limits),
+and `GAC011` (possessive example names). The remaining default rules stay enabled.
+
+CI retains the check's nonzero exit status, while job-level
+`continue-on-error` keeps it advisory. Standard output and errors appear in
+the job summary and the downloadable `garuff-report` artifact. Check the
+report before treating a failed run as a code defect: installation errors,
+configuration failures, and checker crashes are also possible. Promote the
+job to a merge gate only after evaluating its rules and stability.
+
+Initial evaluation on October 10, 2026, reported **275 findings**:
+
+| Rule | Initial findings | Resolution |
+| --- | ---: | --- |
+| GAC010 | 205 | Disabled; retain existing helper and test documentation conventions. |
+| GAC008 | 48 | Disabled; retain the existing function signatures. |
+| GAC004 | 15 | Fixed; docstrings use single backticks. |
+| GAC009 | 5 | Fixed; all dataclasses use `kw_only=True` and callers name their arguments. |
+| GAC011 | 2 | Disabled; retain the existing documentation example names. |
+
+Of these, 190 findings are in `pyroma/tests.py`. They are convention checks,
+not evidence of runtime bugs. A whole-tree baseline produced 276 findings;
+excluding the packaging fixtures removes one fixture docstring finding.
+After the configured ignores and code changes, `make garuff` reports **zero
+violations**. The public result dataclass constructors now require keyword
+arguments; this is documented in the upgrade guide and changelog.
+
+The initial scoped check completed without a crash on CPython 3.14.8 and 3.15.0,
+with identical findings and exit code 1. `make garuff` translates a
+nonzero checker status to make's exit code 2, so the CI pipeline must retain
+`pipefail` when capturing output with `tee`.
+
+Isolated smoke checks exposed two configuration error-handling issues at
+the pinned commit:
+
+- Malformed TOML, such as an unterminated `[tool.garuff` header, raises an
+  uncaught `tomllib.TOMLDecodeError` traceback.
+- Valid TOML with `[tool]` followed by `garuff = 1` raises an uncaught
+  `TypeError` rather than a configuration diagnostic.
+
+Both crashes return exit code 1, the same as ordinary lint findings.
+A clean one-file project returns 0, and missing paths or an unknown
+configuration key return 2 with a diagnostic. These probes were run in
+temporary projects; this repository's configuration did not trigger either
+crash. The advisory job and saved stderr make these failures visible without
+blocking unrelated work.
+
+The first source installation succeeded but uv 0.13.0 warned that upstream's
+`uv_build>=0.11.26,<0.12.0` build requirement does not include its current
+version. The project's own build/test backend and uv-build fixture now use
+`uv_build>=0.13.0,<0.14.0`; the pinned upstream garuff source still declares
+its older backend constraint. The pinned install remains dependent on GitHub
+and the build backend being available. Re-evaluate these results when updating
+the commit pin.
+
+The initial Python 3.11 suite reported 151 passes and one failure with 97%
+coverage: `RatingsTest.test_uv_build` found an extra `pyproject.toml.orig`
+in its generated sdist, also reproduced on the starting revision `54f5558`.
+The backend deliberately includes that generated file; manifest configuration
+now allows exactly that filename in the project and the uv-build fixture.
+Final validation passes all 152 tests on Python 3.11 with 97% coverage, Ruff
+linting and formatting, ty, pyrefly, actionlint, TOML/YAML/whitespace hooks,
+and wheel/sdist builds. The package rates itself 10/10 with matching source
+and manifest files. Garuff reports zero violations on Python 3.14 and 3.15.
+The workflow has been checked locally; a hosted GitHub Actions run has not
+yet been performed.
+
 ## Packaging and quality checks
 
 Build the wheel and source distribution with uv:
