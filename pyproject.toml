@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "pyroma621"
-version = "6.0.0"
+version = "6.1.0"
 description = "Test your project's packaging friendliness"
 readme = "README.md"
 authors = [
