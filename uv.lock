@@ -1980,6 +1980,7 @@ dependencies = [
 
 [package.dev-dependencies]
 audit = [
+    { name = "packaging" },
     { name = "pip-audit" },
 ]
 dev = [
@@ -2035,7 +2036,10 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-audit = [{ name = "pip-audit", specifier = "==2.10.1" }]
+audit = [
+    { name = "packaging", specifier = ">=26.3" },
+    { name = "pip-audit", specifier = "==2.10.1" },
+]
 dev = [
     { name = "deptry", specifier = ">=0.25.1" },
     { name = "hypothesis", specifier = ">=6.156.7" },

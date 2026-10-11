@@ -3,11 +3,15 @@
 import os
 import subprocess
 import sys
+import warnings
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
+from pyproject_hooks import BuildBackendWarning
 
 import pyroma
+import pyroma.tests as module
 
 _PREAMBLE = """
 import subprocess
@@ -168,6 +172,7 @@ import os
 foreign = Path.cwd() / 'foreign'
 foreign.mkdir()
 clean = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+clean.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
 subprocess.run(['git', 'init', '--quiet', str(foreign)], env=clean, check=True)
 (foreign / 'sentinel').write_text('keep')
 subprocess.run(['git', '-C', str(foreign), 'add', 'sentinel'], env=clean, check=True)
@@ -178,6 +183,16 @@ config_root = Path.cwd() / 'config'
 excludes = Path.cwd() / 'excludes'
 excludes.write_text('*.tar*\\n*.zip\\nREADME.txt\\n')
 (config_root / 'git' / 'config').write_text('[core]\\nexcludesFile = ' + str(excludes).replace('\\\\', '/') + '\\n')
+template = Path.cwd() / 'template'
+(template / 'info').mkdir(parents=True)
+(template / 'info' / 'exclude').write_text('*\\n')
+(template / 'poison-template').touch()
+global_config = config_root / 'git' / 'config'
+global_config.write_text(
+    global_config.read_text()
+    + 'hooksPath = ' + str(template).replace('\\\\', '/')
+    + '\\n[init]\\ntemplateDir = ' + str(template).replace('\\\\', '/') + '\\n'
+)
 variables = {
     'GIT_DIR': str(foreign / '.git'),
     'GIT_WORK_TREE': str(foreign),
@@ -185,6 +200,8 @@ variables = {
     'GIT_CONFIG_COUNT': '1',
     'GIT_CONFIG_KEY_0': 'core.excludesFile',
     'GIT_CONFIG_VALUE_0': str(excludes),
+    'GIT_CONFIG_GLOBAL': str(global_config),
+    'GIT_CONFIG_NOSYSTEM': '0',
     'XDG_CONFIG_HOME': str(config_root),
 }
 with patch.dict(os.environ, variables):
@@ -193,6 +210,7 @@ with patch.dict(os.environ, variables):
         module.setUpModule()
         target = module.TESTDATA_DIR
         assert (target / '.git').is_dir()
+        assert not (target / '.git' / 'poison-template').exists()
         assert dict(os.environ) == parent
         assert index.read_bytes() == before
         result = subprocess.run(
@@ -217,36 +235,21 @@ assert module._FIXTURE_DIRECTORY is None
 
 @pytest.mark.parametrize("dirname", ["custom_test", "pep517", "private_classifier", "setup_config"])
 @pytest.mark.parametrize("warning", ["changed", "absent", "unrelated"])
-def test_fixture_backend_warning_policy(tmp_path: Path, dirname: str, warning: str) -> None:
-    run_fixture_probe(
-        tmp_path,
-        """
-import warnings
-from pyproject_hooks import BuildBackendWarning
+def test_fixture_backend_warning_policy(dirname: str, warning: str) -> None:
+    def data(*_args: object, **_kwargs: object) -> dict[str, object]:
+        if warning != "absent":
+            category = BuildBackendWarning if warning == "changed" else UserWarning
+            warnings.warn("New backend warning wording", category, stacklevel=1)
+        return {}
 
-dirname, kind = sys.argv[1:]
-def data(*args, **kwargs):
-    if kind != 'absent':
-        category = BuildBackendWarning if kind == 'changed' else UserWarning
-        warnings.warn('New backend warning wording', category, stacklevel=1)
-    return {}
-
-with (
-    warnings.catch_warnings(),
-    patch.object(module.projectdata, 'get_data', side_effect=data),
-    patch.object(module, 'rate', return_value=(10, [])),
-):
-    warnings.simplefilter('error')
-    if kind == 'unrelated':
-        try:
-            module.RatingsTest()._get_file_rating(dirname)
-        except UserWarning:
-            pass
+    with (
+        warnings.catch_warnings(),
+        patch.object(module.projectdata, "get_data", side_effect=data),
+        patch.object(module, "rate", return_value=(10, [])),
+    ):
+        warnings.simplefilter("error")
+        if warning == "unrelated":
+            with pytest.raises(UserWarning, match="New backend warning wording"):
+                module.RatingsTest()._get_file_rating(dirname)
         else:
-            raise AssertionError('Unrelated warnings must fail')
-    else:
-        assert module.RatingsTest()._get_file_rating(dirname) == (10, [])
-""",
-        dirname,
-        warning,
-    )
+            assert module.RatingsTest()._get_file_rating(dirname) == (10, [])

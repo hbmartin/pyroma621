@@ -117,6 +117,10 @@ def test_ambiguous_or_unresolved_destinations_are_skipped(source: str) -> None:
         ("docs/a%0Ab.md", "docs/a%0Ab.md", "docs/a%0Ab.md"),
         ("docs/a%0Db.md", "docs/a%0Db.md", "docs/a%0Db.md"),
         ("docs/a%7Fb.md", "docs/a%7Fb.md", "docs/a%7Fb.md"),
+        ("docs/a%C2%85b.md", "docs/a%C2%85b.md", "docs/a%C2%85b.md"),
+        ("docs/a%E2%80%AEb.md", "docs/a%E2%80%AEb.md", "docs/a%E2%80%AEb.md"),
+        ("docs/a%E2%80%A8b.md", "docs/a%E2%80%A8b.md", "docs/a%E2%80%A8b.md"),
+        ("docs/a%E2%80%A9b.md", "docs/a%E2%80%A9b.md", "docs/a%E2%80%A9b.md"),
         ("%20https://example.invalid", "%20https://example.invalid", " https://example.invalid"),
     ],
 )
@@ -139,6 +143,18 @@ def test_reserved_url_characters_remain_distinct_after_deduplication() -> None:
     targets = ["docs/a%2Fb.md", "docs/a/b.md", "docs/a%23b.md", "docs/a#b.md", "docs/a%25b.md", "docs/a%2525b.md"]
     source = " ".join(f'[x]({target}) <a href="{target}">x</a>' for target in targets)
     assert _relative_description_targets(source, "text/markdown") == targets
+
+
+def test_escape_case_variants_deduplicate_by_display_destination() -> None:
+    source = (
+        '[x](docs/a%2fb.md) [y](docs/a%2Fb.md) <a href="docs/a%2fb.md">x</a> '
+        "![x](docs/a%2Fb.md) [different](docs/a/b.md) [last](docs/last.md)"
+    )
+    assert _relative_description_targets(source, "text/markdown") == [
+        "docs/a%2Fb.md",
+        "docs/a/b.md",
+        "docs/last.md",
+    ]
 
 
 @pytest.mark.parametrize(

@@ -133,6 +133,8 @@ def test_malformed_exception_uses_controlled_main_failure(
     exceptions = tmp_path / "exceptions.toml"
     exceptions.write_text("exceptions=[1]\n", encoding="utf-8")
     report = tmp_path / "audit-report.json"
+    report.write_text("stale", encoding="utf-8")
+    report.with_suffix(".requirements.txt").write_text("stale inventory", encoding="utf-8")
     runner = Mock(side_effect=AssertionError("Unexpected audit subprocess"))
     monkeypatch.setattr(audit_dependencies.subprocess, "run", runner)
     monkeypatch.setattr(
@@ -274,6 +276,19 @@ def test_stale_lock_fails(tmp_path: Path) -> None:
 def test_artifact_versions_accept_equivalent_prereleases(tmp_path: Path, tag: str) -> None:
     project = distributions(tmp_path, version="6.2.0-rc1", wheel_version="6.2.0rc1", source_version="6.2.0RC1")
     assert inspect(tmp_path, project, tag)[2] == "6.2.0rc1"
+
+
+@pytest.mark.parametrize("tag", ["", "6.2", "v6.2", "v6.2.0", "v6.2.0.0"])
+def test_artifact_versions_accept_equivalent_release_components(tmp_path: Path, tag: str) -> None:
+    project = distributions(tmp_path, version="6.2.0")
+    assert inspect(tmp_path, project, tag)[2] == "6.2.0"
+
+
+@pytest.mark.parametrize("tag", ["V6.2.0", "vv6.2.0", "vV6.2.0", " 6.2.0", "6.2.0 ", "v6.2.0\n"])
+def test_release_tags_require_one_optional_lowercase_prefix(tmp_path: Path, tag: str) -> None:
+    project = distributions(tmp_path, version="6.2.0")
+    with pytest.raises(ValueError, match="Release tag"):
+        inspect(tmp_path, project, tag)
 
 
 @pytest.mark.parametrize("field", ["project", "tag", "wheel", "source"])

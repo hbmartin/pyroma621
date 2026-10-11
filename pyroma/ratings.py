@@ -1354,9 +1354,12 @@ def _relative_description_targets(description: str, content_type: str) -> "list[
     found: list[str] = []
     seen: set[str] = set()
     for target in targets:
-        if target not in seen and _is_relative_target(target):
-            seen.add(target)
-            found.append(display_destination(target) if content_type == "text/markdown" else target)
+        if not _is_relative_target(target):
+            continue
+        display = display_destination(target) if content_type == "text/markdown" else target
+        if display not in seen:
+            seen.add(display)
+            found.append(display)
     return found
 
 

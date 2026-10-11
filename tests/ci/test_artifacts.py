@@ -2,7 +2,7 @@
 
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -75,7 +75,7 @@ def test_smoke_normalizes_installed_and_reported_versions(
     distribution = Mock()
     distribution.version = installed
     distribution.locate_file.side_effect = lambda path: root / path
-    distribution.files = [Path("pyroma621.dist-info/licenses/LICENSE.txt")]
+    distribution.files = [PurePosixPath("pyroma621.dist-info/licenses/LICENSE.txt")]
     distribution.metadata.get_all.return_value = None
     distribution.entry_points = [
         SimpleNamespace(group="console_scripts", name="pyroma", value="pyroma:main"),

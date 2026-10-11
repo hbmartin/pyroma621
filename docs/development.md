@@ -227,9 +227,12 @@ that sdist, and tests the installed wheel outside the checkout on Python 3.11 an
 from the wheel. A separate environment installs only runtime dependencies and
 checks imports, typing/license files, entry points, and both CLI invocation forms.
 
-The release tag (with an optional leading `v`) must match project, wheel, and
+The release tag (with an optional single lowercase leading `v`) must match project, wheel, and
 sdist versions under PEP 440 comparison; for example, `6.2.0-rc1` and `6.2.0rc1`
 are equivalent. Installed metadata and CLI reports use the same comparison.
+Version tags begin with an ASCII digit after the optional prefix and contain no
+whitespace. Uppercase and repeated prefixes are rejected; release-component
+aliases such as `v6.2` and `v6.2.0.0` remain equivalent to version `6.2.0`.
 Publishing consumes the same downloaded distributions after validation succeeds,
 from the `pypi` environment using Trusted Publishing. No
 build/test job receives OIDC credentials. PyPI's publisher must identify this
@@ -245,8 +248,9 @@ uv run --locked --no-default-groups python ci/package_artifacts.py validate --wo
 
 The work directory must not already exist. GitHub's "Validate package artifacts"
 workflow also accepts a release tag through manual dispatch and never publishes.
-It runs on pull requests, `master` pushes, and all tags, avoiding duplicate
-feature-branch push runs. The test and lint workflow triggers are unchanged.
+It runs on pull requests, `master` pushes, manual dispatch, and release workflow
+calls. Tag pushes do not run a separate validation matrix before release
+validation. The test and lint workflow triggers are unchanged.
 Locked invocations provide the inspector's `packaging` dependency. Local
 validation selects POSIX or Windows environment and console-script paths.
 Both archives reject egg-info, bytecode caches, Finder metadata, and `build` or
@@ -267,8 +271,10 @@ Fixtures are copied into temporary Git repositories so manifest tests work with
 an installed wheel as well as a checkout. Setup publishes the temporary path
 after copying and Git initialization succeed. Teardown restores the original
 source path, supporting repeated module runs and harmless repeated cleanup.
-Fixture Git commands strip inherited `GIT_*` variables and disable global
-excludes so caller indexes are untouched and all fixture archives are tracked.
+Fixture Git commands strip inherited `GIT_*` variables and set
+`GIT_CONFIG_GLOBAL` to the null device and `GIT_CONFIG_NOSYSTEM=1`. Global and
+system templates, hook paths, and exclusions cannot affect fixture repositories;
+caller indexes and environments remain untouched and all fixture archives are tracked.
 
 CI pins uv 0.13.0, actionlint 1.7.12, and ShellCheck 0.11.0. Workflow-checker
 archives are verified against pinned SHA-256 digests. Strict self-rating and
@@ -288,7 +294,8 @@ other platforms or Python versions:
 uv run --locked --only-group audit python ci/audit_dependencies.py
 ```
 
-The gate writes `audit-report.json` and a hashed
+The gate removes old output files before validating inputs, then writes
+`audit-report.json` and a hashed
 `audit-report.requirements.txt` inventory. The inventory includes every locked
 version and may contain conflicting pins; it is not passed directly to
 pip-audit. Temporary batches contain at most one version per package name and
@@ -300,6 +307,10 @@ an advisory (or alias), package, exact version, evidence-backed reason, owner
 (default `hbmartin`), and TOML `created`/`expires` dates. Dates use UTC; lifetimes
 cannot exceed 30 days. Expired, malformed, duplicate, and unused exceptions fail.
 Audit service failures also fail the job with captured tool diagnostics.
+Accepted batches replay their stdout and stderr, including batches whose findings
+are covered by exceptions. Complete reports remain available when findings or
+unused exceptions fail the policy gate; failed inputs and partial audits cannot
+leave a stale report that appears current. Audit tests use a fixed UTC date.
 Unused exceptions list any new unaccepted findings alongside the cleanup error.
 No automatic fixes or blanket package exclusions are performed.
 

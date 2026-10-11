@@ -3,7 +3,6 @@ name: Validate package artifacts
 on:
   push:
     branches: [master]
-    tags: ['*']
   pull_request:
   workflow_dispatch:
     inputs:
