@@ -52,7 +52,7 @@ The most important changes are:
   or query-bearing sdist URLs are handled correctly.
 - pyroma is now a typed package and ships `py.typed`.
 - contributors use uv, Ruff, ty, and pyrefly. The test suite enforces at
-  least 80 percent coverage.
+  least 94 percent production/branch coverage.
 
 ## Compatibility and breaking changes
 
@@ -665,11 +665,11 @@ current pinned tools are:
 Run the same commands as CI:
 
 ```console
-$ uv run --only-group lint ruff check --force-exclude .
-$ uv run --only-group lint ruff format --force-exclude .
-$ uv run --extra test --group typecheck ty check
-$ uv run --extra test --group typecheck pyrefly check
-$ uv run --extra test python -m pytest
+$ uv run --locked --only-group lint ruff check --force-exclude .
+$ uv run --locked --only-group lint ruff format --force-exclude .
+$ uv run --locked --group test --group typecheck ty check
+$ uv run --locked --group test --group typecheck pyrefly check
+$ uv run --locked --group test python -m pytest
 ```
 
 Pre-commit uses local system hooks that invoke the same Ruff pin through uv.
@@ -798,7 +798,7 @@ Before adopting this version:
 - [ ] Replace Black/Flake8/mypy contributor commands with
   Ruff/ty/pyrefly through uv.
 
-- [ ] Run pytest, both type checkers, Ruff, and the 80-percent coverage gate.
+- [ ] Run pytest, both type checkers, Ruff, and the 94-percent production/branch coverage gate.
 
 - [ ] Validate directory, built-sdist, and index modes used by the release
   pipeline.

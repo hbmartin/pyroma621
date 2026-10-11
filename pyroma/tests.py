@@ -10,6 +10,7 @@ import tarfile
 import tempfile
 import unittest
 import unittest.mock
+import warnings
 from email.message import Message
 from importlib.metadata import PackageNotFoundError
 from itertools import permutations
@@ -21,6 +22,7 @@ import build
 import build.util
 from hypothesis import example, given, settings
 from hypothesis import strategies as st
+from pyproject_hooks import BuildBackendWarning
 
 import pyroma
 from pyroma import config, distributiondata, projectdata, pypidata, ratings, report
@@ -29,6 +31,26 @@ from pyroma.ratings import rate
 
 TESTDATA_DIR = Path(__file__).parent / "testdata"
 PYROMA_ROOT = Path(pyroma.__file__).resolve().parent.parent
+_FIXTURE_DIRECTORY: tempfile.TemporaryDirectory[str] | None = None
+
+
+def setUpModule() -> None:
+    """Track copied wheel fixtures in Git so manifest tests need no checkout."""
+    global TESTDATA_DIR, _FIXTURE_DIRECTORY  # noqa: PLW0603 - module fixture lifecycle
+    _FIXTURE_DIRECTORY = tempfile.TemporaryDirectory(prefix="pyroma-fixtures-")
+    source = TESTDATA_DIR
+    TESTDATA_DIR = Path(_FIXTURE_DIRECTORY.name) / "testdata"
+    shutil.copytree(
+        source, TESTDATA_DIR, ignore=shutil.ignore_patterns("__pycache__", "*.egg-info", "dist", "build", ".DS_Store")
+    )
+    subprocess.run(["git", "init", "--quiet", str(TESTDATA_DIR)], check=True)  # noqa: S603, S607 - fixed Git commands with temporary fixture paths
+    subprocess.run(["git", "-C", str(TESTDATA_DIR), "-c", "core.autocrlf=false", "add", "."], check=True)  # noqa: S603, S607 - fixed fixture Git command
+
+
+def tearDownModule() -> None:
+    """Release the independent fixture repository."""
+    if _FIXTURE_DIRECTORY is not None:
+        _FIXTURE_DIRECTORY.cleanup()
 
 
 def _attach_pyproject(testdata: Metadata, path: "Path | str") -> Metadata:
@@ -240,7 +262,22 @@ class RatingsTest(unittest.TestCase):
         skip_tests: "list[str] | str | None" = None,
     ) -> "tuple[int, list[str]]":
         directory = TESTDATA_DIR / dirname
-        data = projectdata.get_data(directory)
+        expected = {
+            "custom_test": "The test command is disabled and references to it are deprecated.",
+            "pep517": "License classifiers are deprecated.",
+            "private_classifier": "License classifiers are deprecated.",
+            "setup_config": "License classifiers are deprecated.",
+        }
+        if dirname in expected:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.filterwarnings("always", message="^" + expected[dirname], category=BuildBackendWarning)
+                data = projectdata.get_data(directory)
+            self.assertTrue(caught, f"Expected legacy backend warning for {dirname}")
+            for warning in caught:
+                self.assertIs(warning.category, BuildBackendWarning)
+                self.assertTrue(str(warning.message).startswith(expected[dirname]))
+        else:
+            data = projectdata.get_data(directory)
         return rate(data, skip_tests)
 
     def test_complete(self) -> None:

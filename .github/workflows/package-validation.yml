@@ -1,0 +1,94 @@
+name: Validate package artifacts
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: Optional tag to validate without publishing
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      release-tag:
+        description: Release tag that must match distribution versions
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: '0.13.0'
+          enable-cache: false
+      - name: Check lockfile
+        run: uv lock --check
+      - name: Build wheel from sdist
+        run: uv build
+      - name: Inspect distributions and release version
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag || '' }}
+        run: python ci/package_artifacts.py inspect --release-tag "$RELEASE_TAG"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-package-distributions
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  validate:
+    name: Test installed artifacts (${{ matrix.python }})
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.14']
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: '0.13.0'
+          enable-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-package-distributions
+          path: dist
+      - name: Check lockfile
+        run: uv lock --check
+      - name: Test wheel and runtime CLI outside checkout
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag || '' }}
+          PYTHON_VERSION: ${{ matrix.python }}
+        run: >-
+          python ci/package_artifacts.py validate --python "$PYTHON_VERSION"
+          --work "$RUNNER_TEMP/package-validation-$PYTHON_VERSION"
+          --release-tag "$RELEASE_TAG"
+      - name: Upload artifact coverage
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: artifact-coverage-${{ matrix.python }}
+          path: ${{ runner.temp }}/package-validation-${{ matrix.python }}/coverage.xml
+          if-no-files-found: error

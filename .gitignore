@@ -20,3 +20,7 @@ py3*
 .pytest_cache
 .ruff_cache
 site/
+
+coverage.xml
+audit-report.json
+audit-report.requirements.txt
