@@ -19,6 +19,8 @@ REPOSITORY = "https://github.com/hbmartin/pyroma621"
 RELEASE_DATES = {"6.0.0": "2026-08-01", "6.1.0": "2026-10-12"}
 _RESPONSE_LIMIT = 2 * 1024 * 1024
 _PRECOMMIT_MARKER = "<!-- pyroma-pre-commit -->"
+_FENCE_START = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+_FINAL_STATUSES = {"Development Status :: 5 - Production/Stable", "Development Status :: 6 - Mature"}
 
 
 def changelog_entries(text: str) -> dict[str, str]:
@@ -34,16 +36,49 @@ def _load_yaml(text: str, context: str) -> object:
         raise ValueError(message) from error
 
 
+def _fence_end(lines: list[str], start: int, delimiter: str) -> int | None:
+    """Find a matching closing fence without inspecting its contents."""
+    closing = re.compile(r" {0,3}" + re.escape(delimiter[0]) + "{" + str(len(delimiter)) + r",}[ \t]*")
+    return next((index for index in range(start + 1, len(lines)) if closing.fullmatch(lines[index])), None)
+
+
+def _marked_precommit_blocks(readme: str) -> list[tuple[int, str]]:
+    """Read marked YAML fences while ignoring literal marker examples."""
+    lines = readme.splitlines()
+    blocks = []
+    index = 0
+    while index < len(lines):
+        fence = _FENCE_START.fullmatch(lines[index])
+        if fence:
+            end = _fence_end(lines, index, fence[1])
+            index = end + 1 if end is not None else len(lines)
+            continue
+        if not re.fullmatch(r" {0,3}" + re.escape(_PRECOMMIT_MARKER) + r"[ \t]*", lines[index]):
+            index += 1
+            continue
+        marker_line = index + 1
+        message = f"README line {marker_line}: marked pyroma hook example needs a complete yaml code block"
+        index += 1
+        while index < len(lines) and not lines[index].strip():
+            index += 1
+        fence = _FENCE_START.fullmatch(lines[index]) if index < len(lines) else None
+        if fence is None or fence[2].strip() != "yaml":
+            raise ValueError(message)
+        end = _fence_end(lines, index, fence[1])
+        if end is None:
+            raise ValueError(message)
+        blocks.append((marker_line, "\n".join(lines[index + 1 : end])))
+        index = end + 1
+    return blocks
+
+
 def precommit_revision(readme: str) -> str:
     """Read the revision from explicitly marked pyroma hook examples."""
     message = "README must document the pyroma hook from hbmartin/pyroma621 with a release revision"
     revisions: set[str] = set()
-    pattern = re.escape(_PRECOMMIT_MARKER) + r"\s*```yaml\n(.*?)\n```"
-    blocks = re.findall(pattern, readme, re.DOTALL)
-    if len(blocks) != readme.count(_PRECOMMIT_MARKER):
-        raise ValueError(message)
-    for block in blocks:
-        example = _load_yaml(block, "README pre-commit examples")
+    for marker_line, block in _marked_precommit_blocks(readme):
+        context = f"README pre-commit example at line {marker_line}"
+        example = _load_yaml(block, context)
         repositories = example.get("repos") if isinstance(example, dict) else None
         if not isinstance(repositories, list):
             continue
@@ -65,6 +100,16 @@ def precommit_revision(readme: str) -> str:
         message = "README pyroma pre-commit examples have conflicting release revisions"
         raise ValueError(message)
     return revisions.pop()
+
+
+def _require_hook_definition(text: str, context: str) -> None:
+    """Require the hook ID and command to belong to the same manifest entry."""
+    hooks = _load_yaml(text, context)
+    if not isinstance(hooks, list) or not any(
+        isinstance(hook, dict) and hook.get("id") == "pyroma" and hook.get("entry") == "pyroma" for hook in hooks
+    ):
+        message = f"{context} must provide the pyroma pre-commit hook with entry pyroma"
+        raise ValueError(message)
 
 
 def _is_pyroma_repository(repository: object) -> bool:
@@ -93,6 +138,9 @@ def _require_hook_revision(revision: str, release_tag: str) -> None:
 
 def check_offline(project: Path, release_tag: str = "") -> str:
     """Check distribution identity, canonical links, and known release dates."""
+    _require_hook_definition(
+        (project / ".pre-commit-hooks.yaml").read_text(encoding="utf-8"), "Local .pre-commit-hooks.yaml"
+    )
     metadata = tomllib.loads((project / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     site = tomllib.loads((project / "zensical.toml").read_text(encoding="utf-8"))["project"]
     readme = (project / "README.md").read_text(encoding="utf-8")
@@ -113,17 +161,17 @@ def check_offline(project: Path, release_tag: str = "") -> str:
             message = "Documentation release tag does not match project version"
             raise ValueError(message)
         _require_date(entries, metadata["version"])
-        if not Version(metadata["version"]).is_prerelease and (
-            "Development Status :: 5 - Production/Stable" not in metadata.get("classifiers", [])
+        if not Version(metadata["version"]).is_prerelease and not _FINAL_STATUSES.intersection(
+            metadata.get("classifiers", [])
         ):
-            message = "Final pyroma621 releases require Development Status :: 5 - Production/Stable"
+            message = "Final pyroma621 releases require Development Status :: 5 - Production/Stable or 6 - Mature"
             raise ValueError(message)
     revision = precommit_revision(readme)
     _require_hook_revision(revision, release_tag)
     return revision
 
 
-def fetch(url: str) -> str:
+def fetch(url: str, *, label: str = "Release evidence") -> str:
     """Read bounded public HTTPS release evidence with a timeout."""
     if not url.startswith("https://"):
         message = "Release evidence must use HTTPS"
@@ -131,18 +179,18 @@ def fetch(url: str) -> str:
     with urlopen(url, timeout=15) as response:  # noqa: S310 - public HTTPS URLs checked above
         payload = response.read(_RESPONSE_LIMIT + 1)
     if len(payload) > _RESPONSE_LIMIT:
-        message = "Release evidence exceeds the response limit"
+        message = f"{label} exceeds the response limit"
         raise ValueError(message)
     return payload.decode("utf-8")
 
 
 def _check_published_contract(project: Path) -> None:
     """Require the JSON guide and canonical schema downloads to be published."""
-    fetch(SITE_URL + "json/")
+    fetch(SITE_URL + "json/", label="JSON guide")
     for kind in ("rating", "error"):
         relative = Path("schemas") / "v1" / f"{kind}.json"
         canonical = json.loads((project / "pyroma" / relative).read_text(encoding="utf-8"))
-        published = json.loads(fetch(SITE_URL + relative.as_posix()))
+        published = json.loads(fetch(SITE_URL + relative.as_posix(), label=f"Published {kind} schema"))
         if published != canonical:
             message = f"Published {kind} schema does not match packaged schema"
             raise ValueError(message)
@@ -150,22 +198,24 @@ def _check_published_contract(project: Path) -> None:
 
 def check_online(project: Path, revision: str) -> None:
     """Verify live docs, the installation revision, and all published dates."""
-    for page in ("", "rules/", "upgrading/", "changelog/"):
-        fetch(SITE_URL + page)
+    for page, label in (
+        ("", "Documentation home"),
+        ("rules/", "Rules guide"),
+        ("upgrading/", "Upgrade guide"),
+        ("changelog/", "Changelog"),
+    ):
+        fetch(SITE_URL + page, label=label)
     _check_published_contract(project)
     base = "https://raw.githubusercontent.com/hbmartin/pyroma621/" + quote(revision, safe="") + "/"
-    metadata = tomllib.loads(fetch(base + "pyproject.toml"))["project"]
+    metadata = tomllib.loads(fetch(base + "pyproject.toml", label="Hook package metadata"))["project"]
     if metadata["name"] != "pyroma621" or Version(metadata["version"]) != Version(revision):
         message = "Documented pre-commit revision must install a pyroma621 release"
         raise ValueError(message)
-    hooks = _load_yaml(fetch(base + ".pre-commit-hooks.yaml"), "Published pre-commit hooks")
-    if not isinstance(hooks, list) or not any(
-        isinstance(hook, dict) and hook.get("id") == "pyroma" and hook.get("entry") == "pyroma" for hook in hooks
-    ):
-        message = "Documented release does not provide the pyroma pre-commit hook"
-        raise ValueError(message)
+    _require_hook_definition(
+        fetch(base + ".pre-commit-hooks.yaml", label="Published hook manifest"), "Published pre-commit hooks"
+    )
     entries = changelog_entries((project / "docs" / "changelog.md").read_text(encoding="utf-8"))
-    releases = json.loads(fetch("https://pypi.org/pypi/pyroma621/json"))["releases"]
+    releases = json.loads(fetch("https://pypi.org/pypi/pyroma621/json", label="PyPI release metadata"))["releases"]
     for version, artifacts in releases.items():
         if artifacts:
             date = min(artifact["upload_time_iso_8601"] for artifact in artifacts)[:10]

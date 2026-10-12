@@ -10,8 +10,9 @@
   describe features by their introduction version, and rebuild downloadable
   schemas without stale generated files or installing the runtime package.
 - Keep package publishing independent of live documentation; check JSON guide
-  and schema availability after Pages deployment. Final release preflight
-  requires the Production/Stable classifier.
+  and schema build outputs before upload and availability after Pages deployment.
+  Offline release checks validate the local hook manifest, final releases accept
+  Production/Stable or Mature, and fetch errors identify resources without URLs.
 - Keep release lifecycle tests independent of the current checkout version,
   share CLI/config selector validation, and include test dependencies in the
   default development environment.

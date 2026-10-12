@@ -28,6 +28,14 @@ jobs:
         run: uv run --locked --only-group docs python ci/release_docs.py schemas
       - name: Build documentation
         run: uv run --locked --only-group docs zensical build --clean --strict
+      - name: Check JSON guide and schema build outputs
+        run: |
+          for file in site/json/index.html site/schemas/v1/rating.json site/schemas/v1/error.json; do
+            if [ ! -s "$file" ]; then
+              printf 'Missing or empty documentation output: %s\n' "$file" >&2
+              exit 1
+            fi
+          done
       - name: Configure GitHub Pages
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
