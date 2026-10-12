@@ -21,17 +21,23 @@
   builds exclude those files while retaining intentional distribution fixtures.
   Release and metadata versions use PEP 440 equivalence, including prerelease
   spellings, with an optional single lowercase `v` prefix for release tags.
+  Invalid tag prefixes and whitespace report the release-tag policy before
+  version parsing.
   Local artifact validation supports Windows executable paths and POSIX license
   paths in smoke-test fixtures.
 - Package validation runs on pull requests, `master` pushes, manual dispatch,
   and release workflow calls, avoiding a second matrix run on tag pushes.
+  Publishing runs when a GitHub release is published, including from a draft,
+  and uploads only distributions that pass release validation.
   Redundant lock checks are removed where locked commands enforce the gate;
   missing diagnostic uploads warn without obscuring an earlier failure.
 - Test fixture setup publishes its temporary path after preparation succeeds;
   teardown restores the original source path so repeated module runs work.
   Failed setup cleans up its temporary directory, and teardown restores state
   even when cleanup raises. Fixture Git commands isolate inherited repository
-  variables and global/system Git configuration, including templates and excludes.
+  variables and global/system Git configuration and attributes, including templates,
+  hooks, and excludes. Temporary HOME/XDG directories support Git versions before
+  2.32, and regression probes execute a hostile index-change hook.
   Backend-warning policy tests run in-process. Legacy fixture builds allow backend warnings
   by category without depending on setuptools warning prose.
 - Hypothesis profiles load before pytest resolves command-line options,
@@ -49,8 +55,10 @@
   descendant. Isolated markers in documentation and test directories no
   longer imply package typing. Inaccessible entries are skipped individually,
   and unrelated files do not incur stat probes. Virtual and Conda environments
-  are identified by regular `pyvenv.cfg` and `conda-meta/history` files;
-  symlinked markers and symlinked `conda-meta` directories do not prune sources.
+  are identified by `pyvenv.cfg` files (including symlinks to regular files) and
+  regular `conda-meta/history` files. Broken or directory-target venv symlinks,
+  symlinked Conda history markers, and symlinked `conda-meta` directories do not
+  prune sources.
   Build-output names
   are pruned at the scan root and nested project boundaries unless they contain
   direct Python or stub sources. Packages and namespaces named `build`, `dist`,
@@ -64,10 +72,13 @@
   open regions, and HTML-looking image alt text cannot change their state.
   Markdown and HTML URLs normalize consistently before deduplication; findings
   display readable Unicode while preserving reserved escapes, invalid UTF-8,
-  and encoded Unicode controls, format characters, and line/paragraph separators.
+  and encoded Unicode controls, non-ASCII spaces, and line/paragraph separators.
+  Zero-width joiners and non-joiners remain readable for emoji and script shaping;
+  other format characters, including soft hyphens and bidi controls, stay encoded.
   Findings follow document order and deduplicate display strings, including
-  destinations that differ only in percent-escape case,
-  without repeated linear searches.
+  destinations that differ only in percent-escape case even with invalid UTF-8,
+  without repeatedly classifying or decoding identical normalized targets.
+  Duplicate spellings do not consume the five-item diagnostic limit.
 - Backend version floors remain strict: wildcard pins can admit prereleases
   below a required final release and therefore trigger an advisory. Explicit
   README content-type overrides remain supported.

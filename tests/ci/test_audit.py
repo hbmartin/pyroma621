@@ -5,7 +5,6 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
@@ -15,17 +14,6 @@ from ci import audit_dependencies as module
 
 PINS = [("a-pkg", "1"), ("a-pkg", "2"), ("a-pkg", "3"), ("b", "1"), ("b", "2"), ("single", "1")]
 TODAY = datetime.date(2026, 10, 11)
-
-
-@pytest.fixture(autouse=True)
-def fixed_audit_clock(monkeypatch: pytest.MonkeyPatch) -> None:
-    clock = Mock()
-    clock.now.return_value = datetime.datetime(2026, 10, 11, tzinfo=datetime.UTC)
-    monkeypatch.setattr(
-        module,
-        "datetime",
-        SimpleNamespace(datetime=clock, UTC=datetime.UTC, date=datetime.date, timedelta=datetime.timedelta),
-    )
 
 
 @pytest.fixture
@@ -93,7 +81,7 @@ def test_audit_batches_every_version_once_and_evaluates_exceptions_globally(
         return subprocess.CompletedProcess(arguments, status, f"batch status {status}\n", "audit summary\n")
 
     monkeypatch.setattr(module.subprocess, "run", run)
-    module.audit(lock, exceptions, report)
+    module.audit(lock, exceptions, report, today=TODAY)
     assert seen == [[("a-pkg", "1"), ("b", "1"), ("single", "1")], [("a-pkg", "2"), ("b", "2")], [("a-pkg", "3")]]
     assert [pin for batch in seen for pin in batch] == [PINS[index] for index in (0, 3, 5, 1, 4, 2)]
     document = json.loads(report.read_text())
@@ -125,14 +113,14 @@ def test_input_failure_removes_stale_outputs_before_starting_audit(
     runner = Mock(side_effect=AssertionError("Unexpected audit subprocess"))
     monkeypatch.setattr(module.subprocess, "run", runner)
     with pytest.raises((ValueError, TypeError)):
-        module.audit(lock, exceptions, report)
+        module.audit(lock, exceptions, report, today=TODAY)
     runner.assert_not_called()
     assert not report.exists()
     assert not inventory.exists()
 
 
 @pytest.mark.parametrize("days", [-1, 0, 1])
-def test_exception_expiration_uses_fixed_utc_date(tmp_path: Path, days: int) -> None:
+def test_exception_expiration_excludes_the_expiry_date(tmp_path: Path, days: int) -> None:
     exceptions = tmp_path / "exceptions.toml"
     write_exception(exceptions, "1", "GHSA-example")
     exceptions.write_text(
@@ -141,12 +129,37 @@ def test_exception_expiration_uses_fixed_utc_date(tmp_path: Path, days: int) -> 
         .replace(f"expires={TODAY + datetime.timedelta(days=1)}", f"expires={TODAY + datetime.timedelta(days=days)}"),
         encoding="utf-8",
     )
-    today = module.datetime.datetime.now(datetime.UTC).date()
     if days > 0:
-        assert len(module.load_exceptions(exceptions, today)) == 1
+        assert len(module.load_exceptions(exceptions, TODAY)) == 1
     else:
         with pytest.raises(ValueError, match="Expired"):
-            module.load_exceptions(exceptions, today)
+            module.load_exceptions(exceptions, TODAY)
+
+
+def test_audit_main_passes_utc_date_when_local_date_differs(
+    audit_files: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instant = datetime.datetime(2026, 10, 11, 0, 30, tzinfo=datetime.UTC)
+    local_timezone = datetime.timezone(datetime.timedelta(hours=-7))
+    assert instant.astimezone(local_timezone).date() != TODAY
+    clock_calls: list[datetime.tzinfo | None] = []
+
+    class Clock(datetime.datetime):
+        @classmethod
+        def now(cls, tz: datetime.tzinfo | None = None) -> datetime.datetime:
+            clock_calls.append(tz)
+            return instant.astimezone(tz if tz is not None else local_timezone)
+
+    lock, exceptions, report = audit_files
+    auditor = Mock()
+    monkeypatch.setattr(module, "datetime", Clock)
+    monkeypatch.setattr(module, "audit", auditor)
+    monkeypatch.setattr(
+        sys, "argv", ["audit", "--lock", str(lock), "--exceptions", str(exceptions), "--report", str(report)]
+    )
+    module.main()
+    auditor.assert_called_once_with(lock, exceptions, report, today=TODAY)
+    assert clock_calls == [datetime.UTC]
 
 
 @pytest.mark.parametrize("failure", ["unaccepted", "unused"])
@@ -170,7 +183,7 @@ def test_policy_failure_preserves_complete_current_report(
 
     monkeypatch.setattr(module.subprocess, "run", run)
     with pytest.raises(ValueError, match=r"Unaccepted vulnerabilities|Unused audit exception"):
-        module.audit(lock, exceptions, report)
+        module.audit(lock, exceptions, report, today=TODAY)
     assert len(json.loads(report.read_text())["dependencies"]) == len(PINS)
     inventory = report.with_suffix(".requirements.txt").read_text()
     assert inventory == module.requirement_text(module.locked_requirements(lock))
@@ -207,7 +220,7 @@ def test_fatal_batch_removes_stale_report_and_preserves_diagnostics(
 
     monkeypatch.setattr(module.subprocess, "run", run)
     with pytest.raises(ValueError, match="Audit batch failed") as error:
-        module.audit(lock, exceptions, report)
+        module.audit(lock, exceptions, report, today=TODAY)
     assert "collector output" in str(error.value)
     assert "service diagnostic" in str(error.value)
     assert len(calls) == 1
@@ -232,7 +245,7 @@ def test_later_batch_failure_never_publishes_partial_report(
 
     monkeypatch.setattr(module.subprocess, "run", run)
     with pytest.raises(ValueError, match="connection failed"):
-        module.audit(lock, exceptions, report)
+        module.audit(lock, exceptions, report, today=TODAY)
     assert len(calls) == 2
     assert not report.exists()
 

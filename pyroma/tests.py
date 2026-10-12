@@ -12,6 +12,7 @@ import tempfile
 import unittest
 import unittest.mock
 import warnings
+from collections.abc import Callable
 from email.message import Message
 from importlib.metadata import PackageNotFoundError
 from itertools import permutations
@@ -40,18 +41,40 @@ def setUpModule() -> None:
     """Track copied wheel fixtures in Git so manifest tests need no checkout."""
     global TESTDATA_DIR, _FIXTURE_DIRECTORY  # noqa: PLW0603 - module fixture lifecycle
     directory = tempfile.TemporaryDirectory(prefix="pyroma-fixtures-")
-    target = Path(directory.name) / "testdata"
+    root = Path(directory.name)
+    target = root / "testdata"
     environment = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
-    environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    environment.update(
+        HOME=str(root / "home"),
+        XDG_CONFIG_HOME=str(root / "config"),
+        GIT_CONFIG_NOSYSTEM="1",
+        GIT_ATTR_NOSYSTEM="1",
+    )
     try:
+        for name in ("home", "config", "templates", "hooks"):
+            (root / name).mkdir()
+        git_options = [
+            "-c",
+            f"core.excludesFile={os.devnull}",
+            "-c",
+            f"core.attributesFile={os.devnull}",
+            "-c",
+            f"core.hooksPath={root / 'hooks'}",
+            "-c",
+            "core.autocrlf=false",
+        ]
         shutil.copytree(
             _SOURCE_TESTDATA_DIR,
             target,
             ignore=shutil.ignore_patterns("__pycache__", "*.egg-info", "dist", "build", ".DS_Store"),
         )
-        subprocess.run(["git", "-c", "core.excludesFile=", "init", "--quiet", str(target)], env=environment, check=True)  # noqa: S603, S607 - fixed Git commands with temporary fixture paths
         subprocess.run(  # noqa: S603 - fixed fixture Git command
-            ["git", "-C", str(target), "-c", "core.excludesFile=", "-c", "core.autocrlf=false", "add", "."],  # noqa: S607 - fixed Git executable
+            ["git", *git_options, "init", "--quiet", f"--template={root / 'templates'}", str(target)],  # noqa: S607 - fixed Git executable
+            env=environment,
+            check=True,
+        )
+        subprocess.run(  # noqa: S603 - fixed fixture Git command
+            ["git", *git_options, "-C", str(target), "add", "."],  # noqa: S607 - fixed Git executable
             env=environment,
             check=True,
         )
@@ -2393,8 +2416,13 @@ class ProjectDataTest(unittest.TestCase):
             self.assertEqual(projectdata.typing_facts(root), (False, False))
 
     def test_environment_markers_prune_trees_without_traversing_them(self) -> None:
-        cases = (("env", "conda-meta/history"), ("custom-conda", "conda-meta/history"), ("venv", "pyvenv.cfg"))
-        for name, marker in cases:
+        cases = (
+            ("env", "conda-meta/history", False),
+            ("custom-conda", "conda-meta/history", False),
+            ("venv", "pyvenv.cfg", False),
+            ("custom-venv", "pyvenv.cfg", True),
+        )
+        for name, marker, symlink in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory).resolve()
                 environment = root / name
@@ -2404,8 +2432,18 @@ class ProjectDataTest(unittest.TestCase):
                 (package / "__init__.pyi").touch()
                 config = environment / marker
                 config.parent.mkdir(parents=True, exist_ok=True)
-                config.touch()
+                if symlink:
+                    target = root / "shared-venv-config"
+                    target.touch()
+                    config.symlink_to(target)
+                else:
+                    config.touch()
                 self._assert_typing_tree_is_pruned(root, environment)
+                sibling = root / "src" / "valid"
+                sibling.mkdir(parents=True)
+                (sibling / "module.py").touch()
+                (sibling / "py.typed").touch()
+                self.assertEqual(projectdata.typing_facts(root), (True, False))
 
     def test_conda_history_directory_does_not_mark_an_environment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2415,22 +2453,29 @@ class ProjectDataTest(unittest.TestCase):
             (package / "py.typed").touch()
             self.assertEqual(projectdata.typing_facts(directory), (True, False))
 
-    def test_environment_marker_symlinks_do_not_prune_sources(self) -> None:
-        for marker in ("pyvenv.cfg", "conda-meta/history"):
-            for broken in (False, True):
-                with self.subTest(marker=marker, broken=broken), tempfile.TemporaryDirectory() as directory:
-                    root = Path(directory)
-                    package = root / "env"
-                    package.mkdir()
-                    (package / "module.py").touch()
-                    (package / "py.typed").touch()
-                    target = root / "environment-marker"
-                    if not broken:
-                        target.touch()
-                    link = package / marker
-                    link.parent.mkdir(exist_ok=True)
-                    link.symlink_to(target)
-                    self.assertEqual(projectdata.typing_facts(root), (True, False))
+    def test_non_environment_markers_do_not_prune_sources(self) -> None:
+        cases = (
+            ("pyvenv.cfg", "missing"),
+            ("pyvenv.cfg", "directory"),
+            ("conda-meta/history", "missing"),
+            ("conda-meta/history", "regular"),
+        )
+        for marker, target_kind in cases:
+            with self.subTest(marker=marker, target_kind=target_kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                package = root / "env"
+                package.mkdir()
+                (package / "module.py").touch()
+                (package / "py.typed").touch()
+                target = root / "environment-marker"
+                if target_kind == "regular":
+                    target.touch()
+                elif target_kind == "directory":
+                    target.mkdir()
+                link = package / marker
+                link.parent.mkdir(exist_ok=True)
+                link.symlink_to(target)
+                self.assertEqual(projectdata.typing_facts(root), (True, False))
 
     def test_symlinked_conda_metadata_directory_does_not_prune_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2564,16 +2609,26 @@ class ProjectDataTest(unittest.TestCase):
                 package.mkdir()
                 (package / "module.py").touch()
                 (package / "py.typed").touch()
-            original_lstat = Path.lstat
             (root / "blocked" / "conda-meta").mkdir()
             for name in ("py.typed", "pyvenv.cfg", "conda-meta", "conda-meta/history"):
+                operation = "stat" if name == "pyvenv.cfg" else "lstat"
+                original_probe = getattr(Path, operation)
 
-                def denied_lstat(path: Path, denied: str = name):
+                def denied_probe(
+                    path: Path,
+                    *,
+                    follow_symlinks: bool = True,
+                    denied: str = name,
+                    probe: Callable[..., os.stat_result] = original_probe,
+                    method: str = operation,
+                ):
                     if path == root / "blocked" / denied:
                         raise PermissionError
-                    return original_lstat(path)
+                    if method == "stat":
+                        return probe(path, follow_symlinks=follow_symlinks)
+                    return probe(path)
 
-                with self.subTest(name=name), unittest.mock.patch.object(Path, "lstat", new=denied_lstat):
+                with self.subTest(name=name), unittest.mock.patch.object(Path, operation, new=denied_probe):
                     self.assertEqual(projectdata.typing_facts(root), (True, False))
                     (root / "valid" / "py.typed").unlink()
                     self.assertEqual(projectdata.typing_facts(root), (False, False))

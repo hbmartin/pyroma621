@@ -163,23 +163,36 @@ assert not directory.exists()
     )
 
 
-def test_fixture_git_commands_isolate_environment_index_and_exclusions(tmp_path: Path) -> None:
+@pytest.mark.parametrize("attributes_location", ["home", "xdg"])
+def test_fixture_git_commands_isolate_environment_index_and_exclusions(
+    tmp_path: Path, attributes_location: str
+) -> None:
     run_fixture_probe(
         tmp_path,
         """
 import os
 
+root = Path.cwd()
 foreign = Path.cwd() / 'foreign'
 foreign.mkdir()
 clean = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
-clean.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
-subprocess.run(['git', 'init', '--quiet', str(foreign)], env=clean, check=True)
+for name in ('clean-home', 'clean-config'):
+    (root / name).mkdir()
+clean.update(
+    HOME=str(root / 'clean-home'), XDG_CONFIG_HOME=str(root / 'clean-config'),
+    GIT_CONFIG_NOSYSTEM='1', GIT_ATTR_NOSYSTEM='1',
+)
+subprocess.run(['git', 'init', '--quiet', '--template=', str(foreign)], env=clean, check=True)
 (foreign / 'sentinel').write_text('keep')
 subprocess.run(['git', '-C', str(foreign), 'add', 'sentinel'], env=clean, check=True)
 index = foreign / '.git' / 'index'
 before = index.read_bytes()
 config_root = Path.cwd() / 'config'
 (config_root / 'git').mkdir(parents=True)
+home = root / 'home'
+(home / '.config' / 'git').mkdir(parents=True)
+attributes_root = home / '.config' if sys.argv[1] == 'home' else config_root
+(attributes_root / 'git' / 'attributes').write_text('*.txt working-tree-encoding=UTF-16\\n')
 excludes = Path.cwd() / 'excludes'
 excludes.write_text('*.tar*\\n*.zip\\nREADME.txt\\n')
 (config_root / 'git' / 'config').write_text('[core]\\nexcludesFile = ' + str(excludes).replace('\\\\', '/') + '\\n')
@@ -193,6 +206,19 @@ global_config.write_text(
     + 'hooksPath = ' + str(template).replace('\\\\', '/')
     + '\\n[init]\\ntemplateDir = ' + str(template).replace('\\\\', '/') + '\\n'
 )
+(home / '.gitconfig').write_text(global_config.read_text())
+hook_sentinel = root / 'hook-ran'
+hook = template / 'post-index-change'
+hook.write_text('#!/bin/sh\\nprintf poisoned > "$PYROMA_HOOK_SENTINEL"\\n')
+hook.chmod(0o755)
+with patch.dict(os.environ, {'PYROMA_HOOK_SENTINEL': str(hook_sentinel)}):
+    subprocess.run(
+        ['git', '-C', str(foreign), '-c', 'core.hooksPath=' + str(template), 'add', 'sentinel'],
+        env={**clean, 'PYROMA_HOOK_SENTINEL': str(hook_sentinel)}, check=True,
+    )
+assert hook_sentinel.exists(), 'The poison hook must actually run without isolation'
+hook_sentinel.unlink()
+before = index.read_bytes()
 variables = {
     'GIT_DIR': str(foreign / '.git'),
     'GIT_WORK_TREE': str(foreign),
@@ -202,15 +228,33 @@ variables = {
     'GIT_CONFIG_VALUE_0': str(excludes),
     'GIT_CONFIG_GLOBAL': str(global_config),
     'GIT_CONFIG_NOSYSTEM': '0',
-    'XDG_CONFIG_HOME': str(config_root),
+    'GIT_ATTR_NOSYSTEM': '0',
+    'HOME': str(home),
+    'XDG_CONFIG_HOME': '' if sys.argv[1] == 'home' else str(config_root),
+    'PYROMA_HOOK_SENTINEL': str(hook_sentinel),
 }
+run = module.subprocess.run
+
+def check_git(arguments, **kwargs):
+    environment = kwargs['env']
+    assert environment['GIT_CONFIG_NOSYSTEM'] == '1'
+    assert environment['GIT_ATTR_NOSYSTEM'] == '1'
+    assert 'GIT_DIR' not in environment
+    assert 'GIT_CONFIG_GLOBAL' not in environment
+    assert environment['HOME'] != str(home)
+    assert environment['XDG_CONFIG_HOME'] != variables['XDG_CONFIG_HOME']
+    return run(arguments, **kwargs)
+
 with patch.dict(os.environ, variables):
     parent = dict(os.environ)
     try:
-        module.setUpModule()
+        with patch.object(module.subprocess, 'run', side_effect=check_git):
+            module.setUpModule()
         target = module.TESTDATA_DIR
+        fixture_root = target.parent
         assert (target / '.git').is_dir()
         assert not (target / '.git' / 'poison-template').exists()
+        assert not hook_sentinel.exists()
         assert dict(os.environ) == parent
         assert index.read_bytes() == before
         result = subprocess.run(
@@ -224,12 +268,19 @@ with patch.dict(os.environ, variables):
             for path in (original / 'distributions').iterdir()
         }
         assert archives <= tracked
+        stored_readme = subprocess.run(
+            ['git', '-C', str(target), 'show', ':complete/README.txt'],
+            env=clean, capture_output=True, check=True,
+        ).stdout
+        assert stored_readme == (original / 'complete' / 'README.txt').read_bytes()
     finally:
         module.tearDownModule()
+    assert not fixture_root.exists()
 assert index.read_bytes() == before
 assert module.TESTDATA_DIR == original
 assert module._FIXTURE_DIRECTORY is None
 """,
+        attributes_location,
     )
 
 

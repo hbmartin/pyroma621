@@ -186,11 +186,15 @@ brackets or backticks do not hide destinations in later paragraphs. Image
 alt text is not scanned for links or HTML tags. Misnested literal end tags
 close only their matching literal region; unmatched end tags leave it open.
 Markdown and HTML destinations use the same URL normalization before relative
-classification, then deduplicate their display strings. Findings retain document
-order and display readable Unicode paths, while reserved escapes, Unicode control
-and format characters (`Cc` and `Cf`), and line and paragraph separators (`Zl`
-and `Zp`) remain UTF-8 percent-encoded. URLs containing invalid UTF-8 escapes keep
-their encoded spelling.
+classification, with uppercase percent-escape triplets, then deduplicate their
+display strings. Identical normalized destinations are classified and decoded
+only once. Findings retain document order and display readable Unicode paths,
+including zero-width joiners and non-joiners (U+200D and U+200C). Reserved escapes,
+Unicode controls (`Cc`), other format characters (`Cf`), non-ASCII spaces (`Zs`),
+and line and paragraph separators (`Zl` and `Zp`) remain UTF-8 percent-encoded.
+Ordinary ASCII spaces remain readable. URLs containing invalid UTF-8 escapes
+retain their bytes with uppercase escape spelling. Equivalent spellings count
+as one finding toward the five-item display limit.
 Extension-specific syntax is not enabled.
 
 ### Markdown extraction performance

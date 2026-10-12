@@ -284,14 +284,14 @@ def test_artifact_versions_accept_equivalent_release_components(tmp_path: Path, 
     assert inspect(tmp_path, project, tag)[2] == "6.2.0"
 
 
-@pytest.mark.parametrize("tag", ["V6.2.0", "vv6.2.0", "vV6.2.0", " 6.2.0", "6.2.0 ", "v6.2.0\n"])
+@pytest.mark.parametrize("tag", ["vfoo", "invalid", "V6.2.0", "vv6.2.0", "vV6.2.0", " 6.2.0", "6.2.0 ", "v6.2.0\n"])
 def test_release_tags_require_one_optional_lowercase_prefix(tmp_path: Path, tag: str) -> None:
     project = distributions(tmp_path, version="6.2.0")
     with pytest.raises(ValueError, match="Release tag"):
         inspect(tmp_path, project, tag)
 
 
-@pytest.mark.parametrize("field", ["project", "tag", "wheel", "source"])
+@pytest.mark.parametrize("field", ["project", "wheel", "source"])
 def test_invalid_artifact_versions_fail(tmp_path: Path, field: str) -> None:
     project = distributions(
         tmp_path,
@@ -300,7 +300,13 @@ def test_invalid_artifact_versions_fail(tmp_path: Path, field: str) -> None:
         source_version="invalid" if field == "source" else None,
     )
     with pytest.raises(ValueError, match="Invalid version"):
-        inspect(tmp_path, project, "invalid" if field == "tag" else "")
+        inspect(tmp_path, project)
+
+
+def test_release_tag_with_invalid_version_reports_the_version_error(tmp_path: Path) -> None:
+    project = distributions(tmp_path)
+    with pytest.raises(ValueError, match="Invalid version"):
+        inspect(tmp_path, project, "v6.foo")
 
 
 @pytest.mark.parametrize("field", ["wheel", "source"])

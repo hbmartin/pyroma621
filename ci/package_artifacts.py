@@ -30,11 +30,10 @@ def parsed_version(value: object) -> Version:
 
 def _release_tag_version(tag: str) -> Version:
     """Parse a version tag with at most one lowercase prefix and no whitespace."""
-    version = parsed_version(tag.removeprefix("v"))
     if re.fullmatch(r"v?[0-9][^\s]*", tag) is None:
         message = f"Release tag {tag!r} must be a version with at most one lowercase 'v' prefix"
         raise ValueError(message)
-    return version
+    return parsed_version(tag)
 
 
 def reject_generated(names: Iterable[str]) -> None:
