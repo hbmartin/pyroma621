@@ -11,6 +11,7 @@ from urllib.error import URLError
 from urllib.parse import quote
 from urllib.request import urlopen
 
+import yaml
 from packaging.version import Version
 
 SITE_URL = "https://hbmartin.github.io/pyroma621/"
@@ -20,20 +21,45 @@ _RESPONSE_LIMIT = 2 * 1024 * 1024
 
 
 def changelog_entries(text: str) -> dict[str, str]:
-    """Index version headings without confusing the separate unreleased section."""
+    """Index version headings, including the versioned unreleased section."""
     return dict(re.findall(r"^## ([^\s]+) \(([^)]+)\)$", text, re.MULTILINE))
 
 
+def _load_yaml(text: str, context: str) -> object:
+    try:
+        return yaml.safe_load(text)
+    except yaml.YAMLError as error:
+        message = f"{context} must contain valid YAML"
+        raise ValueError(message) from error
+
+
 def precommit_revision(readme: str) -> str:
-    """Require the documented hook to select this distribution's repository."""
-    examples = re.findall(r"```yaml\n(.*?)\n```", readme, re.DOTALL)
-    for example in examples:
-        if f"repo: {REPOSITORY}" in example and re.search(r"\bid: pyroma\b", example):
-            match = re.search(r"\brev:\s*['\"]?([^\s'\"]+)", example)
-            if match is not None:
-                return match[1]
+    """Read the revision from the exact repository entry providing pyroma."""
     message = "README must document the pyroma hook from hbmartin/pyroma621 with a release revision"
-    raise ValueError(message)
+    revisions: set[str] = set()
+    for block in re.findall(r"```yaml\n(.*?)\n```", readme, re.DOTALL):
+        example = _load_yaml(block, "README pre-commit examples")
+        repositories = example.get("repos") if isinstance(example, dict) else None
+        if not isinstance(repositories, list):
+            continue
+        for repository in repositories:
+            if not isinstance(repository, dict) or repository.get("repo") != REPOSITORY:
+                continue
+            hooks = repository.get("hooks")
+            if not isinstance(hooks, list) or not any(
+                isinstance(hook, dict) and hook.get("id") == "pyroma" for hook in hooks
+            ):
+                continue
+            revision = repository.get("rev")
+            if not isinstance(revision, str) or not revision.strip():
+                raise ValueError(message)
+            revisions.add(revision)
+    if not revisions:
+        raise ValueError(message)
+    if len(revisions) != 1:
+        message = "README pyroma pre-commit examples have conflicting release revisions"
+        raise ValueError(message)
+    return revisions.pop()
 
 
 def _require_date(entries: dict[str, str], version: str, expected: str | None = None) -> None:
@@ -117,8 +143,10 @@ def check_online(project: Path, revision: str) -> None:
     if metadata["name"] != "pyroma621" or Version(metadata["version"]) != Version(revision):
         message = "Documented pre-commit revision must install a pyroma621 release"
         raise ValueError(message)
-    hooks = fetch(base + ".pre-commit-hooks.yaml")
-    if not re.search(r"\bid: pyroma\b", hooks) or not re.search(r"\bentry: pyroma\b", hooks):
+    hooks = _load_yaml(fetch(base + ".pre-commit-hooks.yaml"), "Published pre-commit hooks")
+    if not isinstance(hooks, list) or not any(
+        isinstance(hook, dict) and hook.get("id") == "pyroma" and hook.get("entry") == "pyroma" for hook in hooks
+    ):
         message = "Documented release does not provide the pyroma pre-commit hook"
         raise ValueError(message)
     entries = changelog_entries((project / "docs" / "changelog.md").read_text(encoding="utf-8"))
@@ -131,7 +159,14 @@ def check_online(project: Path, revision: str) -> None:
 
 def prepare_schemas(project: Path) -> None:
     """Copy the canonical packaged schemas into the documentation input."""
-    shutil.copytree(project / "pyroma" / "schemas", project / "docs" / "schemas", dirs_exist_ok=True)
+    source = project / "pyroma" / "schemas"
+    destination = project / "docs" / "schemas"
+    if not source.is_dir():
+        message = "Canonical packaged schema directory is missing"
+        raise ValueError(message)
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(source, destination)
 
 
 def main() -> None:

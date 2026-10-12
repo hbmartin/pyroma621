@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "pyroma621"
-version = "6.1.0"
+version = "6.2.0.dev0"
 description = "Test your project's packaging friendliness"
 readme = "README.md"
 authors = [
@@ -12,7 +12,7 @@ authors = [
     {name = "Lennart Regebro", email = "regebro@gmail.com"}
 ]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python",
@@ -43,6 +43,7 @@ dependencies = [
 
 [dependency-groups]
 test = [
+    {include-group = "release"},
     "check-manifest",
     "jsonschema>=4.25.1",
     "hypothesis>=6.156.7",
@@ -58,7 +59,8 @@ test = [
 ]
 
 audit = ["packaging>=26.3", "pip-audit==2.10.1"]
-docs = ["zensical>=0.0.50"]
+release = ["packaging>=26.3", "PyYAML>=6.0.3"]
+docs = [{include-group = "release"}, "zensical>=0.0.50"]
 dev = [
     "deptry>=0.25.1",
     "hypothesis>=6.156.7",
@@ -124,8 +126,8 @@ known_first_party = ["pyroma"]
 DEP001 = ["zest"]
 # Pygments is loaded indirectly by docutils for syntax-highlighted content.
 DEP002 = ["pygments"]
-# These development-only packages enable optional and conditional integrations.
-DEP004 = ["check_manifest", "zest"]
+# These development-only packages enable optional integrations and CI release checks.
+DEP004 = ["check_manifest", "zest", "yaml"]
 
 [tool.zest-releaser]
 create-wheel = true

@@ -57,24 +57,26 @@ class _ArgumentParser(ArgumentParser):
     _json_errors = False
 
     @overload
-    def parse_args(self, args: Iterable[str] | None = None, namespace: None = None) -> Namespace: ...
+    def parse_known_args(
+        self, args: Iterable[str] | None = None, namespace: None = None
+    ) -> tuple[Namespace, list[str]]: ...
 
     @overload
-    def parse_args(self, args: Iterable[str] | None, namespace: _Namespace) -> _Namespace: ...
+    def parse_known_args(self, args: Iterable[str] | None, namespace: _Namespace) -> tuple[_Namespace, list[str]]: ...
 
     @overload
-    def parse_args(self, *, namespace: _Namespace) -> _Namespace: ...
+    def parse_known_args(self, *, namespace: _Namespace) -> tuple[_Namespace, list[str]]: ...
 
-    def parse_args(
+    def parse_known_args(
         self, args: Iterable[str] | None = None, namespace: _Namespace | None = None
-    ) -> Namespace | _Namespace:
+    ) -> tuple[Namespace | _Namespace, list[str]]:
         arguments = list(sys.argv[1:] if args is None else args)
         self._json_errors = _requested_format(arguments) == "json"
         # Python 3.14 introduced colored argparse diagnostics.
         cast("Any", self).color = not self._json_errors
         if namespace is None:
-            return super().parse_args(arguments)
-        return super().parse_args(arguments, namespace)
+            return super().parse_known_args(arguments)
+        return super().parse_known_args(arguments, namespace)
 
     def error(self, message: str) -> Never:
         if self._json_errors:
@@ -104,13 +106,12 @@ def zester(data: "dict[str, Any]") -> None:
 
 def min_argument(arg: str) -> int:
     """Parse and validate the CLI's minimum-rating argument."""
+    message = f"--min must be an integer between 1 and 10, not {arg!r}"
     try:
         f = int(arg)
     except ValueError as e:
-        message = f"--min must be an integer between 1 and 10, not {arg!r}"
         raise ArgumentTypeError(message) from e
     if not _MIN_RATING <= f <= _MAX_RATING:
-        message = f"--min must be an integer between 1 and 10, not {arg!r}"
         raise ArgumentTypeError(message)
     return f
 
@@ -171,23 +172,12 @@ def skip_tests(arg: str) -> "list[str]":
     raise ArgumentTypeError(message)
 
 
-def _validate_config_skips(names: "list[str]") -> None:
-    """Reject [tool.pyroma] skip-tests entries that name nothing, as the CLI does."""
-    unknown = sorted(set(names) - _selectable_names())
-    if unknown:
-        listed = ", ".join(repr(name) for name in unknown)
-        message = f"[tool.pyroma] skip-tests names unknown tests: {listed}. {_available_names_message()}"
-        raise config_module.ConfigError(message)
-
-
-def _build_parser() -> ArgumentParser:
+def _build_parser(*, version_meta: Mapping[str, object] | None = None) -> ArgumentParser:
     """Construct the command-line argument parser."""
-    parser = _ArgumentParser()
-    # argparse only grew the color attribute in Python 3.14.
-    cast_parser = cast("Any", parser)
-    cast_parser.color = True
+    parser = _ArgumentParser(allow_abbrev=False)
+    version_meta = _version_meta() if version_meta is None else version_meta
     parser.add_argument(
-        "--version", action="version", version=f"{_DISTRIBUTION_NAME} {_checker_version() or 'unknown'}"
+        "--version", action="version", version=f"{_DISTRIBUTION_NAME} {version_meta.get('pyroma', 'unknown')}"
     )
     parser.add_argument(
         "package",
@@ -305,6 +295,10 @@ def _build_parser() -> ArgumentParser:
     return parser
 
 
+def _config_enabled(args: Namespace, mode: str) -> bool:
+    return bool(args.use_config and mode == "directory")
+
+
 def _resolve_config(
     args: Namespace, mode: str, *, provenance: config_module.ConfigSource | None = None
 ) -> config_module.Config:
@@ -314,9 +308,8 @@ def _resolve_config(
     what the user did not ask for.
     """
     settings = config_module.Config()
-    if args.use_config and mode == "directory":
+    if _config_enabled(args, mode):
         settings = config_module.from_directory(args.package, provenance=provenance)
-        _validate_config_skips(settings.skip_tests)
 
     skip = args.skip_tests or settings.skip_tests
     return config_module.Config(
@@ -341,14 +334,15 @@ def _resolve_mode(mode: "str | None", package: str) -> str:
 
 def main() -> None:
     """Run the command-line interface."""
+    version_meta = _version_meta()
     try:
-        args = _build_parser().parse_args()
+        args = _build_parser(version_meta=version_meta).parse_args()
     except UsageError as error:
-        print(report.format_json_error(error, _version_meta()))
+        print(report.format_json_error(error, version_meta))
         sys.exit(2)
     mode = _resolve_mode(args.mode, args.package)
-    meta = _json_meta(mode, args.package)
-    provenance = config_module.ConfigSource(enabled=args.use_config and mode == "directory")
+    meta = _json_meta(mode, args.package, version_meta=version_meta)
+    provenance = config_module.ConfigSource(enabled=_config_enabled(args, mode))
 
     try:
         settings = _resolve_config(args, mode, provenance=provenance)
@@ -372,8 +366,6 @@ def main() -> None:
         config_module.ConfigError,
         ValueError,
     ) as e:
-        if isinstance(e, config_module.ConfigError):
-            provenance.loaded = False
         if args.output_format == "json":
             meta["config"] = asdict(provenance)
             print(report.format_json_error(e, meta))
@@ -385,8 +377,9 @@ def main() -> None:
     sys.exit(0)
 
 
-def _json_meta(mode: str, argument: str) -> dict[str, object]:
-    return {"package": argument, "mode": mode, **_version_meta()}
+def _json_meta(mode: str, argument: str, *, version_meta: Mapping[str, object] | None = None) -> dict[str, object]:
+    version_meta = _version_meta() if version_meta is None else version_meta
+    return {"package": argument, "mode": mode, **version_meta}
 
 
 def _get_data(mode: str, argument: str, index_url: "str | None" = None) -> metadata_types.Metadata:

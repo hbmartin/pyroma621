@@ -1,9 +1,15 @@
 # JSON reports
 
+This guide describes the **unreleased 6.2 development version**. The published
+6.1.0 release does not include schema version 1, JSON argument errors, or
+`--version`. Install a development checkout with `python -m pip install .`
+from the repository root to use the features and examples below.
+
 Use `pyroma --format json PACKAGE` to write one JSON document to stdout.
 Both `--format json` and `--format=json` work. Argument errors honor the last
 explicit format option before `--`, even if validation fails before reaching
 that option. `--help` and `--version` still print text and exit successfully.
+Long option names must be written in full; abbreviations are rejected.
 
 ## Schemas and compatibility
 
@@ -49,7 +55,7 @@ identify the checker release that produced the findings.
   "advisories": [],
   "_meta": {
     "schema_version": 1,
-    "pyroma": "6.1.0",
+    "pyroma": "6.2.0.dev0",
     "package": ".",
     "mode": "directory",
     "policy": {
@@ -92,7 +98,7 @@ findings. `--quiet` also leaves JSON complete.
   },
   "_meta": {
     "schema_version": 1,
-    "pyroma": "6.1.0"
+    "pyroma": "6.2.0.dev0"
   }
 }
 ```

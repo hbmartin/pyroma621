@@ -29,8 +29,6 @@ Install this distribution with:
 
 ```console
 $ pip install pyroma621
-$ pyroma --version
-pyroma621 6.1.0
 ```
 
 It can be run on a project directory before making a release:
@@ -91,18 +89,32 @@ For machine-readable output, pass `--format json`:
 $ pyroma --format json .
 ```
 
-Rating and error reports include `_meta.schema_version`, the installed checker
-version, and the effective policy when settings have been resolved. See the
+The schema version 1 contract, JSON argument errors, and `--version` are
+available in the **unreleased 6.2 development version**, not the published
+6.1.0 release. Install a development checkout from the repository root with
+`python -m pip install .`. Its version can be checked without rating a package:
+
+```console
+$ pyroma --version
+pyroma621 6.2.0.dev0
+```
+
+In the development version, rating and error reports include
+`_meta.schema_version`, the installed checker version, and the effective policy
+when settings have been resolved. See the
 [JSON contract and downloadable schemas](https://hbmartin.github.io/pyroma621/json/).
 Invalid arguments also produce JSON when explicitly requested, for example
 `pyroma --format json --min 11 .` reports `UsageError`.
+Long option names must be written in full; abbreviated names such as `--form`
+are rejected.
 
 ## Exit codes
 
 - `0`: The package rated equal to or above the `--min` rating (default 8).
 - `2`: The package rated below the `--min` rating, or command-line arguments
-  were invalid. With `--format json`, a low rating contains `rating`; an
-  argument failure contains `error.type = "UsageError"` and no rating.
+  were invalid. With `--format json`, a low rating contains `rating`. In the
+  unreleased 6.2 version, an argument failure contains
+  `error.type = "UsageError"` and no rating.
 - `1`: Used by the `zest.releaser` integration when you choose to abort
   the release after a low rating.
 - `3`: An error prevented rating the package: it could not be found or

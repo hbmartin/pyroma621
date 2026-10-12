@@ -45,7 +45,7 @@ jobs:
         run: uv run --locked --no-default-groups python ci/package_artifacts.py preflight --release-tag "$RELEASE_TAG"
       - name: Check release documentation
         if: env.RELEASE_TAG != ''
-        run: uv run --locked --no-default-groups python ci/release_docs.py check --online --release-tag "$RELEASE_TAG"
+        run: uv run --locked --no-default-groups --group release python ci/release_docs.py check --online --release-tag "$RELEASE_TAG"
       - name: Build wheel from sdist
         run: uv build
       - name: Inspect distributions and release version

@@ -386,21 +386,26 @@ Contract tests in `tests/contract` validate reports against the packaged
 Draft 2020-12 schemas with the test-only `jsonschema` dependency. They cover
 usage errors, policy precedence, discovery provenance, advisory presentation,
 and version discovery without builds or network requests.
+The shared session fixture loads each installed schema and checks it once;
+the two self-contained schemas must have identical metadata definitions.
 
 Prepare downloadable schemas before a strict documentation build:
 
 ```console
-$ uv run --locked --no-default-groups python ci/release_docs.py schemas
+$ uv run --locked --only-group docs python ci/release_docs.py schemas
 $ uv run --locked --only-group docs zensical build --clean --strict
 ```
 
 The packaged JSON files are the source of truth; `docs/schemas/` is generated
-and ignored. Offline tests validate every JSON documentation example.
+and ignored. Preparation replaces this generated tree, including all canonical
+schema versions, so repeated builds remove stale downloads. The docs-only
+environment does not install the runtime project. Offline tests validate every
+JSON documentation example and its development version.
 Check documentation consistency locally, or include live release evidence:
 
 ```console
-$ uv run --locked --no-default-groups python ci/release_docs.py check
-$ uv run --locked --no-default-groups python ci/release_docs.py check --online --release-tag 6.1.0
+$ uv run --locked --only-group release python ci/release_docs.py check
+$ uv run --locked --only-group release python ci/release_docs.py check --online
 ```
 
 Tagged package validation runs the online check before building. It requires
@@ -409,9 +414,18 @@ guide and both schema downloads, and compares downloaded JSON with the
 canonical packaged schemas. It also checks the example release's distribution
 and hook, and PyPI upload dates against changelog headings. Semgrep guards
 require hook-version and published-contract validation in the release preflight.
+For a tagged check, pass `--release-tag VERSION` from the corresponding release
+checkout after dating its changelog heading and updating its documented hook.
+Hook examples and published hook definitions are parsed as YAML; repository,
+hook ID, revision, and entry must belong to the matching entry. The `release`
+dependency group supplies PyYAML and packaging without adding runtime dependencies.
 Requests have 15-second timeouts and 2 MiB response limits. Unit tests mock all
 remote evidence.
 Installed-artifact validation covers Python 3.11, 3.13, and 3.14, including
 both CLI entry points, schema resources, version output, usage-error JSON,
 and effective policy. The corrected README ships with the next PyPI release;
 GitHub Pages uses the normal documentation deployment workflow.
+Development metadata is `6.2.0.dev0` and its changelog heading is
+`6.2.0 (unreleased)`, which zest.releaser can date during prerelease preparation.
+Its Development Status classifier is `4 - Beta`; restore `5 - Production/Stable`
+when preparing the final release.

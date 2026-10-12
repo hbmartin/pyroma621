@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 6.2.0 (unreleased)
+
+- Reject abbreviated long CLI options, keep parser error formatting consistent
+  across repeated parses, and resolve checker metadata once per CLI invocation.
+- Record configuration as loaded only after its skip selectors are validated.
+- Parse documented and published pre-commit hooks structurally, distinguish
+  development features from the published release, and rebuild downloadable
+  schemas without stale generated files or installing the runtime package.
 
 - Invalid command-line arguments now produce a JSON `UsageError` when JSON
   output is requested. Usage errors retain exit code 2; low-rating reports

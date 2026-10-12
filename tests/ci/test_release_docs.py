@@ -3,32 +3,65 @@
 import json
 import re
 import shutil
+import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import Mock
 from urllib.error import URLError
 
 import pytest
+from jsonschema import Draft202012Validator
+from packaging.version import Version
+from zest.releaser import utils
+from zest.releaser.prerelease import HISTORY_HEADER, Prereleaser
 
 import pyroma
 from ci import release_docs
-from tests.contract.test_cli import validator
 
 ROOT = Path(__file__).resolve().parents[2]
+VERSION = "9.0.0"
+NEXT_VERSION = "9.1.0"
+DATE = "2026-10-12"
+
+
+def replace_once(path: Path, old: str, new: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    assert text.count(old) == 1, f"Expected one mutation target {old!r} in {path.name}"
+    path.write_text(text.replace(old, new, 1), encoding="utf-8")
 
 
 @pytest.fixture
 def project(tmp_path: Path) -> Path:
-    for filename in ("README.md", "pyproject.toml", "zensical.toml"):
-        shutil.copy(ROOT / filename, tmp_path / filename)
+    (tmp_path / "pyproject.toml").write_text(
+        f'[project]\nname = "pyroma621"\nversion = "{VERSION}"\n'
+        f'[project.urls]\nDocumentation = "{release_docs.SITE_URL}"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "zensical.toml").write_text(
+        f'[project]\nsite_url = "{release_docs.SITE_URL}"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text(
+        f"Install with `pip install pyroma621`.\nDocumentation: {release_docs.SITE_URL}\n"
+        f'```yaml\nrepos:\n  - repo: {release_docs.REPOSITORY}\n    rev: "{VERSION}"\n'
+        "    hooks:\n      - id: pyroma\n```\n",
+        encoding="utf-8",
+    )
     (tmp_path / "docs").mkdir()
-    shutil.copy(ROOT / "docs" / "changelog.md", tmp_path / "docs" / "changelog.md")
+    history = "".join(
+        f"## {version} ({date})\n\n- Released.\n\n" for version, date in release_docs.RELEASE_DATES.items()
+    )
+    (tmp_path / "docs" / "changelog.md").write_text(
+        f"# Changelog\n\n## {VERSION} ({DATE})\n\n- Released.\n\n{history}",
+        encoding="utf-8",
+    )
     shutil.copytree(Path(pyroma.__file__).parent / "schemas", tmp_path / "pyroma" / "schemas")
     return tmp_path
 
 
 @pytest.fixture
 def online_evidence(project: Path) -> dict[str, str]:
-    base = "https://raw.githubusercontent.com/hbmartin/pyroma621/6.1.0/"
+    base = f"https://raw.githubusercontent.com/hbmartin/pyroma621/{VERSION}/"
     responses = {
         release_docs.SITE_URL + page: "documentation" for page in ("", "rules/", "upgrading/", "changelog/", "json/")
     }
@@ -36,23 +69,28 @@ def online_evidence(project: Path) -> dict[str, str]:
         relative = Path("schemas") / "v1" / f"{kind}.json"
         schema = json.loads((project / "pyroma" / relative).read_text(encoding="utf-8"))
         responses[release_docs.SITE_URL + relative.as_posix()] = json.dumps(schema, sort_keys=True)
-    responses[base + "pyproject.toml"] = '[project]\nname="pyroma621"\nversion="6.1.0"\n'
+    responses[base + "pyproject.toml"] = f'[project]\nname="pyroma621"\nversion="{VERSION}"\n'
     responses[base + ".pre-commit-hooks.yaml"] = "- id: pyroma\n  entry: pyroma\n"
     responses["https://pypi.org/pypi/pyroma621/json"] = json.dumps(
-        {"releases": {"6.1.0": [{"upload_time_iso_8601": "2026-10-12T17:42:33Z"}], "empty": []}}
+        {"releases": {VERSION: [{"upload_time_iso_8601": f"{DATE}T17:42:33Z"}], "empty": []}}
     )
     return responses
 
 
 def test_documentation_consistency() -> None:
-    assert release_docs.check_offline(ROOT) == "6.1.0"
+    revision = release_docs.check_offline(ROOT)
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    assert not Version(revision).is_devrelease
+    assert Version(version) >= Version(revision)
 
 
-def test_documentation_json_examples() -> None:
+def test_documentation_json_examples(validator: Callable[[str], Draft202012Validator]) -> None:
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
     for path in (ROOT / "docs").glob("*.md"):
         for block in re.findall(r"```json\n(.*?)\n```", path.read_text(encoding="utf-8"), re.DOTALL):
             document = json.loads(block)
             validator("error" if "error" in document else "rating").validate(document)
+            assert document["_meta"]["pyroma"] == version
 
 
 @pytest.mark.parametrize(
@@ -61,64 +99,60 @@ def test_documentation_json_examples() -> None:
         ("README.md", "pip install pyroma621", "pip install pyroma", "distribution"),
         ("README.md", "https://hbmartin.github.io/pyroma621/", "https://hbmartin.github.io/pyroma/", "canonical"),
         ("README.md", "repo: https://github.com/hbmartin/pyroma621", "repo: https://github.com/regebro/pyroma", "hook"),
-        ("README.md", 'rev: "6.1.0"', "", "revision"),
+        ("README.md", f'rev: "{VERSION}"', "", "revision"),
         ("docs/changelog.md", "6.1.0 (2026-10-12)", "6.1.0 (unreleased)", "dated"),
         ("docs/changelog.md", "6.0.0 (2026-08-01)", "6.0.0 (2026-08-02)", "2026-08-01"),
         ("zensical.toml", release_docs.SITE_URL, "https://example.com/", "canonical"),
     ],
 )
 def test_documentation_regressions(project: Path, filename: str, old: str, new: str, message: str) -> None:
-    path = project / filename
-    path.write_text(path.read_text().replace(old, new))
+    replace_once(project / filename, old, new)
     with pytest.raises(ValueError, match=message):
         release_docs.check_offline(project)
 
 
 def test_future_release_needs_a_date(project: Path) -> None:
-    metadata = project / "pyproject.toml"
-    metadata.write_text(metadata.read_text().replace('version = "6.1.0"', 'version = "6.2.0"', 1))
-    assert release_docs.check_offline(project) == "6.1.0"
+    replace_once(project / "pyproject.toml", f'version = "{VERSION}"', f'version = "{NEXT_VERSION}"')
+    assert release_docs.check_offline(project) == VERSION
     with pytest.raises(ValueError, match="dated"):
-        release_docs.check_offline(project, "6.2.0")
+        release_docs.check_offline(project, NEXT_VERSION)
     with pytest.raises(ValueError, match="does not match"):
-        release_docs.check_offline(project, "6.1.0")
+        release_docs.check_offline(project, VERSION)
 
 
-@pytest.mark.parametrize("revision", ["6.1.0", "6.2.0", "v6.2.0", "6.2"])
+@pytest.mark.parametrize("revision", [VERSION, NEXT_VERSION, f"v{NEXT_VERSION}", "9.1"])
 def test_tagged_release_requires_matching_hook(project: Path, revision: str) -> None:
-    metadata = project / "pyproject.toml"
-    metadata.write_text(metadata.read_text().replace('version = "6.1.0"', 'version = "6.2.0"', 1))
+    replace_once(project / "pyproject.toml", f'version = "{VERSION}"', f'version = "{NEXT_VERSION}"')
     changelog = project / "docs" / "changelog.md"
-    changelog.write_text(changelog.read_text() + "\n## 6.2.0 (2026-10-12)\n")
-    readme = project / "README.md"
-    readme.write_text(readme.read_text().replace('rev: "6.1.0"', f'rev: "{revision}"'))
+    changelog.write_text(changelog.read_text() + f"\n## {NEXT_VERSION} ({DATE})\n")
+    replace_once(project / "README.md", f'rev: "{VERSION}"', f'rev: "{revision}"')
     assert release_docs.check_offline(project) == revision
-    if revision == "6.1.0":
+    if revision == VERSION:
         with pytest.raises(ValueError, match="pre-commit revision does not match release"):
-            release_docs.check_offline(project, "v6.2.0")
+            release_docs.check_offline(project, f"v{NEXT_VERSION}")
     else:
-        assert release_docs.check_offline(project, "v6.2.0") == revision
+        assert release_docs.check_offline(project, f"v{NEXT_VERSION}") == revision
 
 
 @pytest.mark.parametrize("failure", ["", "distribution", "hook", "date"])
 def test_online_release_evidence(
     monkeypatch: pytest.MonkeyPatch, project: Path, online_evidence: dict[str, str], failure: str
 ) -> None:
-    base = "https://raw.githubusercontent.com/hbmartin/pyroma621/6.1.0/"
+    base = f"https://raw.githubusercontent.com/hbmartin/pyroma621/{VERSION}/"
     if failure == "distribution":
-        online_evidence[base + "pyproject.toml"] = '[project]\nname="pyroma"\nversion="6.1.0"\n'
+        online_evidence[base + "pyproject.toml"] = f'[project]\nname="pyroma"\nversion="{VERSION}"\n'
     elif failure == "hook":
         online_evidence[base + ".pre-commit-hooks.yaml"] = ""
     elif failure == "date":
         url = "https://pypi.org/pypi/pyroma621/json"
-        online_evidence[url] = online_evidence[url].replace("2026-10-12", "2026-10-13")
+        online_evidence[url] = json.dumps({"releases": {VERSION: [{"upload_time_iso_8601": "2026-10-13T00:00:00Z"}]}})
     fetch = Mock(side_effect=online_evidence.__getitem__)
     monkeypatch.setattr(release_docs, "fetch", fetch)
     if failure:
         with pytest.raises(ValueError, match=r"pre-commit|hook|Changelog"):
-            release_docs.check_online(project, "6.1.0")
+            release_docs.check_online(project, VERSION)
     else:
-        release_docs.check_online(project, "6.1.0")
+        release_docs.check_online(project, VERSION)
         assert {call.args[0] for call in fetch.call_args_list} == set(online_evidence)
 
 
@@ -134,7 +168,7 @@ def test_online_contract_links_must_exist(
 
     monkeypatch.setattr(release_docs, "fetch", evidence)
     with pytest.raises(URLError, match="missing contract download"):
-        release_docs.check_online(project, "6.1.0")
+        release_docs.check_online(project, VERSION)
 
 
 @pytest.mark.parametrize("kind", ["rating", "error"])
@@ -153,7 +187,7 @@ def test_online_schemas_must_match_package(
         message = f"Published {kind} schema does not match packaged schema"
     monkeypatch.setattr(release_docs, "fetch", online_evidence.__getitem__)
     with pytest.raises(ValueError, match=message):
-        release_docs.check_online(project, "6.1.0")
+        release_docs.check_online(project, VERSION)
 
 
 def test_schema_publication(project: Path) -> None:
@@ -189,3 +223,140 @@ def test_online_failures_are_controlled(
         release_docs.main()
     assert raised.value.code == 1
     assert "unavailable" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("repository", [release_docs.REPOSITORY, f'"{release_docs.REPOSITORY}"'])
+def test_precommit_revision_belongs_to_matching_repository(repository: str) -> None:
+    readme = (
+        "```yaml\nrepos:\n"
+        "  - repo: https://github.com/example/other\n    rev: 99.0.0\n    hooks:\n      - id: pyroma\n"
+        f"  - repo: {repository}\n    rev: 98.0.0\n    hooks:\n      - id: unrelated\n"
+        f"  - repo: {repository}\n    rev: {VERSION}\n    hooks:\n      - id: pyroma\n```\n"
+    )
+    assert release_docs.precommit_revision(readme) == VERSION
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (release_docs.REPOSITORY, release_docs.REPOSITORY + "-fork"),
+        ("id: pyroma", "id: pyroma-strict"),
+        ("id: pyroma", "id: unrelated # id: pyroma"),
+        ("hooks:\n      - id: pyroma", "hooks: pyroma"),
+        ("repos:\n", "examples:\n"),
+    ],
+)
+def test_precommit_revision_requires_exact_repository_and_hook(project: Path, old: str, new: str) -> None:
+    readme = project / "README.md"
+    replace_once(readme, old, new)
+    with pytest.raises(ValueError, match="pyroma hook"):
+        release_docs.precommit_revision(readme.read_text())
+
+
+@pytest.mark.parametrize("revision", ["", "null", "6.2", '""', '" "', "[9.0.0]"])
+def test_precommit_revision_requires_nonempty_string(project: Path, revision: str) -> None:
+    readme = project / "README.md"
+    replace_once(readme, f'rev: "{VERSION}"', f"rev: {revision}")
+    with pytest.raises(ValueError, match="release revision"):
+        release_docs.precommit_revision(readme.read_text())
+
+
+@pytest.mark.parametrize("same_revision", [False, True])
+def test_precommit_repeated_examples_require_consistent_revisions(project: Path, same_revision: bool) -> None:
+    readme = (project / "README.md").read_text()
+    assert readme.count(f'rev: "{VERSION}"') == 1
+    repeated = readme if same_revision else readme.replace(f'rev: "{VERSION}"', f'rev: "{NEXT_VERSION}"', 1)
+    if same_revision:
+        assert release_docs.precommit_revision(readme + repeated) == VERSION
+    else:
+        with pytest.raises(ValueError, match="conflicting release revisions"):
+            release_docs.precommit_revision(readme + repeated)
+
+
+@pytest.mark.parametrize("example", ["repos: [", "!!python/object:example.Unsafe {}"])
+def test_yaml_failures_are_controlled(
+    monkeypatch: pytest.MonkeyPatch, project: Path, capsys: pytest.CaptureFixture, example: str
+) -> None:
+    (project / "README.md").write_text(
+        f"pip install pyroma621\n{release_docs.SITE_URL}\n```yaml\n{example}\n```\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("sys.argv", ["release_docs", "check", "--project", str(project)])
+    with pytest.raises(SystemExit) as raised:
+        release_docs.main()
+    assert raised.value.code == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "README pre-commit examples must contain valid YAML" in err
+    assert "Traceback" not in err
+
+
+@pytest.mark.parametrize(
+    "hooks",
+    [
+        "- id: pyroma-strict\n  entry: pyroma\n",
+        "- id: pyroma\n  entry: pyroma-strict\n",
+        "- id: pyroma\n  entry: unrelated\n- id: unrelated\n  entry: pyroma\n",
+        "id: pyroma\nentry: pyroma\n",
+        "- pyroma\n",
+        "- id: [\n",
+    ],
+)
+def test_published_hook_fields_belong_to_the_same_exact_entry(
+    monkeypatch: pytest.MonkeyPatch, project: Path, online_evidence: dict[str, str], hooks: str
+) -> None:
+    url = f"https://raw.githubusercontent.com/hbmartin/pyroma621/{VERSION}/.pre-commit-hooks.yaml"
+    online_evidence[url] = hooks
+    monkeypatch.setattr(release_docs, "fetch", online_evidence.__getitem__)
+    with pytest.raises(ValueError, match="hook"):
+        release_docs.check_online(project, VERSION)
+
+
+def test_schema_preparation_rebuilds_only_generated_tree(project: Path) -> None:
+    release_docs.prepare_schemas(project)
+    stale = project / "docs" / "schemas" / "v0" / "stale.json"
+    stale.parent.mkdir()
+    stale.write_text("stale", encoding="utf-8")
+    future = project / "pyroma" / "schemas" / "v2" / "rating.json"
+    future.parent.mkdir()
+    future.write_bytes((project / "pyroma" / "schemas" / "v1" / "rating.json").read_bytes())
+    unrelated = project / "docs" / "unrelated.md"
+    unrelated.write_text("keep", encoding="utf-8")
+    release_docs.prepare_schemas(project)
+    assert not stale.exists()
+    assert (project / "docs" / "schemas" / "v2" / "rating.json").read_bytes() == future.read_bytes()
+    assert unrelated.read_text() == "keep"
+
+
+def test_missing_canonical_schemas_does_not_remove_generated_files(project: Path) -> None:
+    release_docs.prepare_schemas(project)
+    published = project / "docs" / "schemas" / "v1" / "rating.json"
+    original = published.read_bytes()
+    shutil.rmtree(project / "pyroma" / "schemas")
+    with pytest.raises(ValueError, match="Canonical packaged schema directory is missing"):
+        release_docs.prepare_schemas(project)
+    assert published.read_bytes() == original
+
+
+def test_prerelease_dates_only_the_unreleased_heading(tmp_path: Path) -> None:
+    history = tmp_path / "changelog.md"
+    original = (ROOT / "docs" / "changelog.md").read_text(encoding="utf-8")
+    history.write_text(original, encoding="utf-8")
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    releaser = Prereleaser.__new__(Prereleaser)
+    releaser.vcs = Mock(version=version)
+    releaser.vcs.history_file.return_value = str(history)
+    releaser.zest_releaser_config = Mock()
+    releaser.zest_releaser_config.history_format.return_value = "md"
+    releaser.zest_releaser_config.history_file.return_value = str(history)
+    releaser.data = {"today": DATE, "history_header": HISTORY_HEADER}
+    releaser._grab_version(initial=True)
+    releaser._grab_history()
+    first = releaser.data["headings"][0]
+    assert first["date"] == "unreleased"
+    assert first["version"].removeprefix("## ") == utils.cleanup_version(version)
+    releaser._change_header()
+    expected = original.split("\n")
+    expected[first["line"]] = f"## {utils.cleanup_version(version)} ({DATE})"
+    assert releaser.data["history_lines"] == expected
+    assert "## 6.1.0 (2026-10-12)" in releaser.data["history_lines"]

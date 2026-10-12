@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pyroma import projectdata
+from pyroma import projectdata, ratings, rules
 
 DEFAULT_MIN_RATING = 8
 _LOWEST_RATING = 1
@@ -98,6 +98,20 @@ def from_table(table: object) -> Config:
     return Config(**settings)
 
 
+def _validate_skip_names(names: list[str]) -> None:
+    """Validate selectors before recording a configuration as loaded."""
+    tests = [test.__class__.__name__ for test in ratings.ALL_TESTS]
+    categories = rules.categories()
+    unknown = sorted(set(names) - set(tests) - set(categories))
+    if unknown:
+        listed = ", ".join(repr(name) for name in unknown)
+        message = (
+            f"[tool.pyroma] skip-tests names unknown tests: {listed}. "
+            f"Available tests: {', '.join(tests)}. Available categories: {', '.join(categories)}"
+        )
+        raise ConfigError(message)
+
+
 def from_directory(path: Pathish, *, provenance: ConfigSource | None = None) -> Config:
     """Read `[tool.pyroma]` from a project directory's pyproject.toml."""
     # An unreadable or broken pyproject.toml is reported by the rating
@@ -115,6 +129,7 @@ def from_directory(path: Pathish, *, provenance: ConfigSource | None = None) -> 
         return Config()
     table = tools.get("pyroma")
     settings = from_table(table)
+    _validate_skip_names(settings.skip_tests)
     if provenance is not None:
         provenance.loaded = isinstance(table, dict)
     return settings

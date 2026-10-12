@@ -231,7 +231,10 @@ Prefer JSON over scraping human-readable output:
 $ pyroma --format json --min 8 .
 ```
 
-Rating and error documents use schema version 1. The
+In the **unreleased 6.2 development version**, rating and error documents use
+schema version 1. JSON argument errors and `--version` also require that version;
+they are unavailable in published 6.1.0. Install a development checkout with
+`python -m pip install .` from its repository root to use these features. The
 [JSON contract](json.md) contains complete examples and downloadable schemas,
 including required finding arrays, categories, and effective policy metadata.
 An error document has an `error` key instead of `rating`. Argument failures
