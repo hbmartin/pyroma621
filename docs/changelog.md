@@ -2,12 +2,19 @@
 
 ## 6.2.0 (unreleased)
 
-- Reject abbreviated long CLI options, keep parser error formatting consistent
-  across repeated parses, and resolve checker metadata once per CLI invocation.
+- Preserve unambiguous long CLI option abbreviations, including JSON format
+  selection, keep parser error formatting consistent across ordinary and
+  intermixed parses, and resolve checker metadata once per CLI invocation.
 - Record configuration as loaded only after its skip selectors are validated.
-- Parse documented and published pre-commit hooks structurally, distinguish
-  development features from the published release, and rebuild downloadable
+- Parse marked pre-commit examples structurally and require literal release refs,
+  describe features by their introduction version, and rebuild downloadable
   schemas without stale generated files or installing the runtime package.
+- Keep package publishing independent of live documentation; check JSON guide
+  and schema availability after Pages deployment. Final release preflight
+  requires the Production/Stable classifier.
+- Keep release lifecycle tests independent of the current checkout version,
+  share CLI/config selector validation, and include test dependencies in the
+  default development environment.
 
 - Invalid command-line arguments now produce a JSON `UsageError` when JSON
   output is requested. Usage errors retain exit code 2; low-rating reports

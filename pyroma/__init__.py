@@ -2,16 +2,16 @@
 
 import sys
 from argparse import ArgumentParser, ArgumentTypeError, Namespace
-from collections.abc import Iterable, Mapping, Sequence
-from contextlib import suppress
+from collections.abc import Generator, Iterable, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import asdict
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Any, Never, TypeVar, cast, overload
 
+from pyroma import _selectors, distributiondata, projectdata, pypidata, ratings, report
 from pyroma import config as config_module
-from pyroma import distributiondata, projectdata, pypidata, ratings, report, rules
 from pyroma import metadata as metadata_types
 
 _MIN_RATING = 1
@@ -38,16 +38,18 @@ def _version_meta() -> dict[str, object]:
     return {"pyroma": version} if version is not None else {}
 
 
-def _requested_format(arguments: Sequence[str]) -> str | None:
-    """Find the last exact format option, even after an invalid argument."""
+def _requested_format(arguments: Sequence[str], option_strings: Sequence[str], *, allow_abbrev: bool) -> str | None:
+    """Find the last unambiguous format option, even after an invalid argument."""
     output_format = None
     for index, argument in enumerate(arguments):
         if argument == "--":
             break
-        if argument.startswith("--format="):
-            output_format = argument.partition("=")[2]
-        elif argument == "--format":
-            output_format = arguments[index + 1] if index + 1 < len(arguments) else None
+        option, separator, value = argument.partition("=")
+        if not option.startswith("--"):
+            continue
+        matches = [option] if option in option_strings else [name for name in option_strings if name.startswith(option)]
+        if option == "--format" or (allow_abbrev and matches == ["--format"]):
+            output_format = value if separator else (arguments[index + 1] if index + 1 < len(arguments) else None)
     return output_format
 
 
@@ -55,6 +57,24 @@ class _ArgumentParser(ArgumentParser):
     """Keep argparse's text behavior and expose JSON usage failures."""
 
     _json_errors = False
+    _parse_depth = 0
+
+    @contextmanager
+    def _diagnostics(self, args: Iterable[str] | None) -> Generator[list[str], None, None]:
+        """Initialize each outer parse without resetting nested intermixed passes."""
+        arguments = list(sys.argv[1:] if args is None else args)
+        if not self._parse_depth:
+            self._json_errors = (
+                _requested_format(arguments, list(self._option_string_actions), allow_abbrev=self.allow_abbrev)
+                == "json"
+            )
+            # Python 3.14 introduced colored argparse diagnostics.
+            cast("Any", self).color = not self._json_errors
+        self._parse_depth += 1
+        try:
+            yield arguments
+        finally:
+            self._parse_depth -= 1
 
     @overload
     def parse_known_args(
@@ -70,13 +90,31 @@ class _ArgumentParser(ArgumentParser):
     def parse_known_args(
         self, args: Iterable[str] | None = None, namespace: _Namespace | None = None
     ) -> tuple[Namespace | _Namespace, list[str]]:
-        arguments = list(sys.argv[1:] if args is None else args)
-        self._json_errors = _requested_format(arguments) == "json"
-        # Python 3.14 introduced colored argparse diagnostics.
-        cast("Any", self).color = not self._json_errors
-        if namespace is None:
-            return super().parse_known_args(arguments)
-        return super().parse_known_args(arguments, namespace)
+        with self._diagnostics(args) as arguments:
+            if namespace is None:
+                return super().parse_known_args(arguments)
+            return super().parse_known_args(arguments, namespace)
+
+    @overload
+    def parse_known_intermixed_args(
+        self, args: Iterable[str] | None = None, namespace: None = None
+    ) -> tuple[Namespace, list[str]]: ...
+
+    @overload
+    def parse_known_intermixed_args(
+        self, args: Iterable[str] | None, namespace: _Namespace
+    ) -> tuple[_Namespace, list[str]]: ...
+
+    @overload
+    def parse_known_intermixed_args(self, *, namespace: _Namespace) -> tuple[_Namespace, list[str]]: ...
+
+    def parse_known_intermixed_args(
+        self, args: Iterable[str] | None = None, namespace: _Namespace | None = None
+    ) -> tuple[Namespace | _Namespace, list[str]]:
+        with self._diagnostics(args) as arguments:
+            if namespace is None:
+                return super().parse_known_intermixed_args(arguments)
+            return super().parse_known_intermixed_args(arguments, namespace)
 
     def error(self, message: str) -> Never:
         if self._json_errors:
@@ -118,23 +156,12 @@ def min_argument(arg: str) -> int:
 
 def get_all_categories() -> "list[str]":
     """Return every skippable rule category."""
-    return rules.categories()
+    return _selectors.category_names()
 
 
 def get_all_tests() -> "list[str]":
     """Return the names of every registered rating test."""
-    return [x.__class__.__name__ for x in ratings.ALL_TESTS]
-
-
-def _selectable_names() -> "set[str]":
-    """Return every token a skip list accepts: a test class name or a category."""
-    return set(get_all_tests()) | set(get_all_categories())
-
-
-def _available_names_message() -> str:
-    tests = ", ".join(get_all_tests())
-    categories = ", ".join(get_all_categories())
-    return f"Available tests: {tests}. Available categories: {categories}"
+    return _selectors.test_names()
 
 
 def parse_tests(arg: str) -> "list[str] | None":
@@ -152,11 +179,8 @@ def parse_tests(arg: str) -> "list[str] | None":
     # Trailing or doubled separators leave empty tokens behind.
     names = [name for name in names if name]
 
-    selectable = _selectable_names()
-    for skip in names:
-        if skip not in selectable:
-            # Invalid test mentioned, fail and print valid tests
-            return None
+    if _selectors.unknown_names(names):
+        return None
 
     return names
 
@@ -168,13 +192,13 @@ def skip_tests(arg: str) -> "list[str]":
         return test_to_skip
 
     # It returned None, so there was an invalid test mentioned, or none at all
-    message = f"Invalid tests listed in --skip-tests: {arg!r}. {_available_names_message()}"
+    message = f"Invalid tests listed in --skip-tests: {arg!r}. {_selectors.available_names_message()}"
     raise ArgumentTypeError(message)
 
 
 def _build_parser(*, version_meta: Mapping[str, object] | None = None) -> ArgumentParser:
     """Construct the command-line argument parser."""
-    parser = _ArgumentParser(allow_abbrev=False)
+    parser = _ArgumentParser()
     version_meta = _version_meta() if version_meta is None else version_meta
     parser.add_argument(
         "--version", action="version", version=f"{_DISTRIBUTION_NAME} {version_meta.get('pyroma', 'unknown')}"

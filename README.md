@@ -89,31 +89,32 @@ For machine-readable output, pass `--format json`:
 $ pyroma --format json .
 ```
 
-The schema version 1 contract, JSON argument errors, and `--version` are
-available in the **unreleased 6.2 development version**, not the published
-6.1.0 release. Install a development checkout from the repository root with
-`python -m pip install .`. Its version can be checked without rating a package:
+The schema version 1 contract, JSON argument errors, and `--version` were
+introduced in 6.2 and are unavailable in 6.1.0. Use a 6.2 or newer release,
+or install a development checkout from the repository root with
+`python -m pip install .`. Check the installed version without rating a package
+(the version below is illustrative):
 
 ```console
 $ pyroma --version
 pyroma621 6.2.0.dev0
 ```
 
-In the development version, rating and error reports include
+Rating and error reports in 6.2 and later include
 `_meta.schema_version`, the installed checker version, and the effective policy
 when settings have been resolved. See the
 [JSON contract and downloadable schemas](https://hbmartin.github.io/pyroma621/json/).
 Invalid arguments also produce JSON when explicitly requested, for example
 `pyroma --format json --min 11 .` reports `UsageError`.
-Long option names must be written in full; abbreviated names such as `--form`
-are rejected.
+Unambiguous long-option abbreviations such as `--form` are accepted.
+Prefer full names in scripts because new options can make a prefix ambiguous.
 
 ## Exit codes
 
 - `0`: The package rated equal to or above the `--min` rating (default 8).
 - `2`: The package rated below the `--min` rating, or command-line arguments
-  were invalid. With `--format json`, a low rating contains `rating`. In the
-  unreleased 6.2 version, an argument failure contains
+  were invalid. With `--format json`, a low rating contains `rating`. In
+  6.2 and later, an argument failure contains
   `error.type = "UsageError"` and no rating.
 - `1`: Used by the `zest.releaser` integration when you choose to abort
   the release after a low rating.
@@ -227,6 +228,7 @@ rating unless you run with `--strict`:
 With [pre-commit](https://pre-commit.com), pyroma can be run whenever you
 commit your work by adding the following to your `.pre-commit-config.yaml`:
 
+<!-- pyroma-pre-commit -->
 ```yaml
 repos:
   - repo: https://github.com/hbmartin/pyroma621

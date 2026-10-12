@@ -18,6 +18,7 @@ SITE_URL = "https://hbmartin.github.io/pyroma621/"
 REPOSITORY = "https://github.com/hbmartin/pyroma621"
 RELEASE_DATES = {"6.0.0": "2026-08-01", "6.1.0": "2026-10-12"}
 _RESPONSE_LIMIT = 2 * 1024 * 1024
+_PRECOMMIT_MARKER = "<!-- pyroma-pre-commit -->"
 
 
 def changelog_entries(text: str) -> dict[str, str]:
@@ -34,16 +35,20 @@ def _load_yaml(text: str, context: str) -> object:
 
 
 def precommit_revision(readme: str) -> str:
-    """Read the revision from the exact repository entry providing pyroma."""
+    """Read the revision from explicitly marked pyroma hook examples."""
     message = "README must document the pyroma hook from hbmartin/pyroma621 with a release revision"
     revisions: set[str] = set()
-    for block in re.findall(r"```yaml\n(.*?)\n```", readme, re.DOTALL):
+    pattern = re.escape(_PRECOMMIT_MARKER) + r"\s*```yaml\n(.*?)\n```"
+    blocks = re.findall(pattern, readme, re.DOTALL)
+    if len(blocks) != readme.count(_PRECOMMIT_MARKER):
+        raise ValueError(message)
+    for block in blocks:
         example = _load_yaml(block, "README pre-commit examples")
         repositories = example.get("repos") if isinstance(example, dict) else None
         if not isinstance(repositories, list):
             continue
         for repository in repositories:
-            if not isinstance(repository, dict) or repository.get("repo") != REPOSITORY:
+            if not isinstance(repository, dict) or not _is_pyroma_repository(repository.get("repo")):
                 continue
             hooks = repository.get("hooks")
             if not isinstance(hooks, list) or not any(
@@ -62,6 +67,11 @@ def precommit_revision(readme: str) -> str:
     return revisions.pop()
 
 
+def _is_pyroma_repository(repository: object) -> bool:
+    """Accept Git's optional suffix and slash without accepting another repo."""
+    return isinstance(repository, str) and repository.rstrip("/").removesuffix(".git") == REPOSITORY
+
+
 def _require_date(entries: dict[str, str], version: str, expected: str | None = None) -> None:
     value = entries.get(version, "")
     try:
@@ -76,8 +86,8 @@ def _require_date(entries: dict[str, str], version: str, expected: str | None = 
 
 def _require_hook_revision(revision: str, release_tag: str) -> None:
     """Keep tagged installation instructions aligned with the release."""
-    if release_tag and Version(revision) != Version(release_tag):
-        message = "Documented pre-commit revision does not match release version"
+    if release_tag and revision != release_tag:
+        message = "Documented pre-commit revision does not match release tag"
         raise ValueError(message)
 
 
@@ -103,6 +113,11 @@ def check_offline(project: Path, release_tag: str = "") -> str:
             message = "Documentation release tag does not match project version"
             raise ValueError(message)
         _require_date(entries, metadata["version"])
+        if not Version(metadata["version"]).is_prerelease and (
+            "Development Status :: 5 - Production/Stable" not in metadata.get("classifiers", [])
+        ):
+            message = "Final pyroma621 releases require Development Status :: 5 - Production/Stable"
+            raise ValueError(message)
     revision = precommit_revision(readme)
     _require_hook_revision(revision, release_tag)
     return revision
@@ -116,7 +131,7 @@ def fetch(url: str) -> str:
     with urlopen(url, timeout=15) as response:  # noqa: S310 - public HTTPS URLs checked above
         payload = response.read(_RESPONSE_LIMIT + 1)
     if len(payload) > _RESPONSE_LIMIT:
-        message = f"Release evidence exceeds the response limit: {url}"
+        message = "Release evidence exceeds the response limit"
         raise ValueError(message)
     return payload.decode("utf-8")
 

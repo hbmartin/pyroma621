@@ -231,15 +231,19 @@ Prefer JSON over scraping human-readable output:
 $ pyroma --format json --min 8 .
 ```
 
-In the **unreleased 6.2 development version**, rating and error documents use
-schema version 1. JSON argument errors and `--version` also require that version;
-they are unavailable in published 6.1.0. Install a development checkout with
-`python -m pip install .` from its repository root to use these features. The
+Schema version 1, JSON argument errors, and `--version` were introduced in 6.2
+and are unavailable in 6.1.0. Use a 6.2 or newer release, or install a development
+checkout with `python -m pip install .` from its repository root. The
 [JSON contract](json.md) contains complete examples and downloadable schemas,
 including required finding arrays, categories, and effective policy metadata.
 An error document has an `error` key instead of `rating`. Argument failures
 use `error.type = "UsageError"` and retain exit code 2, which is also used by
 low-rating reports. Operational and configuration errors use exit code 3.
+
+Unambiguous long-option abbreviations accepted by 6.1 remain supported, including
+`--skip`, `--no-adv`, and `--index`. Abbreviated format options such as `--fo=json`
+also select JSON argument errors. Prefer full names in automation: a future
+option can make a formerly unique prefix ambiguous.
 
 CLI reports include the checker version under `_meta.pyroma`; that value is
 omitted when installed distribution metadata is unavailable. Use

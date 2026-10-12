@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pyroma import projectdata, ratings, rules
+from pyroma import _selectors, projectdata
 
 DEFAULT_MIN_RATING = 8
 _LOWEST_RATING = 1
@@ -100,15 +100,10 @@ def from_table(table: object) -> Config:
 
 def _validate_skip_names(names: list[str]) -> None:
     """Validate selectors before recording a configuration as loaded."""
-    tests = [test.__class__.__name__ for test in ratings.ALL_TESTS]
-    categories = rules.categories()
-    unknown = sorted(set(names) - set(tests) - set(categories))
+    unknown = _selectors.unknown_names(names)
     if unknown:
         listed = ", ".join(repr(name) for name in unknown)
-        message = (
-            f"[tool.pyroma] skip-tests names unknown tests: {listed}. "
-            f"Available tests: {', '.join(tests)}. Available categories: {', '.join(categories)}"
-        )
+        message = f"[tool.pyroma] skip-tests names unknown tests: {listed}. {_selectors.available_names_message()}"
         raise ConfigError(message)
 
 
