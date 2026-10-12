@@ -218,5 +218,5 @@ jobs:
           version: '0.13.0'
       - name: Check dependencies
         run: uv run --locked --no-default-groups --group quality deptry . --github-output
-      - name: Check sensitive exception data
-        run: uv run --locked --only-group quality semgrep scan --config .semgrep.yml --error pyroma
+      - name: Check sensitive exception data and release validation
+        run: uv run --locked --only-group quality semgrep scan --config .semgrep.yml --error pyroma ci

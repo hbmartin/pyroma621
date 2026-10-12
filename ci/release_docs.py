@@ -48,6 +48,13 @@ def _require_date(entries: dict[str, str], version: str, expected: str | None = 
         raise ValueError(message)
 
 
+def _require_hook_revision(revision: str, release_tag: str) -> None:
+    """Keep tagged installation instructions aligned with the release."""
+    if release_tag and Version(revision) != Version(release_tag):
+        message = "Documented pre-commit revision does not match release version"
+        raise ValueError(message)
+
+
 def check_offline(project: Path, release_tag: str = "") -> str:
     """Check distribution identity, canonical links, and known release dates."""
     metadata = tomllib.loads((project / "pyproject.toml").read_text(encoding="utf-8"))["project"]
@@ -70,7 +77,9 @@ def check_offline(project: Path, release_tag: str = "") -> str:
             message = "Documentation release tag does not match project version"
             raise ValueError(message)
         _require_date(entries, metadata["version"])
-    return precommit_revision(readme)
+    revision = precommit_revision(readme)
+    _require_hook_revision(revision, release_tag)
+    return revision
 
 
 def fetch(url: str) -> str:
@@ -86,10 +95,23 @@ def fetch(url: str) -> str:
     return payload.decode("utf-8")
 
 
+def _check_published_contract(project: Path) -> None:
+    """Require the JSON guide and canonical schema downloads to be published."""
+    fetch(SITE_URL + "json/")
+    for kind in ("rating", "error"):
+        relative = Path("schemas") / "v1" / f"{kind}.json"
+        canonical = json.loads((project / "pyroma" / relative).read_text(encoding="utf-8"))
+        published = json.loads(fetch(SITE_URL + relative.as_posix()))
+        if published != canonical:
+            message = f"Published {kind} schema does not match packaged schema"
+            raise ValueError(message)
+
+
 def check_online(project: Path, revision: str) -> None:
     """Verify live docs, the installation revision, and all published dates."""
     for page in ("", "rules/", "upgrading/", "changelog/"):
         fetch(SITE_URL + page)
+    _check_published_contract(project)
     base = "https://raw.githubusercontent.com/hbmartin/pyroma621/" + quote(revision, safe="") + "/"
     metadata = tomllib.loads(fetch(base + "pyproject.toml"))["project"]
     if metadata["name"] != "pyroma621" or Version(metadata["version"]) != Version(revision):

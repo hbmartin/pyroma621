@@ -22,7 +22,26 @@ def project(tmp_path: Path) -> Path:
         shutil.copy(ROOT / filename, tmp_path / filename)
     (tmp_path / "docs").mkdir()
     shutil.copy(ROOT / "docs" / "changelog.md", tmp_path / "docs" / "changelog.md")
+    shutil.copytree(Path(pyroma.__file__).parent / "schemas", tmp_path / "pyroma" / "schemas")
     return tmp_path
+
+
+@pytest.fixture
+def online_evidence(project: Path) -> dict[str, str]:
+    base = "https://raw.githubusercontent.com/hbmartin/pyroma621/6.1.0/"
+    responses = {
+        release_docs.SITE_URL + page: "documentation" for page in ("", "rules/", "upgrading/", "changelog/", "json/")
+    }
+    for kind in ("rating", "error"):
+        relative = Path("schemas") / "v1" / f"{kind}.json"
+        schema = json.loads((project / "pyroma" / relative).read_text(encoding="utf-8"))
+        responses[release_docs.SITE_URL + relative.as_posix()] = json.dumps(schema, sort_keys=True)
+    responses[base + "pyproject.toml"] = '[project]\nname="pyroma621"\nversion="6.1.0"\n'
+    responses[base + ".pre-commit-hooks.yaml"] = "- id: pyroma\n  entry: pyroma\n"
+    responses["https://pypi.org/pypi/pyroma621/json"] = json.dumps(
+        {"releases": {"6.1.0": [{"upload_time_iso_8601": "2026-10-12T17:42:33Z"}], "empty": []}}
+    )
+    return responses
 
 
 def test_documentation_consistency() -> None:
@@ -65,31 +84,79 @@ def test_future_release_needs_a_date(project: Path) -> None:
         release_docs.check_offline(project, "6.1.0")
 
 
-@pytest.mark.parametrize("failure", ["", "distribution", "hook", "date"])
-def test_online_release_evidence(monkeypatch: pytest.MonkeyPatch, project: Path, failure: str) -> None:
-    def evidence(url: str) -> str:
-        if url.endswith("pyproject.toml"):
-            name = "pyroma" if failure == "distribution" else "pyroma621"
-            return f'[project]\nname="{name}"\nversion="6.1.0"\n'
-        if url.endswith(".pre-commit-hooks.yaml"):
-            return "" if failure == "hook" else "- id: pyroma\n  entry: pyroma\n"
-        if url.endswith("/json"):
-            date = "2026-10-13" if failure == "date" else "2026-10-12"
-            return json.dumps({"releases": {"6.1.0": [{"upload_time_iso_8601": date + "T17:42:33Z"}], "empty": []}})
-        return "documentation"
+@pytest.mark.parametrize("revision", ["6.1.0", "6.2.0", "v6.2.0", "6.2"])
+def test_tagged_release_requires_matching_hook(project: Path, revision: str) -> None:
+    metadata = project / "pyproject.toml"
+    metadata.write_text(metadata.read_text().replace('version = "6.1.0"', 'version = "6.2.0"', 1))
+    changelog = project / "docs" / "changelog.md"
+    changelog.write_text(changelog.read_text() + "\n## 6.2.0 (2026-10-12)\n")
+    readme = project / "README.md"
+    readme.write_text(readme.read_text().replace('rev: "6.1.0"', f'rev: "{revision}"'))
+    assert release_docs.check_offline(project) == revision
+    if revision == "6.1.0":
+        with pytest.raises(ValueError, match="pre-commit revision does not match release"):
+            release_docs.check_offline(project, "v6.2.0")
+    else:
+        assert release_docs.check_offline(project, "v6.2.0") == revision
 
-    fetch = Mock(side_effect=evidence)
+
+@pytest.mark.parametrize("failure", ["", "distribution", "hook", "date"])
+def test_online_release_evidence(
+    monkeypatch: pytest.MonkeyPatch, project: Path, online_evidence: dict[str, str], failure: str
+) -> None:
+    base = "https://raw.githubusercontent.com/hbmartin/pyroma621/6.1.0/"
+    if failure == "distribution":
+        online_evidence[base + "pyproject.toml"] = '[project]\nname="pyroma"\nversion="6.1.0"\n'
+    elif failure == "hook":
+        online_evidence[base + ".pre-commit-hooks.yaml"] = ""
+    elif failure == "date":
+        url = "https://pypi.org/pypi/pyroma621/json"
+        online_evidence[url] = online_evidence[url].replace("2026-10-12", "2026-10-13")
+    fetch = Mock(side_effect=online_evidence.__getitem__)
     monkeypatch.setattr(release_docs, "fetch", fetch)
     if failure:
         with pytest.raises(ValueError, match=r"pre-commit|hook|Changelog"):
             release_docs.check_online(project, "6.1.0")
     else:
         release_docs.check_online(project, "6.1.0")
-        assert fetch.call_count == 7
+        assert {call.args[0] for call in fetch.call_args_list} == set(online_evidence)
+
+
+@pytest.mark.parametrize("missing", ["json/", "schemas/v1/rating.json", "schemas/v1/error.json"])
+def test_online_contract_links_must_exist(
+    monkeypatch: pytest.MonkeyPatch, project: Path, online_evidence: dict[str, str], missing: str
+) -> None:
+    def evidence(url: str) -> str:
+        if url == release_docs.SITE_URL + missing:
+            message = "missing contract download"
+            raise URLError(message)
+        return online_evidence[url]
+
+    monkeypatch.setattr(release_docs, "fetch", evidence)
+    with pytest.raises(URLError, match="missing contract download"):
+        release_docs.check_online(project, "6.1.0")
+
+
+@pytest.mark.parametrize("kind", ["rating", "error"])
+@pytest.mark.parametrize("failure", ["invalid", "mismatch"])
+def test_online_schemas_must_match_package(
+    monkeypatch: pytest.MonkeyPatch, project: Path, online_evidence: dict[str, str], kind: str, failure: str
+) -> None:
+    url = release_docs.SITE_URL + f"schemas/v1/{kind}.json"
+    if failure == "invalid":
+        online_evidence[url] = "not JSON"
+        message = "Expecting value"
+    else:
+        schema = json.loads(online_evidence[url])
+        schema["title"] = "Stale published schema"
+        online_evidence[url] = json.dumps(schema)
+        message = f"Published {kind} schema does not match packaged schema"
+    monkeypatch.setattr(release_docs, "fetch", online_evidence.__getitem__)
+    with pytest.raises(ValueError, match=message):
+        release_docs.check_online(project, "6.1.0")
 
 
 def test_schema_publication(project: Path) -> None:
-    shutil.copytree(Path(pyroma.__file__).parent / "schemas", project / "pyroma" / "schemas")
     release_docs.prepare_schemas(project)
     for kind in ("rating", "error"):
         relative = Path("schemas") / "v1" / f"{kind}.json"

@@ -181,11 +181,12 @@ uv run --locked --no-default-groups --group quality deptry . --github-output
 Lizard uses its default strict threshold of 15 and must report no warnings.
 Deptry excludes bundled compatibility fixtures and has narrow exceptions for
 optional or indirectly loaded dependencies documented in `pyproject.toml`.
-The project-specific Semgrep rule prevents URL credentials and signed query
-parameters from being copied into user-facing exceptions:
+Project-specific Semgrep rules prevent URL credentials and signed query
+parameters from being copied into user-facing exceptions, and require the
+release preflight to validate hook versions and published JSON-contract evidence:
 
 ```console
-uv run --locked --only-group quality semgrep scan --config .semgrep.yml --error pyroma
+uv run --locked --only-group quality semgrep scan --config .semgrep.yml --error pyroma ci
 ```
 
 ## Adding a check
@@ -402,10 +403,14 @@ $ uv run --locked --no-default-groups python ci/release_docs.py check
 $ uv run --locked --no-default-groups python ci/release_docs.py check --online --release-tag 6.1.0
 ```
 
-Tagged package validation runs the online check before building. It checks
-canonical documentation URLs, the example release's distribution and hook,
-and PyPI upload dates against changelog headings. Requests have 15-second
-timeouts and 2 MiB response limits. Unit tests mock all remote evidence.
+Tagged package validation runs the online check before building. It requires
+the documented hook revision to match the release version, probes the JSON
+guide and both schema downloads, and compares downloaded JSON with the
+canonical packaged schemas. It also checks the example release's distribution
+and hook, and PyPI upload dates against changelog headings. Semgrep guards
+require hook-version and published-contract validation in the release preflight.
+Requests have 15-second timeouts and 2 MiB response limits. Unit tests mock all
+remote evidence.
 Installed-artifact validation covers Python 3.11, 3.13, and 3.14, including
 both CLI entry points, schema resources, version output, usage-error JSON,
 and effective policy. The corrected README ships with the next PyPI release;
