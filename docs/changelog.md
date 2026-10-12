@@ -27,6 +27,10 @@
   paths in smoke-test fixtures.
 - Package validation runs on pull requests, `master` pushes, manual dispatch,
   and release workflow calls, avoiding a second matrix run on tag pushes.
+  Manual preflight defaults to the selected tag ref; an explicit `release-tag`
+  must match that ref. The shared artifact validator rejects malformed tags,
+  mismatched refs, and project-version mismatches before building;
+  tagless branch validation remains available.
   Publishing runs when a GitHub release is published, including from a draft,
   and uploads only distributions that pass release validation.
   Redundant lock checks are removed where locked commands enforce the gate;
@@ -37,7 +41,12 @@
   even when cleanup raises. Fixture Git commands isolate inherited repository
   variables and global/system Git configuration and attributes, including templates,
   hooks, and excludes. Temporary HOME/XDG directories support Git versions before
-  2.32, and regression probes execute a hostile index-change hook.
+  2.32. Regression probes execute a hostile index-change hook when Git 2.22+
+  and a shell are available, using the fixed `#!/bin/sh` shebang and a positive
+  control. Unsupported hook coverage reports an explicit skip. Other isolation
+  assertions run independently without querying Git versions or shell support.
+  Probe failures include interpreter, arguments, exit status, stdout and stderr;
+  timeouts retain partial output. CI saves JUnit reports for failure investigation.
   Backend-warning policy tests run in-process. Legacy fixture builds allow backend warnings
   by category without depending on setuptools warning prose.
 - Hypothesis profiles load before pytest resolves command-line options,
@@ -56,9 +65,11 @@
   longer imply package typing. Inaccessible entries are skipped individually,
   and unrelated files do not incur stat probes. Virtual and Conda environments
   are identified by `pyvenv.cfg` files (including symlinks to regular files) and
-  regular `conda-meta/history` files. Broken or directory-target venv symlinks,
+  regular `conda-meta/history` files. Missing, looping,
+  or directory-target venv symlinks,
   symlinked Conda history markers, and symlinked `conda-meta` directories do not
-  prune sources.
+  prune sources. Permission failures and uncertain I/O errors on venv markers
+  or their symlink targets conservatively prune environment contents.
   Build-output names
   are pruned at the scan root and nested project boundaries unless they contain
   direct Python or stub sources. Packages and namespaces named `build`, `dist`,
@@ -73,12 +84,19 @@
   Markdown and HTML URLs normalize consistently before deduplication; findings
   display readable Unicode while preserving reserved escapes, invalid UTF-8,
   and encoded Unicode controls, non-ASCII spaces, and line/paragraph separators.
-  Zero-width joiners and non-joiners remain readable for emoji and script shaping;
+  Zero-width joiners and non-joiners remain readable for emoji and script shaping,
+  and every Unicode destination has an encoded URL suffix that identifies its spelling;
   other format characters, including soft hyphens and bidi controls, stay encoded.
-  Findings follow document order and deduplicate display strings, including
-  destinations that differ only in percent-escape case even with invalid UTF-8,
+  Findings JSON-quote paths, follow document order and deduplicate canonical URLs, including
+  destinations that differ in percent-escape case or unreserved ASCII escaping
+  even with invalid UTF-8. Reserved escapes and Unicode normalization forms
+  remain distinct; readable spaces and valid Unicode are decoded even beside invalid bytes,
   without repeatedly classifying or decoding identical normalized targets.
   Duplicate spellings do not consume the five-item diagnostic limit.
+- Source-test CI uploads coverage to Codecov with the configured token and a
+  README badge. Upload failures are nonblocking; the 94% local coverage gate
+  remains authoritative. External fork PRs retain coverage artifacts without
+  authenticated Codecov uploads.
 - Backend version floors remain strict: wildcard pins can admit prereleases
   below a required final release and therefore trigger an advisory. Explicit
   README content-type overrides remain supported.

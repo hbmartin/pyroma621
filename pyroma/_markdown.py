@@ -1,5 +1,6 @@
 """Extract CommonMark and HTML destinations without rendering the document."""
 
+import json
 import re
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any
@@ -16,8 +17,14 @@ if TYPE_CHECKING:
 _MARKDOWN = MarkdownIt("commonmark", {"html": True})
 _LITERAL_TAGS = frozenset({"pre", "code", "script", "style"})
 _ESCAPED_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Zs"})
-_READABLE_FORMATTING = frozenset({" ", "\u200c", "\u200d"})
+_JOINERS = frozenset({"\u200c", "\u200d"})
+_READABLE_FORMATTING = _JOINERS | {" "}
+_UNRESERVED_URL_CHARACTERS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 _PERCENT_ESCAPE_RE = re.compile(r"%[0-9a-fA-F]{2}")
+_PERCENT_RUN_RE = re.compile(r"(?:%[0-9a-fA-F]{2})+")
+_SURROGATE_ESCAPE_START = 0xDC80
+_SURROGATE_ESCAPE_END = 0xDCFF
+_SURROGATE_ESCAPE_BASE = 0xDC00
 
 
 class _HTMLTargets(HTMLParser):
@@ -60,17 +67,50 @@ def _feed_html(html: _HTMLTargets, token: "Token") -> bool:
     return False
 
 
+def _uppercase_escape(match: re.Match[str]) -> str:
+    """Keep percent-escape triplets in one spelling."""
+    return match[0].upper()
+
+
+def _unreserved_escape(match: re.Match[str]) -> str:
+    """Decode unreserved ASCII without interpreting invalid UTF-8 bytes."""
+    character = chr(int(match[0][1:], 16))
+    return character if character in _UNRESERVED_URL_CHARACTERS else match[0].upper()
+
+
+def canonical_destination(target: str) -> str:
+    """Normalize URL identity without decoding reserved escapes or Unicode forms."""
+    return _PERCENT_ESCAPE_RE.sub(_unreserved_escape, _MARKDOWN.normalizeLink(target))
+
+
 def display_destination(target: str) -> str:
-    """Decode readable URL text, retaining reserved escapes and controls."""
-    try:
-        unquote_to_bytes(target).decode("utf-8")
-    except UnicodeDecodeError:
-        return target
-    readable = _MARKDOWN.normalizeLinkText(target)
-    return "".join(
-        quote(char, safe="") if char not in _READABLE_FORMATTING and category(char) in _ESCAPED_CATEGORIES else char
-        for char in readable
-    )
+    """Quote readable paths and identify Unicode with their canonical URL."""
+    canonical = canonical_destination(target)
+    has_unicode = False
+
+    def readable_escape(match: re.Match[str]) -> str:
+        """Decode readable UTF-8 while retaining unsafe ASCII and invalid bytes."""
+        nonlocal has_unicode
+        result = []
+        for char in unquote_to_bytes(match[0]).decode("utf-8", errors="surrogateescape"):
+            value = ord(char)
+            if _SURROGATE_ESCAPE_START <= value <= _SURROGATE_ESCAPE_END:
+                result.append(f"%{value - _SURROGATE_ESCAPE_BASE:02X}")
+            elif char.isascii():
+                result.append(char if char in _UNRESERVED_URL_CHARACTERS or char == " " else f"%{value:02X}")
+            else:
+                has_unicode = True
+                result.append(
+                    quote(char, safe="")
+                    if char not in _READABLE_FORMATTING and category(char) in _ESCAPED_CATEGORIES
+                    else char
+                )
+        return "".join(result)
+
+    readable = json.dumps(_PERCENT_RUN_RE.sub(readable_escape, canonical), ensure_ascii=False)
+    if has_unicode:
+        return f"{readable} (URL: {json.dumps(canonical)})"
+    return readable
 
 
 def _without_literal_definitions(source: str, blocks: "list[Token]") -> str:
@@ -114,7 +154,4 @@ def destinations(source: str) -> list[str]:
                 if isinstance(target, str) and target:
                     html.targets.append(target)
     html.close()
-    return [
-        _PERCENT_ESCAPE_RE.sub(lambda match: match[0].upper(), _MARKDOWN.normalizeLink(target))
-        for target in html.targets
-    ]
+    return [_PERCENT_ESCAPE_RE.sub(_uppercase_escape, _MARKDOWN.normalizeLink(target)) for target in html.targets]

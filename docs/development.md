@@ -246,14 +246,24 @@ exercise the identical release validation locally without publishing:
 
 ```console
 uv lock --check
+uv run --locked --no-default-groups python ci/package_artifacts.py preflight --release-tag v6.1.0
 uv build
-uv run --locked --no-default-groups python ci/package_artifacts.py validate --work build/release-check --python 3.11 --release-tag v6.1.0
+uv run --locked --no-default-groups python ci/package_artifacts.py validate --work "$(mktemp -d)/release-check" --python 3.11 --release-tag v6.1.0
 ```
 
-The work directory must not already exist. GitHub's "Validate package artifacts"
+The work directory must not already exist and should be outside the checkout,
+as in the example above, to avoid test module names colliding with installed
+dependencies such as `build`. GitHub's "Validate package artifacts"
 workflow also accepts a release tag through manual dispatch and never publishes.
-Select the intended tag as the dispatch ref and supply it as `release-tag` to
-preflight the exact release revision. Wait for validation to succeed before
+Select the intended tag as the dispatch ref; `release-tag` defaults to that tag.
+An explicit input takes precedence and must match the selected ref. When a
+release tag is effective, the
+dispatch ref must be exactly `refs/tags/<release-tag>`; selecting a branch or
+another tag fails before distributions are built. The shared `preflight` command
+also checks tag syntax and project-version agreement before building, using the
+same parser as artifact inspection. Its `--event-name` and `--ref` default to
+`GITHUB_EVENT_NAME` and `GITHUB_REF`, and can be overridden for local checks.
+Tagless branch dispatch remains available for general validation. Wait for validation to succeed before
 publishing the release. This preflight is manual: the automated gate blocks
 PyPI upload, while a failed release validation can leave an existing GitHub
 release without a PyPI upload.
@@ -262,6 +272,10 @@ calls. Tag pushes do not run a separate validation matrix before release
 validation. The test and lint workflow triggers are unchanged.
 Locked invocations provide the inspector's `packaging` dependency. Local
 validation selects POSIX or Windows environment and console-script paths.
+Source-test CI saves JUnit reports on successful and failed runs, alongside
+coverage XML artifacts. Codecov uploads use the repository's `CODECOV_TOKEN`
+on repository-owned runs, skip external fork PRs, and remain nonblocking.
+The existing pytest coverage threshold remains the enforcement gate.
 Both archives reject egg-info, bytecode caches, Finder metadata, and `build` or
 `dist` output directories. Build exclusions prevent those members even in a
 dirty source tree; intentional archives under `testdata/distributions` remain.
@@ -285,12 +299,23 @@ HOME/XDG directories, `GIT_CONFIG_NOSYSTEM=1`, and `GIT_ATTR_NOSYSTEM=1`. They
 explicitly select empty template/hook directories and null external attributes
 and exclusions files. This isolation works with Git versions before 2.32,
 without depending on `GIT_CONFIG_GLOBAL`. Hostile configuration probes cover
-global attributes and executable `post-index-change` hooks; caller indexes and
+global attributes and executable `post-index-change` hooks. The executable-hook
+portion requires Git 2.22 or newer and a discoverable `sh` interpreter; earlier
+Git versions and environments without that shell still run the other isolation
+assertions for both HOME and XDG configuration. Unsupported hook probes report
+an explicit skip, including when the Git version is unknown. Supported hook
+probes use `#!/bin/sh` and require a positive control that executes the hostile
+hook before verifying isolation.
+Caller indexes and
 environments remain untouched and all fixture archives are tracked.
 
 Typing scans recognize regular `pyvenv.cfg` files and symlinks to regular files
-without entering the environment's installed packages. Broken or directory-target
-config symlinks do not identify an environment. Conda detection still requires a
+without entering the environment's installed packages, including config targets
+outside the project. Missing, looping, and directory-target
+config symlinks do not identify an environment; Conda markers are still checked
+after an unsuccessful config symlink check. Permission failures and uncertain
+I/O errors inspecting either a marker or its symlink target conservatively prune
+that directory. Conda detection still requires a
 regular `conda-meta` directory and regular `history` file; symlinks there do not
 prune sources. Symlinked sources and typing markers do not supply typing evidence.
 

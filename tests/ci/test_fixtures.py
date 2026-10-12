@@ -1,6 +1,8 @@
 """Check standalone module fixtures without disturbing the active test module."""
 
 import os
+import re
+import shutil
 import subprocess
 import sys
 import warnings
@@ -30,16 +32,50 @@ def run_fixture_probe(tmp_path: Path, source: str, *arguments: str) -> None:
     root = str(Path(pyroma.__file__).resolve().parent.parent)
     inherited = os.environ.get("PYTHONPATH")
     environment = {**os.environ, "PYTHONPATH": root + (os.pathsep + inherited if inherited else "")}
-    result = subprocess.run(  # noqa: S603 - fixed Python fixture probe using the parent's package
-        [sys.executable, "-bb", "-X", "dev", "-c", _PREAMBLE + source, *arguments],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed Python fixture probe using the parent's package
+            [sys.executable, "-bb", "-X", "dev", "-c", _PREAMBLE + source, *arguments],
+            cwd=tmp_path,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        pytest.fail(_probe_diagnostics(arguments, f"timed out after {error.timeout}s", error.stdout, error.stderr))
+    assert result.returncode == 0, _probe_diagnostics(
+        arguments, f"exit status {result.returncode}", result.stdout, result.stderr
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _probe_diagnostics(
+    arguments: tuple[str, ...], status: str, stdout: str | bytes | None, stderr: str | bytes | None
+) -> str:
+    def output(value: str | bytes | None) -> str:
+        return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value or ""
+
+    return (
+        f"Fixture probe: {status}\nInterpreter: {sys.executable}\nPython: {sys.version}\n"
+        f"Arguments: {arguments!r}\nstdout:\n{output(stdout)}\nstderr:\n{output(stderr)}"
+    )
+
+
+def test_fixture_probe_failure_preserves_context_and_output(tmp_path: Path) -> None:
+    with pytest.raises(AssertionError) as failure:
+        run_fixture_probe(tmp_path, "print('probe output'); print('probe error', file=sys.stderr); sys.exit(7)", "home")
+    diagnostic = str(failure.value)
+    for expected in ("exit status 7", sys.executable, sys.version, "('home',)", "probe output", "probe error"):
+        assert expected in diagnostic
+
+
+def test_fixture_probe_timeout_preserves_partial_output(tmp_path: Path) -> None:
+    error = subprocess.TimeoutExpired("probe", 30, output=b"partial output", stderr=b"partial error")
+    with patch.object(subprocess, "run", side_effect=error), pytest.raises(pytest.fail.Exception) as failure:
+        run_fixture_probe(tmp_path, "pass", "xdg")
+    diagnostic = str(failure.value)
+    for expected in ("timed out after 30s", sys.executable, "('xdg',)", "partial output", "partial error"):
+        assert expected in diagnostic
 
 
 def test_fixture_module_supports_repeated_setup_and_teardown(tmp_path: Path) -> None:
@@ -163,10 +199,110 @@ assert not directory.exists()
     )
 
 
+def _index_change_hook_unavailable(version: str, shell: str | None) -> str | None:
+    if shell is None:
+        return "No sh shell is available for the hostile-hook probe"
+    match = re.match(r"git version (\d+)\.(\d+)(?:\D|$)", version)
+    if match is None:
+        return f"Cannot determine Git version from {version!r}"
+    if (int(match[1]), int(match[2])) < (2, 22):
+        return f"The hostile-hook probe requires Git 2.22 or newer, got {version.strip()}"
+    return None
+
+
+def _require_index_change_hook() -> None:
+    shell = shutil.which("sh")
+    version = ""
+    if shell is not None:
+        version = subprocess.run(
+            ["git", "--version"],  # noqa: S607 - fixed Git version query
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    reason = _index_change_hook_unavailable(version, shell)
+    if reason is not None:
+        pytest.skip(reason)
+
+
+@pytest.mark.parametrize(
+    ("version", "shell", "supported"),
+    [
+        ("git version 2.21.0", "/bin/sh", False),
+        ("git version 2.22.0", "/bin/sh", True),
+        ("git version 2.31.1.windows.1", "C:/Git/bin/sh.exe", True),
+        ("git version 2.50.1 (Apple Git-155)", "/bin/sh", True),
+        ("git version 3.0.0", "/bin/sh", True),
+        ("git version 2.50.1", None, False),
+        ("unknown Git", "/bin/sh", False),
+        ("unknown Git", None, False),
+        ("git version 2.50.1", "relative/bin/sh", True),
+        ("git version 2.50.1", "/shell tools/sh", True),
+    ],
+)
+def test_index_change_hook_requirements(version: str, shell: str | None, *, supported: bool) -> None:
+    assert (_index_change_hook_unavailable(version, shell) is None) is supported
+
+
+@pytest.mark.parametrize(
+    ("version", "shell", "reason"),
+    [
+        ("git version 2.21.0", "/bin/sh", "requires Git 2.22"),
+        ("unknown Git", "/bin/sh", "Cannot determine"),
+        ("", None, "No sh shell"),
+    ],
+)
+def test_unsupported_hook_coverage_reports_skip(version: str, shell: str | None, reason: str) -> None:
+    result = subprocess.CompletedProcess(["git", "--version"], 0, stdout=version)
+    with (
+        patch.object(shutil, "which", return_value=shell),
+        patch.object(subprocess, "run", return_value=result) as query,
+        pytest.raises(pytest.skip.Exception, match=reason),
+    ):
+        _require_index_change_hook()
+    if shell is None:
+        query.assert_not_called()
+
+
 @pytest.mark.parametrize("attributes_location", ["home", "xdg"])
 def test_fixture_git_commands_isolate_environment_index_and_exclusions(
     tmp_path: Path, attributes_location: str
 ) -> None:
+    run = subprocess.run
+
+    def without_version(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert "--version" not in arguments, "General isolation must not query Git versions"
+        return run(arguments, **kwargs)
+
+    with (
+        patch.object(shutil, "which", side_effect=AssertionError("General isolation must not query hook support")),
+        patch.object(subprocess, "run", side_effect=without_version),
+    ):
+        _run_git_isolation_probe(tmp_path, attributes_location, hook=False)
+
+
+@pytest.mark.parametrize("attributes_location", ["home", "xdg"])
+def test_fixture_git_commands_isolate_hostile_hooks(tmp_path: Path, attributes_location: str) -> None:
+    _require_index_change_hook()
+    _run_git_isolation_probe(tmp_path, attributes_location, hook=True)
+
+
+def test_hostile_hook_positive_control_failure_is_not_skipped(tmp_path: Path) -> None:
+    _require_index_change_hook()
+    probe = run_fixture_probe
+
+    def inert_hook(path: Path, source: str, *arguments: str) -> None:
+        source = source.replace('printf poisoned > "$PYROMA_HOOK_SENTINEL"', ":")
+        probe(path, source, *arguments)
+
+    with (
+        patch(f"{__name__}.run_fixture_probe", side_effect=inert_hook),
+        pytest.raises(AssertionError, match="The poison hook must actually run without isolation"),
+    ):
+        _run_git_isolation_probe(tmp_path, "home", hook=True)
+
+
+def _run_git_isolation_probe(tmp_path: Path, attributes_location: str, *, hook: bool) -> None:
     run_fixture_probe(
         tmp_path,
         """
@@ -186,7 +322,6 @@ subprocess.run(['git', 'init', '--quiet', '--template=', str(foreign)], env=clea
 (foreign / 'sentinel').write_text('keep')
 subprocess.run(['git', '-C', str(foreign), 'add', 'sentinel'], env=clean, check=True)
 index = foreign / '.git' / 'index'
-before = index.read_bytes()
 config_root = Path.cwd() / 'config'
 (config_root / 'git').mkdir(parents=True)
 home = root / 'home'
@@ -208,16 +343,16 @@ global_config.write_text(
 )
 (home / '.gitconfig').write_text(global_config.read_text())
 hook_sentinel = root / 'hook-ran'
-hook = template / 'post-index-change'
-hook.write_text('#!/bin/sh\\nprintf poisoned > "$PYROMA_HOOK_SENTINEL"\\n')
-hook.chmod(0o755)
-with patch.dict(os.environ, {'PYROMA_HOOK_SENTINEL': str(hook_sentinel)}):
+if sys.argv[2]:
+    hook = template / 'post-index-change'
+    hook.write_bytes(b'#!/bin/sh\\nprintf poisoned > "$PYROMA_HOOK_SENTINEL"\\n')
+    hook.chmod(0o755)
     subprocess.run(
         ['git', '-C', str(foreign), '-c', 'core.hooksPath=' + str(template), 'add', 'sentinel'],
         env={**clean, 'PYROMA_HOOK_SENTINEL': str(hook_sentinel)}, check=True,
     )
-assert hook_sentinel.exists(), 'The poison hook must actually run without isolation'
-hook_sentinel.unlink()
+    assert hook_sentinel.exists(), 'The poison hook must actually run without isolation'
+    hook_sentinel.unlink()
 before = index.read_bytes()
 variables = {
     'GIT_DIR': str(foreign / '.git'),
@@ -281,6 +416,7 @@ assert module.TESTDATA_DIR == original
 assert module._FIXTURE_DIRECTORY is None
 """,
         attributes_location,
+        "enabled" if hook else "",
     )
 
 

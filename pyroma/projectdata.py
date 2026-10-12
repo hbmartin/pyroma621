@@ -1,12 +1,13 @@
 """Extract and normalize package metadata from a local project directory."""
 
 # Kept at runtime so the public Pathish alias resolves through get_type_hints.
+import errno
 import os
 import subprocess
 import tomllib
 from email.message import Message
 from pathlib import Path
-from stat import S_ISDIR, S_ISREG
+from stat import S_ISDIR, S_ISLNK, S_ISREG
 from typing import TYPE_CHECKING, Any, Union, cast
 
 import build
@@ -144,14 +145,22 @@ def _has_direct_sources(path: Path) -> bool:
     return False
 
 
-def _environment_directory(path: Path) -> bool:
-    """Recognize environments, treating inaccessible markers conservatively."""
+def _venv_marker(marker: Path) -> bool:
+    """Recognize regular configs and conservatively exclude uncertain marker targets."""
     try:
-        if S_ISREG((path / "pyvenv.cfg").stat().st_mode):
-            return True
+        mode = marker.lstat().st_mode
+        if S_ISLNK(mode):
+            mode = marker.stat().st_mode
+        return S_ISREG(mode)
     except (FileNotFoundError, NotADirectoryError):
-        pass
-    except OSError:
+        return False
+    except OSError as error:
+        return error.errno != errno.ELOOP
+
+
+def _environment_directory(path: Path) -> bool:
+    """Recognize environments, treating inaccessible marker entries conservatively."""
+    if _venv_marker(path / "pyvenv.cfg"):
         return True
     conda_metadata = path / "conda-meta"
     try:

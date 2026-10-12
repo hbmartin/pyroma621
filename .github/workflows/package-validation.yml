@@ -20,6 +20,9 @@ on:
 permissions:
   contents: read
 
+env:
+  RELEASE_TAG: ${{ inputs.release-tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
+
 jobs:
   build:
     name: Build distributions
@@ -38,11 +41,11 @@ jobs:
           enable-cache: false
       - name: Check lockfile
         run: uv lock --check
+      - name: Check release ref, tag and project version
+        run: uv run --locked --no-default-groups python ci/package_artifacts.py preflight --release-tag "$RELEASE_TAG"
       - name: Build wheel from sdist
         run: uv build
       - name: Inspect distributions and release version
-        env:
-          RELEASE_TAG: ${{ inputs.release-tag || '' }}
         run: uv run --locked --no-default-groups python ci/package_artifacts.py inspect --release-tag "$RELEASE_TAG"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -78,7 +81,6 @@ jobs:
           path: dist
       - name: Test wheel and runtime CLI outside checkout
         env:
-          RELEASE_TAG: ${{ inputs.release-tag || '' }}
           PYTHON_VERSION: ${{ matrix.python }}
         run: >-
           uv run --locked --no-default-groups python ci/package_artifacts.py validate --python "$PYTHON_VERSION"
@@ -90,4 +92,11 @@ jobs:
         with:
           name: artifact-coverage-${{ matrix.python }}
           path: ${{ runner.temp }}/package-validation-${{ matrix.python }}/coverage.xml
+          if-no-files-found: warn
+      - name: Upload artifact test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: artifact-test-results-${{ matrix.python }}
+          path: ${{ runner.temp }}/package-validation-${{ matrix.python }}/test-results.xml
           if-no-files-found: warn

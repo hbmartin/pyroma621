@@ -1,6 +1,7 @@
 import contextlib
 import copy
 import datetime
+import errno
 import io
 import json
 import os
@@ -12,7 +13,6 @@ import tempfile
 import unittest
 import unittest.mock
 import warnings
-from collections.abc import Callable
 from email.message import Message
 from importlib.metadata import PackageNotFoundError
 from itertools import permutations
@@ -1756,7 +1756,7 @@ class ReviewFixRegressionTest(unittest.TestCase):
             ("    [x](docs/code.md)\n\t![x](images/code.png)", []),
             ("`[x](docs/code.md)` and `` code `[x](docs/code.md)` ``", []),
             ("`\n[ref]: docs/code.md\n`\n[x][ref]", []),
-            ('<a href="docs/`literal`.md">docs</a>', ["docs/`literal`.md"]),
+            ('<a href="docs/`literal`.md">docs</a>', ["docs/%60literal%60.md"]),
             ('<!-- [x](docs/comment.md) --><pre>[x](docs/pre.md)</pre><code><a href="code.md">x</a></code>', []),
             ("\\[x](docs/escaped.md)", []),
             ('\\<a href="docs/escaped.md">example</a>', []),
@@ -1798,14 +1798,19 @@ class ReviewFixRegressionTest(unittest.TestCase):
         )
         for description, expected in cases:
             with self.subTest(description=description):
-                self.assertEqual(ratings._relative_description_targets(description, "text/markdown"), expected)
+                self.assertEqual(
+                    ratings._relative_description_targets(description, "text/markdown"),
+                    [json.dumps(target) for target in expected],
+                )
 
     def test_many_unique_markdown_and_html_targets_preserve_order(self) -> None:
         count = 1000
         description = " ".join(
             f'[x](docs/{number}.md) <img src="images/{number}.svg"> [x](docs/{number}.md)' for number in range(count)
         )
-        expected = [target for number in range(count) for target in (f"docs/{number}.md", f"images/{number}.svg")]
+        expected = [
+            json.dumps(target) for number in range(count) for target in (f"docs/{number}.md", f"images/{number}.svg")
+        ]
         self.assertEqual(ratings._relative_description_targets(description, "text/markdown"), expected)
 
     def test_readme_content_type_overrides_and_emission(self) -> None:
@@ -2477,6 +2482,68 @@ class ProjectDataTest(unittest.TestCase):
                 link.symlink_to(target)
                 self.assertEqual(projectdata.typing_facts(root), (True, False))
 
+    def test_looping_venv_marker_does_not_prune_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "pkg"
+            package.mkdir()
+            (package / "module.py").touch()
+            (package / "py.typed").touch()
+            (package / "pyvenv.cfg").symlink_to("pyvenv.cfg")
+            self.assertEqual(projectdata.typing_facts(root), (True, False))
+
+    def test_uncertain_venv_marker_errors_prune_environments(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            environment = root / "custom-venv"
+            package = environment / "lib" / "site-packages" / "pkg"
+            package.mkdir(parents=True)
+            (package / "module.py").touch()
+            (package / "py.typed").touch()
+            target = root / "config"
+            target.touch()
+            marker = environment / "pyvenv.cfg"
+            marker.symlink_to(target)
+            original_stat = Path.stat
+
+            for error in (PermissionError(), OSError(errno.EIO, "I/O failure")):
+                for following in (False, True):
+
+                    def denied_target(
+                        path: Path,
+                        *,
+                        follow_symlinks: bool = True,
+                        failure: OSError = error,
+                        probe_following: bool = following,
+                    ):
+                        if path == marker and follow_symlinks == probe_following:
+                            raise failure
+                        return original_stat(path, follow_symlinks=follow_symlinks)
+
+                    with (
+                        self.subTest(error=error, following=following),
+                        unittest.mock.patch.object(Path, "stat", new=denied_target),
+                    ):
+                        self._assert_typing_tree_is_pruned(root, environment)
+                        sibling = root / "valid"
+                        sibling.mkdir(exist_ok=True)
+                        (sibling / "module.py").touch()
+                        (sibling / "py.typed").touch()
+                        self.assertEqual(projectdata.typing_facts(root), (True, False))
+                        (sibling / "py.typed").unlink()
+
+    def test_external_regular_venv_config_prunes_without_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = Path(directory).resolve()
+            package = root / "pkg"
+            package.mkdir()
+            (package / "module.py").touch()
+            (package / "py.typed").touch()
+            target = Path(outside) / "pyvenv.cfg"
+            target.touch()
+            (package / "pyvenv.cfg").symlink_to(target)
+            self._assert_typing_tree_is_pruned(root, package)
+
     def test_symlinked_conda_metadata_directory_does_not_prune_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2610,25 +2677,15 @@ class ProjectDataTest(unittest.TestCase):
                 (package / "module.py").touch()
                 (package / "py.typed").touch()
             (root / "blocked" / "conda-meta").mkdir()
+            original_lstat = Path.lstat
             for name in ("py.typed", "pyvenv.cfg", "conda-meta", "conda-meta/history"):
-                operation = "stat" if name == "pyvenv.cfg" else "lstat"
-                original_probe = getattr(Path, operation)
 
-                def denied_probe(
-                    path: Path,
-                    *,
-                    follow_symlinks: bool = True,
-                    denied: str = name,
-                    probe: Callable[..., os.stat_result] = original_probe,
-                    method: str = operation,
-                ):
+                def denied_probe(path: Path, *, denied: str = name):
                     if path == root / "blocked" / denied:
                         raise PermissionError
-                    if method == "stat":
-                        return probe(path, follow_symlinks=follow_symlinks)
-                    return probe(path)
+                    return original_lstat(path)
 
-                with self.subTest(name=name), unittest.mock.patch.object(Path, operation, new=denied_probe):
+                with self.subTest(name=name), unittest.mock.patch.object(Path, "lstat", new=denied_probe):
                     self.assertEqual(projectdata.typing_facts(root), (True, False))
                     (root / "valid" / "py.typed").unlink()
                     self.assertEqual(projectdata.typing_facts(root), (False, False))
