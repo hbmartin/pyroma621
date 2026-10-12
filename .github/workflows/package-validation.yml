@@ -32,6 +32,10 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
+      - name: Check manual release ref
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag || '' }}
+        run: python ci/check_release_dispatch.py
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: '0.13.0'

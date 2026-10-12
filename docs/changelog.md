@@ -27,6 +27,8 @@
   paths in smoke-test fixtures.
 - Package validation runs on pull requests, `master` pushes, manual dispatch,
   and release workflow calls, avoiding a second matrix run on tag pushes.
+  Manual preflight with `release-tag` requires the matching tag ref and rejects
+  branch or other-tag dispatches before building; tagless validation remains available.
   Publishing runs when a GitHub release is published, including from a draft,
   and uploads only distributions that pass release validation.
   Redundant lock checks are removed where locked commands enforce the gate;
@@ -37,7 +39,8 @@
   even when cleanup raises. Fixture Git commands isolate inherited repository
   variables and global/system Git configuration and attributes, including templates,
   hooks, and excludes. Temporary HOME/XDG directories support Git versions before
-  2.32, and regression probes execute a hostile index-change hook.
+  2.32. Regression probes execute a hostile index-change hook when Git 2.22+
+  and a shell are available; other isolation assertions still run without them.
   Backend-warning policy tests run in-process. Legacy fixture builds allow backend warnings
   by category without depending on setuptools warning prose.
 - Hypothesis profiles load before pytest resolves command-line options,
@@ -56,7 +59,8 @@
   longer imply package typing. Inaccessible entries are skipped individually,
   and unrelated files do not incur stat probes. Virtual and Conda environments
   are identified by `pyvenv.cfg` files (including symlinks to regular files) and
-  regular `conda-meta/history` files. Broken or directory-target venv symlinks,
+  regular `conda-meta/history` files. Missing, looping, inaccessible-target,
+  or directory-target venv symlinks,
   symlinked Conda history markers, and symlinked `conda-meta` directories do not
   prune sources.
   Build-output names
@@ -73,10 +77,12 @@
   Markdown and HTML URLs normalize consistently before deduplication; findings
   display readable Unicode while preserving reserved escapes, invalid UTF-8,
   and encoded Unicode controls, non-ASCII spaces, and line/paragraph separators.
-  Zero-width joiners and non-joiners remain readable for emoji and script shaping;
+  Zero-width joiners and non-joiners remain readable for emoji and script shaping,
+  with an encoded URL suffix that distinguishes visually identical paths;
   other format characters, including soft hyphens and bidi controls, stay encoded.
   Findings follow document order and deduplicate display strings, including
-  destinations that differ only in percent-escape case even with invalid UTF-8,
+  destinations that differ in percent-escape case or unreserved ASCII escaping
+  even with invalid UTF-8,
   without repeatedly classifying or decoding identical normalized targets.
   Duplicate spellings do not consume the five-item diagnostic limit.
 - Backend version floors remain strict: wildcard pins can admit prereleases

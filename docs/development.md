@@ -253,7 +253,10 @@ uv run --locked --no-default-groups python ci/package_artifacts.py validate --wo
 The work directory must not already exist. GitHub's "Validate package artifacts"
 workflow also accepts a release tag through manual dispatch and never publishes.
 Select the intended tag as the dispatch ref and supply it as `release-tag` to
-preflight the exact release revision. Wait for validation to succeed before
+preflight the exact release revision. When `release-tag` is supplied, the
+dispatch ref must be exactly `refs/tags/<release-tag>`; selecting a branch or
+another tag fails before distributions are built. Tagless dispatch remains
+available for general validation. Wait for validation to succeed before
 publishing the release. This preflight is manual: the automated gate blocks
 PyPI upload, while a failed release validation can leave an existing GitHub
 release without a PyPI upload.
@@ -285,12 +288,20 @@ HOME/XDG directories, `GIT_CONFIG_NOSYSTEM=1`, and `GIT_ATTR_NOSYSTEM=1`. They
 explicitly select empty template/hook directories and null external attributes
 and exclusions files. This isolation works with Git versions before 2.32,
 without depending on `GIT_CONFIG_GLOBAL`. Hostile configuration probes cover
-global attributes and executable `post-index-change` hooks; caller indexes and
+global attributes and executable `post-index-change` hooks. The executable-hook
+portion requires Git 2.22 or newer and a discoverable `sh` interpreter; earlier
+Git versions and environments without that shell still run the other isolation
+assertions for both HOME and XDG configuration. Supported hook probes require a
+positive control that executes the hostile hook before verifying isolation.
+Caller indexes and
 environments remain untouched and all fixture archives are tracked.
 
 Typing scans recognize regular `pyvenv.cfg` files and symlinks to regular files
-without entering the environment's installed packages. Broken or directory-target
-config symlinks do not identify an environment. Conda detection still requires a
+without entering the environment's installed packages, including config targets
+outside the project. Missing, looping, inaccessible-target, and directory-target
+config symlinks do not identify an environment; Conda markers are still checked
+after an unsuccessful config symlink check. An inaccessible marker entry itself
+is handled conservatively by pruning that directory. Conda detection still requires a
 regular `conda-meta` directory and regular `history` file; symlinks there do not
 prune sources. Symlinked sources and typing markers do not supply typing evidence.
 

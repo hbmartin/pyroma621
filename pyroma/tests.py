@@ -12,7 +12,6 @@ import tempfile
 import unittest
 import unittest.mock
 import warnings
-from collections.abc import Callable
 from email.message import Message
 from importlib.metadata import PackageNotFoundError
 from itertools import permutations
@@ -2477,6 +2476,52 @@ class ProjectDataTest(unittest.TestCase):
                 link.symlink_to(target)
                 self.assertEqual(projectdata.typing_facts(root), (True, False))
 
+    def test_looping_venv_marker_does_not_prune_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "pkg"
+            package.mkdir()
+            (package / "module.py").touch()
+            (package / "py.typed").touch()
+            (package / "pyvenv.cfg").symlink_to("pyvenv.cfg")
+            self.assertEqual(projectdata.typing_facts(root), (True, False))
+
+    def test_inaccessible_venv_symlink_target_still_checks_conda(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            package = root / "pkg"
+            package.mkdir()
+            (package / "module.py").touch()
+            (package / "py.typed").touch()
+            target = root / "config"
+            target.touch()
+            marker = package / "pyvenv.cfg"
+            marker.symlink_to(target)
+            original_stat = Path.stat
+
+            def denied_target(path: Path, *, follow_symlinks: bool = True):
+                if path == marker and follow_symlinks:
+                    raise PermissionError
+                return original_stat(path, follow_symlinks=follow_symlinks)
+
+            with unittest.mock.patch.object(Path, "stat", new=denied_target):
+                self.assertEqual(projectdata.typing_facts(root), (True, False))
+                (package / "conda-meta").mkdir()
+                (package / "conda-meta" / "history").touch()
+                self._assert_typing_tree_is_pruned(root, package)
+
+    def test_external_regular_venv_config_prunes_without_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = Path(directory).resolve()
+            package = root / "pkg"
+            package.mkdir()
+            (package / "module.py").touch()
+            (package / "py.typed").touch()
+            target = Path(outside) / "pyvenv.cfg"
+            target.touch()
+            (package / "pyvenv.cfg").symlink_to(target)
+            self._assert_typing_tree_is_pruned(root, package)
+
     def test_symlinked_conda_metadata_directory_does_not_prune_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2610,25 +2655,15 @@ class ProjectDataTest(unittest.TestCase):
                 (package / "module.py").touch()
                 (package / "py.typed").touch()
             (root / "blocked" / "conda-meta").mkdir()
+            original_lstat = Path.lstat
             for name in ("py.typed", "pyvenv.cfg", "conda-meta", "conda-meta/history"):
-                operation = "stat" if name == "pyvenv.cfg" else "lstat"
-                original_probe = getattr(Path, operation)
 
-                def denied_probe(
-                    path: Path,
-                    *,
-                    follow_symlinks: bool = True,
-                    denied: str = name,
-                    probe: Callable[..., os.stat_result] = original_probe,
-                    method: str = operation,
-                ):
+                def denied_probe(path: Path, *, denied: str = name, **kwargs: bool):
                     if path == root / "blocked" / denied:
                         raise PermissionError
-                    if method == "stat":
-                        return probe(path, follow_symlinks=follow_symlinks)
-                    return probe(path)
+                    return original_lstat(path, **kwargs)
 
-                with self.subTest(name=name), unittest.mock.patch.object(Path, operation, new=denied_probe):
+                with self.subTest(name=name), unittest.mock.patch.object(Path, "lstat", new=denied_probe):
                     self.assertEqual(projectdata.typing_facts(root), (True, False))
                     (root / "valid" / "py.typed").unlink()
                     self.assertEqual(projectdata.typing_facts(root), (False, False))

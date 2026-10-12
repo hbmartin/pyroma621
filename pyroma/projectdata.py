@@ -6,7 +6,7 @@ import subprocess
 import tomllib
 from email.message import Message
 from pathlib import Path
-from stat import S_ISDIR, S_ISREG
+from stat import S_ISDIR, S_ISLNK, S_ISREG
 from typing import TYPE_CHECKING, Any, Union, cast
 
 import build
@@ -144,14 +144,27 @@ def _has_direct_sources(path: Path) -> bool:
     return False
 
 
-def _environment_directory(path: Path) -> bool:
-    """Recognize environments, treating inaccessible markers conservatively."""
+def _venv_marker(marker: Path) -> bool:
+    """Require a regular config or a symlink that resolves to a regular file."""
     try:
-        if S_ISREG((path / "pyvenv.cfg").stat().st_mode):
-            return True
+        mode = marker.lstat().st_mode
     except (FileNotFoundError, NotADirectoryError):
-        pass
+        return False
     except OSError:
+        return True
+    if S_ISREG(mode):
+        return True
+    if not S_ISLNK(mode):
+        return False
+    try:
+        return S_ISREG(marker.stat().st_mode)
+    except OSError:
+        return False
+
+
+def _environment_directory(path: Path) -> bool:
+    """Recognize environments, treating inaccessible marker entries conservatively."""
+    if _venv_marker(path / "pyvenv.cfg"):
         return True
     conda_metadata = path / "conda-meta"
     try:

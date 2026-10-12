@@ -160,17 +160,21 @@ project root, with a regular `.py` or `.pyi` file in its directory or a scanned
 descendant. Isolated documentation/test markers do not count; Python-bearing
 documentation/test packages can still qualify, since this does not prove
 wheel inclusion. Hidden directories, caches and `node_modules` are pruned.
-Virtual environments are identified by regular `pyvenv.cfg` files, and Conda
-environments by regular `history` files inside real `conda-meta` directories,
-not their directory names. Symlinked marker files and symlinked `conda-meta`
+Virtual environments are identified by regular `pyvenv.cfg` files or symlinks
+that resolve to regular files, including targets outside the project. Missing,
+looping, inaccessible-target, and directory-target config symlinks do not mark
+environments. Conda environments are identified by regular `history` files
+inside real `conda-meta` directories,
+not their directory names. Symlinked Conda marker files and symlinked `conda-meta`
 directories do not mark environments. At the scan
 root and nested project boundaries, `build`, `dist` and `_build` directories
 are pruned unless they contain direct Python/stub source files. A nested
 boundary contains a regular `pyproject.toml`, `setup.py` or `setup.cfg`;
 its contents are not parsed for this heuristic. Packages and namespaces with
 those directory names elsewhere in the source tree are retained.
-Directory symlinks are not followed, and file symlinks do not
-provide markers or source evidence. Inaccessible entries are skipped without
+Directory symlinks are not followed, and symlinked source files and typing
+markers do not supply typing evidence. An inaccessible environment marker entry
+itself conservatively excludes its directory. Inaccessible entries are skipped without
 discarding accessible siblings, and unrelated filenames are not statted.
 Missing source facts skip the typing advisory.
 
@@ -189,11 +193,16 @@ Markdown and HTML destinations use the same URL normalization before relative
 classification, with uppercase percent-escape triplets, then deduplicate their
 display strings. Identical normalized destinations are classified and decoded
 only once. Findings retain document order and display readable Unicode paths,
-including zero-width joiners and non-joiners (U+200D and U+200C). Reserved escapes,
+including zero-width joiners and non-joiners (U+200D and U+200C). Paths containing
+these joiners also include an encoded destination in a ` (URL: ...)` suffix on
+the same diagnostic line, so visually identical paths remain identifiable.
+Equivalent joiner spellings still count as one finding. Reserved escapes,
 Unicode controls (`Cc`), other format characters (`Cf`), non-ASCII spaces (`Zs`),
 and line and paragraph separators (`Zl` and `Zp`) remain UTF-8 percent-encoded.
 Ordinary ASCII spaces remain readable. URLs containing invalid UTF-8 escapes
-retain their bytes with uppercase escape spelling. Equivalent spellings count
+retain those bytes with uppercase escape spelling, while percent-encoded ASCII
+unreserved characters (`A-Z`, `a-z`, digits, `-._~`) become literal characters.
+Equivalent spellings count
 as one finding toward the five-item display limit.
 Extension-specific syntax is not enabled.
 

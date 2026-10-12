@@ -121,8 +121,16 @@ def test_ambiguous_or_unresolved_destinations_are_skipped(source: str) -> None:
         ("docs/a%E2%80%AEb.md", "docs/a%E2%80%AEb.md", "docs/a%E2%80%AEb.md"),
         ("docs/a%E2%80%A8b.md", "docs/a%E2%80%A8b.md", "docs/a%E2%80%A8b.md"),
         ("docs/a%E2%80%A9b.md", "docs/a%E2%80%A9b.md", "docs/a%E2%80%A9b.md"),
-        ("images/👨\u200d👩.png", "images/%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9.png", "images/👨\u200d👩.png"),
-        ("docs/می\u200cروم.md", "docs/%D9%85%DB%8C%E2%80%8C%D8%B1%D9%88%D9%85.md", "docs/می\u200cروم.md"),
+        (
+            "images/👨\u200d👩.png",
+            "images/%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9.png",
+            "images/👨\u200d👩.png (URL: images/%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9.png)",
+        ),
+        (
+            "docs/می\u200cروم.md",
+            "docs/%D9%85%DB%8C%E2%80%8C%D8%B1%D9%88%D9%85.md",
+            "docs/می\u200cروم.md (URL: docs/%D9%85%DB%8C%E2%80%8C%D8%B1%D9%88%D9%85.md)",
+        ),
         ("docs/a\u00adb.md", "docs/a%C2%ADb.md", "docs/a%C2%ADb.md"),
         ("docs/a\u200bb.md", "docs/a%E2%80%8Bb.md", "docs/a%E2%80%8Bb.md"),
         ("docs/a\u00a0b.md", "docs/a%C2%A0b.md", "docs/a%C2%A0b.md"),
@@ -145,7 +153,8 @@ def test_unicode_spellings_deduplicate_across_markdown_html_and_images(stem: str
     canonical = quote(target, safe="/")
     source = f'[x]({target}) <a href="{target}">x</a> ![x]({canonical}) [outside](docs/outside.md)'
     assert destinations(source) == [canonical, canonical, canonical, "docs/outside.md"]
-    assert _relative_description_targets(source, "text/markdown") == [target, "docs/outside.md"]
+    expected = f"{target} (URL: {canonical})" if "\u200c" in stem or "\u200d" in stem else target
+    assert _relative_description_targets(source, "text/markdown") == [expected, "docs/outside.md"]
 
 
 def test_reserved_url_characters_remain_distinct_after_deduplication() -> None:
@@ -182,6 +191,36 @@ def test_invalid_utf8_duplicates_do_not_consume_the_finding_cap() -> None:
 def test_unreserved_escape_spellings_still_deduplicate() -> None:
     source = '[x](docs/%61.md) <a href="docs/a.md">x</a> ![x](docs/%61.md) [last](docs/last.md)'
     assert _relative_description_targets(source, "text/markdown") == ["docs/a.md", "docs/last.md"]
+
+
+def test_invalid_utf8_unreserved_spellings_share_one_finding_slot() -> None:
+    targets = ["docs/%ff%61.md", "docs/%FFa.md", *[f"docs/{number}.md" for number in range(2, 7)]]
+    source = " ".join(f'[x]({target}) <a href="{target}">x</a> ![x]({target})' for target in targets)
+    assert _relative_description_targets(source, "text/markdown") == ["docs/%FFa.md", *targets[2:]]
+    result = ReadmeRelativeLinks().test({"description": source, "description-content-type": "text/markdown"})
+    assert result.message is not None
+    assert result.message.count("  docs/%FFa.md\n") == 1
+    assert "  docs/5.md\n  (and 1 more)" in result.message
+    assert "docs/6.md" not in result.message
+
+
+@pytest.mark.parametrize("escape", ["%2f", "%23", "%25", "%00", "%0a", "%E2%80%8D"])
+def test_invalid_utf8_fallback_retains_reserved_and_invisible_escapes(escape: str) -> None:
+    source = f"[x](docs/%ff%61{escape}.md)"
+    assert _relative_description_targets(source, "text/markdown") == [f"docs/%FFa{escape.upper()}.md"]
+
+
+@pytest.mark.parametrize("joiner", ["\u200c", "\u200d"])
+def test_joiner_annotations_identify_paths_and_deduplicate_spellings(joiner: str) -> None:
+    target = f"docs/a{joiner}b.md"
+    encoded = quote(target, safe="/")
+    alias = encoded.replace("/a", "/%61")
+    source = f'[plain](docs/ab.md) [x]({target}) <a href="{alias}">x</a> ![x]({encoded})'
+    expected = f"{target} (URL: {encoded})"
+    assert _relative_description_targets(source, "text/markdown") == ["docs/ab.md", expected]
+    result = ReadmeRelativeLinks().test({"description": source, "description-content-type": "text/markdown"})
+    assert result.message is not None
+    assert result.message.count(f"  {expected}\n") == 1
 
 
 @pytest.mark.parametrize(
