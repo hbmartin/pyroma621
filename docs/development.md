@@ -228,7 +228,8 @@ Publishing a GitHub release, directly or from a saved draft, starts
 `.github/workflows/publish.yml`. Its reusable
 package-validation workflow checks the lockfile, builds an sdist and a wheel from
 that sdist, and tests the installed wheel outside the checkout on Python 3.11,
-3.13, and 3.14. Property and CI gate tests come from the sdist; unit tests and fixtures come
+3.13, and 3.14. Property and CI gate tests, including the documentation workflow
+they exercise, come from the sdist; unit tests and fixtures come
 from the wheel. A separate environment installs only runtime dependencies and
 checks imports, typing/license files, entry points, and both CLI invocation forms.
 
@@ -254,16 +255,21 @@ have that release version, a dated changelog heading, and the matching literal
 README hook revision:
 
 ```console
-RELEASE_TAG=6.2.0
-uv lock --check
-uv run --locked --only-group release python ci/package_artifacts.py preflight --release-tag "$RELEASE_TAG"
-uv run --locked --only-group release python ci/release_docs.py check --release-tag "$RELEASE_TAG"
-uv build
-for release_python in 3.11 3.13 3.14; do
-  uv run --locked --only-group release python ci/package_artifacts.py validate --work "$(mktemp -d)/release-check" --python "$release_python" --release-tag "$RELEASE_TAG"
-done
+(
+  set -e
+  RELEASE_TAG=6.2.0
+  uv lock --check
+  uv run --locked --only-group release python ci/package_artifacts.py preflight --release-tag "$RELEASE_TAG"
+  uv run --locked --only-group release python ci/release_docs.py check --release-tag "$RELEASE_TAG"
+  uv build --clear
+  for release_python in 3.11 3.13 3.14; do
+    uv run --locked --only-group release python ci/package_artifacts.py validate --work "$(mktemp -d)/release-check" --python "$release_python" --release-tag "$RELEASE_TAG"
+  done
+)
 ```
 
+The subshell stops at the first failed gate without closing your interactive
+shell. The build clears old distributions before validating the new artifacts.
 The work directory must not already exist and should be outside the checkout,
 as in the example above, to avoid test module names colliding with installed
 dependencies such as `build`. GitHub's "Validate package artifacts"
@@ -413,8 +419,9 @@ and ignored. Preparation replaces this generated tree, including all canonical
 schema versions, so repeated builds remove stale downloads. The docs-only
 environment does not install the runtime project. Offline tests validate every
 JSON documentation example and the PEP 440 syntax of its illustrative checker version.
-After the strict build, CI requires nonempty JSON guide and v1 schema files in
-the generated site before uploading it; this also runs on pull requests.
+After the strict build, CI requires a nonempty JSON guide and compares the
+complete generated schema tree with the canonical packaged tree before uploading
+it; this also runs on pull requests and covers every schema version.
 Check documentation consistency locally, or include live release evidence:
 
 ```console
@@ -428,7 +435,7 @@ and a Production/Stable or Mature classifier for final releases. Every offline
 check also requires the local `.pre-commit-hooks.yaml` to provide a `pyroma` hook
 with `entry: pyroma` in the same entry. Publishing is independent
 of the current Pages deployment. After deploying Pages, the docs workflow checks
-availability of the JSON guide and both v1 schema downloads with bounded curl
+availability of the JSON guide and every canonical schema download with bounded curl
 retries; it does not compare their contents with a release tag.
 
 The optional `--online` maintainer audit probes live documentation, compares
@@ -439,15 +446,21 @@ site or published release list changes.
 For a tagged offline check, pass `--release-tag TAG` from the corresponding release
 checkout after dating its changelog heading and updating its documented hook.
 Only README examples preceded by a standalone `<!-- pyroma-pre-commit -->`
-outside fenced code blocks are parsed as YAML; literal marker mentions and
-unrelated YAML blocks are ignored. Each marker must precede a complete YAML
-fence, with optional blank lines; malformed examples identify their README line.
+outside code blocks are parsed as YAML, including examples inside lists and
+blockquotes; literal marker mentions and unrelated YAML blocks are ignored.
+Each marker must precede a complete YAML fence in the same Markdown container,
+with optional blank lines. Markers on fence lines are rejected, and unclosed
+fences identify their opening README line. Every marked example must contain
+the fork's exact `pyroma` hook, and all matching revisions must agree.
 Repository URLs accept an optional `.git`
 suffix and trailing slash. Published hook definitions are also parsed as YAML; repository,
 hook ID, revision, and entry must belong to the matching entry. The `release`
-dependency group supplies PyYAML and packaging without adding runtime dependencies.
-Requests have 15-second timeouts and 2 MiB response limits; oversized responses
-identify the resource without printing its URL. Unit tests mock all
+dependency group supplies the Markdown parser, PyYAML, and packaging without
+installing the runtime project. README input accepts an initial UTF-8 BOM,
+and diagnostics use Markdown source lines.
+Requests have 15-second timeouts and 2 MiB response limits; fetch, decoding,
+and remote JSON/TOML parsing errors identify the resource without printing its
+URL. Unit tests mock all
 remote evidence.
 Installed-artifact validation covers Python 3.11, 3.13, and 3.14, including
 both CLI entry points, schema resources, version output, usage-error JSON,

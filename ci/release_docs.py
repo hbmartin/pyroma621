@@ -1,25 +1,35 @@
 """Check release documentation and prepare downloadable JSON Schemas."""
 
+from __future__ import annotations
+
 import argparse
 import datetime
 import json
 import re
 import shutil
 import tomllib
+from http.client import HTTPException
 from pathlib import Path
-from urllib.error import URLError
+from typing import TYPE_CHECKING
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import urlopen
 
 import yaml
+from markdown_it import MarkdownIt
+from markdown_it.rules_block import fence
 from packaging.version import Version
+
+if TYPE_CHECKING:
+    from markdown_it.rules_block.state_block import StateBlock
+    from markdown_it.token import Token
 
 SITE_URL = "https://hbmartin.github.io/pyroma621/"
 REPOSITORY = "https://github.com/hbmartin/pyroma621"
 RELEASE_DATES = {"6.0.0": "2026-08-01", "6.1.0": "2026-10-12"}
 _RESPONSE_LIMIT = 2 * 1024 * 1024
 _PRECOMMIT_MARKER = "<!-- pyroma-pre-commit -->"
-_FENCE_START = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+_MARKER_BEFORE_FENCE = re.compile(re.escape(_PRECOMMIT_MARKER) + r"[ \t]*(?:`{3,}|~{3,})")
 _FINAL_STATUSES = {"Development Status :: 5 - Production/Stable", "Development Status :: 6 - Mature"}
 
 
@@ -36,39 +46,62 @@ def _load_yaml(text: str, context: str) -> object:
         raise ValueError(message) from error
 
 
-def _fence_end(lines: list[str], start: int, delimiter: str) -> int | None:
-    """Find a matching closing fence without inspecting its contents."""
-    closing = re.compile(r" {0,3}" + re.escape(delimiter[0]) + "{" + str(len(delimiter)) + r",}[ \t]*")
-    return next((index for index in range(start + 1, len(lines)) if closing.fullmatch(lines[index])), None)
+def _fence_with_closure(state: StateBlock, start: int, end: int, silent: bool) -> bool:  # noqa: FBT001 - parser callback
+    """Keep Markdown's fence rules and record explicit closure in its container."""
+    matched = fence(state, start, end, silent)
+    if matched and not silent:
+        token = state.tokens[-1]
+        last = state.line - 1
+        closing = state.src[state.bMarks[last] + state.tShift[last] : state.eMarks[last]].rstrip(" \t")
+        token.meta["closed"] = (
+            last > start
+            and not state.is_code_block(last)
+            and len(closing) >= len(token.markup)
+            and closing == token.markup[0] * len(closing)
+        )
+    return matched
+
+
+def _read_marked_fence(token: Token, pending: tuple[int, int]) -> tuple[int, str]:
+    marker_line, level = pending
+    message = f"README line {marker_line}: marked pyroma hook example needs a complete yaml code block"
+    if token.type != "fence" or token.level != level or token.info.strip() != "yaml":
+        raise ValueError(message)
+    if not token.meta["closed"]:
+        line = token.map[0] + 1 if token.map else 0
+        message = f"{message}; unclosed code fence at README line {line}"
+        raise ValueError(message)
+    return marker_line, token.content
 
 
 def _marked_precommit_blocks(readme: str) -> list[tuple[int, str]]:
-    """Read marked YAML fences while ignoring literal marker examples."""
-    lines = readme.splitlines()
-    blocks = []
-    index = 0
-    while index < len(lines):
-        fence = _FENCE_START.fullmatch(lines[index])
-        if fence:
-            end = _fence_end(lines, index, fence[1])
-            index = end + 1 if end is not None else len(lines)
+    """Read adjacent marker/YAML blocks in the same Markdown container."""
+    parser = MarkdownIt("commonmark")
+    parser.block.ruler.at("fence", _fence_with_closure, {"alt": ["paragraph", "reference", "blockquote", "list"]})
+    blocks: list[tuple[int, str]] = []
+    pending: tuple[int, int] | None = None
+    for token in parser.parse(readme.removeprefix("\ufeff")):
+        line = token.map[0] + 1 if token.map else 0
+        if pending is not None:
+            blocks.append(_read_marked_fence(token, pending))
+            pending = None
             continue
-        if not re.fullmatch(r" {0,3}" + re.escape(_PRECOMMIT_MARKER) + r"[ \t]*", lines[index]):
-            index += 1
-            continue
-        marker_line = index + 1
-        message = f"README line {marker_line}: marked pyroma hook example needs a complete yaml code block"
-        index += 1
-        while index < len(lines) and not lines[index].strip():
-            index += 1
-        fence = _FENCE_START.fullmatch(lines[index]) if index < len(lines) else None
-        if fence is None or fence[2].strip() != "yaml":
-            raise ValueError(message)
-        end = _fence_end(lines, index, fence[1])
-        if end is None:
-            raise ValueError(message)
-        blocks.append((marker_line, "\n".join(lines[index + 1 : end])))
-        index = end + 1
+        if token.type == "fence":
+            if not token.meta["closed"]:
+                message = f"README line {line}: unclosed code fence hides possible pyroma hook examples"
+                raise ValueError(message)
+            if _PRECOMMIT_MARKER in token.info:
+                message = f"README line {line}: pyroma hook marker must be on its own line before the YAML fence"
+                raise ValueError(message)
+        elif token.type == "html_block":
+            if token.content.strip() == _PRECOMMIT_MARKER:
+                pending = (line, token.level)
+            elif _MARKER_BEFORE_FENCE.search(token.content):
+                message = f"README line {line}: pyroma hook marker must be on its own line before the YAML fence"
+                raise ValueError(message)
+    if pending is not None:
+        message = f"README line {pending[0]}: marked pyroma hook example needs a complete yaml code block"
+        raise ValueError(message)
     return blocks
 
 
@@ -80,8 +113,8 @@ def precommit_revision(readme: str) -> str:
         context = f"README pre-commit example at line {marker_line}"
         example = _load_yaml(block, context)
         repositories = example.get("repos") if isinstance(example, dict) else None
-        if not isinstance(repositories, list):
-            continue
+        repositories = repositories if isinstance(repositories, list) else []
+        block_revisions: set[str] = set()
         for repository in repositories:
             if not isinstance(repository, dict) or not _is_pyroma_repository(repository.get("repo")):
                 continue
@@ -92,8 +125,13 @@ def precommit_revision(readme: str) -> str:
                 continue
             revision = repository.get("rev")
             if not isinstance(revision, str) or not revision.strip():
-                raise ValueError(message)
-            revisions.add(revision)
+                block_message = f"{context}: {message}"
+                raise ValueError(block_message)
+            block_revisions.add(revision)
+        if not block_revisions:
+            block_message = f"{context}: {message}"
+            raise ValueError(block_message)
+        revisions.update(block_revisions)
     if not revisions:
         raise ValueError(message)
     if len(revisions) != 1:
@@ -143,7 +181,7 @@ def check_offline(project: Path, release_tag: str = "") -> str:
     )
     metadata = tomllib.loads((project / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     site = tomllib.loads((project / "zensical.toml").read_text(encoding="utf-8"))["project"]
-    readme = (project / "README.md").read_text(encoding="utf-8")
+    readme = (project / "README.md").read_text(encoding="utf-8-sig")
     if metadata["name"] != "pyroma621" or "pip install pyroma621" not in readme:
         message = "Installation documentation must select the pyroma621 distribution"
         raise ValueError(message)
@@ -174,25 +212,69 @@ def check_offline(project: Path, release_tag: str = "") -> str:
 def fetch(url: str, *, label: str = "Release evidence") -> str:
     """Read bounded public HTTPS release evidence with a timeout."""
     if not url.startswith("https://"):
-        message = "Release evidence must use HTTPS"
+        message = f"{label} must use HTTPS"
         raise ValueError(message)
-    with urlopen(url, timeout=15) as response:  # noqa: S310 - public HTTPS URLs checked above
-        payload = response.read(_RESPONSE_LIMIT + 1)
+    try:
+        with urlopen(url, timeout=15) as response:  # noqa: S310 - public HTTPS URLs checked above
+            payload = response.read(_RESPONSE_LIMIT + 1)
+    except HTTPError as error:
+        message = f"{label}: HTTP {error.code}"
+        raise ValueError(message) from error
+    except TimeoutError as error:
+        message = f"{label}: request timed out"
+        raise ValueError(message) from error
+    except URLError as error:
+        reason = "request timed out" if isinstance(error.reason, TimeoutError) else "unable to fetch resource"
+        message = f"{label}: {reason}"
+        raise ValueError(message) from error
+    except (OSError, HTTPException) as error:
+        message = f"{label}: unable to read response"
+        raise ValueError(message) from error
     if len(payload) > _RESPONSE_LIMIT:
         message = f"{label} exceeds the response limit"
         raise ValueError(message)
-    return payload.decode("utf-8")
+    try:
+        return payload.decode("utf-8")
+    except UnicodeDecodeError as error:
+        message = f"{label}: response must contain valid UTF-8"
+        raise ValueError(message) from error
+
+
+def _load_json(text: str, label: str) -> object:
+    try:
+        return json.loads(text)
+    except ValueError as error:
+        message = f"{label} must contain valid JSON"
+        raise ValueError(message) from error
+
+
+def _load_toml(text: str, label: str) -> dict[str, object]:
+    try:
+        return tomllib.loads(text)
+    except ValueError as error:
+        message = f"{label} must contain valid TOML"
+        raise ValueError(message) from error
+
+
+def schema_paths(project: Path) -> list[Path]:
+    """Discover every canonical JSON schema relative to the package."""
+    package = project / "pyroma"
+    paths = sorted(path.relative_to(package) for path in (package / "schemas").rglob("*.json") if path.is_file())
+    if not paths:
+        message = "Canonical packaged schema directory has no JSON schemas"
+        raise ValueError(message)
+    return paths
 
 
 def _check_published_contract(project: Path) -> None:
     """Require the JSON guide and canonical schema downloads to be published."""
     fetch(SITE_URL + "json/", label="JSON guide")
-    for kind in ("rating", "error"):
-        relative = Path("schemas") / "v1" / f"{kind}.json"
+    for relative in schema_paths(project):
+        label = f"Published schema {relative.relative_to('schemas').as_posix()}"
         canonical = json.loads((project / "pyroma" / relative).read_text(encoding="utf-8"))
-        published = json.loads(fetch(SITE_URL + relative.as_posix(), label=f"Published {kind} schema"))
+        published = _load_json(fetch(SITE_URL + relative.as_posix(), label=label), label)
         if published != canonical:
-            message = f"Published {kind} schema does not match packaged schema"
+            message = f"{label} does not match packaged schema"
             raise ValueError(message)
 
 
@@ -207,7 +289,9 @@ def check_online(project: Path, revision: str) -> None:
         fetch(SITE_URL + page, label=label)
     _check_published_contract(project)
     base = "https://raw.githubusercontent.com/hbmartin/pyroma621/" + quote(revision, safe="") + "/"
-    metadata = tomllib.loads(fetch(base + "pyproject.toml", label="Hook package metadata"))["project"]
+    metadata = _load_toml(fetch(base + "pyproject.toml", label="Hook package metadata"), "Hook package metadata")[
+        "project"
+    ]
     if metadata["name"] != "pyroma621" or Version(metadata["version"]) != Version(revision):
         message = "Documented pre-commit revision must install a pyroma621 release"
         raise ValueError(message)
@@ -215,7 +299,9 @@ def check_online(project: Path, revision: str) -> None:
         fetch(base + ".pre-commit-hooks.yaml", label="Published hook manifest"), "Published pre-commit hooks"
     )
     entries = changelog_entries((project / "docs" / "changelog.md").read_text(encoding="utf-8"))
-    releases = json.loads(fetch("https://pypi.org/pypi/pyroma621/json", label="PyPI release metadata"))["releases"]
+    releases = _load_json(
+        fetch("https://pypi.org/pypi/pyroma621/json", label="PyPI release metadata"), "PyPI release metadata"
+    )["releases"]
     for version, artifacts in releases.items():
         if artifacts:
             date = min(artifact["upload_time_iso_8601"] for artifact in artifacts)[:10]

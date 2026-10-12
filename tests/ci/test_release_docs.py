@@ -1,15 +1,19 @@
 """Validate release documentation without depending on live services."""
 
 import json
+import os
 import re
 import shutil
+import subprocess
 import tomllib
 from collections.abc import Callable
+from http.client import IncompleteRead
 from pathlib import Path
 from unittest.mock import Mock
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 import pytest
+import yaml
 from jsonschema import Draft202012Validator
 from packaging.version import Version
 from zest.releaser import utils
@@ -67,9 +71,10 @@ def online_evidence(project: Path) -> dict[str, str]:
     responses = {
         release_docs.SITE_URL + page: "documentation" for page in ("", "rules/", "upgrading/", "changelog/", "json/")
     }
-    for kind in ("rating", "error"):
-        relative = Path("schemas") / "v1" / f"{kind}.json"
-        schema = json.loads((project / "pyroma" / relative).read_text(encoding="utf-8"))
+    package = project / "pyroma"
+    for path in (package / "schemas").rglob("*.json"):
+        relative = path.relative_to(package)
+        schema = json.loads(path.read_text(encoding="utf-8"))
         responses[release_docs.SITE_URL + relative.as_posix()] = json.dumps(schema, sort_keys=True)
     responses[base + "pyproject.toml"] = f'[project]\nname="pyroma621"\nversion="{VERSION}"\n'
     responses[base + ".pre-commit-hooks.yaml"] = "- id: pyroma\n  entry: pyroma\n"
@@ -192,15 +197,10 @@ def test_local_hook_manifest_is_checked_without_network(
     blocked.assert_not_called()
 
 
-@pytest.mark.parametrize("renamed", [False, True])
 def test_missing_local_hook_manifest_fails_clearly(
-    monkeypatch: pytest.MonkeyPatch, project: Path, capsys: pytest.CaptureFixture, renamed: bool
+    monkeypatch: pytest.MonkeyPatch, project: Path, capsys: pytest.CaptureFixture
 ) -> None:
-    manifest = project / ".pre-commit-hooks.yaml"
-    if renamed:
-        manifest.rename(project / "renamed-hooks.yaml")
-    else:
-        manifest.unlink()
+    (project / ".pre-commit-hooks.yaml").unlink()
     monkeypatch.setattr("sys.argv", ["release_docs", "check", "--project", str(project), "--release-tag", VERSION])
     with pytest.raises(SystemExit) as raised:
         release_docs.main()
@@ -237,8 +237,8 @@ def test_online_release_evidence(
             "Upgrade guide",
             "Changelog",
             "JSON guide",
-            "Published rating schema",
-            "Published error schema",
+            "Published schema v1/rating.json",
+            "Published schema v1/error.json",
             "Hook package metadata",
             "Published hook manifest",
             "PyPI release metadata",
@@ -268,12 +268,12 @@ def test_online_schemas_must_match_package(
     url = release_docs.SITE_URL + f"schemas/v1/{kind}.json"
     if failure == "invalid":
         online_evidence[url] = "not JSON"
-        message = "Expecting value"
+        message = f"Published schema v1/{kind}.json must contain valid JSON"
     else:
         schema = json.loads(online_evidence[url])
         schema["title"] = "Stale published schema"
         online_evidence[url] = json.dumps(schema)
-        message = f"Published {kind} schema does not match packaged schema"
+        message = f"Published schema v1/{kind}.json does not match packaged schema"
     monkeypatch.setattr(release_docs, "fetch", lambda url, **_kwargs: online_evidence[url])
     with pytest.raises(ValueError, match=message):
         release_docs.check_online(project, VERSION)
@@ -281,9 +281,9 @@ def test_online_schemas_must_match_package(
 
 def test_schema_publication(project: Path) -> None:
     release_docs.prepare_schemas(project)
-    for kind in ("rating", "error"):
-        relative = Path("schemas") / "v1" / f"{kind}.json"
-        assert (project / "docs" / relative).read_bytes() == (project / "pyroma" / relative).read_bytes()
+    for path in (project / "pyroma" / "schemas").rglob("*.json"):
+        relative = path.relative_to(project / "pyroma")
+        assert (project / "docs" / relative).read_bytes() == path.read_bytes()
 
 
 @pytest.mark.parametrize(
@@ -350,7 +350,7 @@ def test_unmarked_yaml_does_not_affect_hook_validation(project: Path, example: s
     [
         "Mark examples with <!-- pyroma-pre-commit -->.",
         "`<!-- pyroma-pre-commit -->`",
-        "> <!-- pyroma-pre-commit -->",
+        "> `<!-- pyroma-pre-commit -->`",
         "    <!-- pyroma-pre-commit -->",
         "```markdown\n<!-- pyroma-pre-commit -->\n```",
         "~~~markdown\n<!-- pyroma-pre-commit -->\n~~~",
@@ -562,3 +562,353 @@ def test_release_lifecycle_keeps_examples_and_offline_checks_valid(
     validate_examples(project, validator)
     assert examples.read_bytes() == original_examples
     blocked.assert_not_called()
+
+
+def hook_example(project: Path) -> str:
+    readme = (project / "README.md").read_text(encoding="utf-8")
+    return "<!-- pyroma-pre-commit -->" + readme.partition("<!-- pyroma-pre-commit -->")[2]
+
+
+def in_container(example: str, container: str) -> str:
+    if container == "quote":
+        return "".join("> " + line + "\n" for line in example.split("\n")[:-1])
+    if container == "list":
+        return "10. Install:\n\n" + "".join("    " + line + "\n" for line in example.split("\n")[:-1])
+    if container == "nested":
+        return "10. Install:\n\n" + "".join("    > " + line + "\n" for line in example.split("\n")[:-1])
+    return example
+
+
+@pytest.mark.parametrize("container", ["top", "quote", "list", "nested"])
+@pytest.mark.parametrize("stale", [False, True])
+def test_every_rendered_hook_example_is_checked(project: Path, container: str, stale: bool) -> None:
+    valid = hook_example(project)
+    repeated = valid.replace(VERSION, "0.1.0") if stale else valid
+    readme = "```pyroma .``` rates the cwd.\n\n" + in_container(repeated, container) + "\n" + valid
+    if stale:
+        with pytest.raises(ValueError, match="conflicting release revisions"):
+            release_docs.precommit_revision(readme)
+    else:
+        assert release_docs.precommit_revision(readme) == VERSION
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (release_docs.REPOSITORY, "https://github.com/regebro/pyroma"),
+        ("id: pyroma", "id: pyromaa"),
+        ("repos:", "examples:"),
+        (f'rev: "{VERSION}"', "rev: null"),
+    ],
+)
+@pytest.mark.parametrize("bad_first", [False, True])
+def test_valid_example_cannot_hide_an_invalid_marked_block(project: Path, old: str, new: str, bad_first: bool) -> None:
+    valid = hook_example(project)
+    invalid = valid.replace(old, new)
+    readme = invalid + valid if bad_first else valid + invalid
+    marker_line = 1 if bad_first else len(valid.split("\n"))
+    with pytest.raises(ValueError, match=f"README pre-commit example at line {marker_line}.*pyroma hook"):
+        release_docs.precommit_revision(readme)
+
+
+@pytest.mark.parametrize(
+    "readme",
+    [
+        "> <!-- pyroma-pre-commit -->\n\n```yaml\nrepos: []\n```\n",
+        "<!-- pyroma-pre-commit -->\n> ```yaml\n> repos: []\n> ```\n",
+        "10. <!-- pyroma-pre-commit -->\n\n11. ```yaml\n    repos: []\n    ```\n",
+        "> <!-- pyroma-pre-commit -->\n",
+    ],
+)
+def test_marker_requires_a_fence_in_the_same_container(project: Path, readme: str) -> None:
+    with pytest.raises(ValueError, match=r"README line 1:.*complete yaml code block"):
+        release_docs.precommit_revision(readme + "\n" + hook_example(project))
+
+
+@pytest.mark.parametrize("container", ["top", "quote", "list", "nested"])
+@pytest.mark.parametrize("before", [False, True])
+def test_marker_on_a_fence_line_is_rejected(project: Path, container: str, before: bool) -> None:
+    valid = hook_example(project)
+    replacement = "<!-- pyroma-pre-commit --> ```yaml" if before else "```yaml <!-- pyroma-pre-commit -->"
+    invalid = valid.replace("<!-- pyroma-pre-commit -->\n```yaml", replacement)
+    with pytest.raises(ValueError, match=r"README line \d+:.*marker must be on its own line"):
+        release_docs.precommit_revision(in_container(invalid, container) + "\n" + valid)
+
+
+@pytest.mark.parametrize("container", ["top", "quote", "list", "nested"])
+@pytest.mark.parametrize("closing", ["````", "```   ", "```\t"])
+def test_explicit_fence_closure_in_containers(project: Path, container: str, closing: str) -> None:
+    example = hook_example(project).removesuffix("```\n") + closing + "\n"
+    assert release_docs.precommit_revision(in_container(example, container).rstrip("\n")) == VERSION
+
+
+@pytest.mark.parametrize("container", ["top", "quote", "list", "nested"])
+@pytest.mark.parametrize("closing", ["", "~~~,", "    ```", "``"])
+def test_unclosed_marked_fences_identify_the_opening_line(project: Path, container: str, closing: str) -> None:
+    example = hook_example(project).removesuffix("```\n") + closing + "\n"
+    with pytest.raises(ValueError, match=r"unclosed code fence at README line \d+"):
+        release_docs.precommit_revision(in_container(example, container))
+
+
+def test_unclosed_unmarked_fence_identifies_its_opening(project: Path) -> None:
+    with pytest.raises(ValueError, match="README line 2: unclosed code fence"):
+        release_docs.precommit_revision("Introduction\n~~~markdown\n" + hook_example(project))
+
+
+def test_first_line_marker_accepts_utf8_bom(project: Path) -> None:
+    readme = hook_example(project) + f"\npip install pyroma621\n{release_docs.SITE_URL}\n"
+    (project / "README.md").write_text(readme, encoding="utf-8-sig")
+    assert release_docs.check_offline(project) == VERSION
+    assert release_docs.precommit_revision("\ufeff" + hook_example(project)) == VERSION
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+def test_readme_lines_follow_markdown_line_endings(newline: str) -> None:
+    readme = newline.join(["Introduction\u2028still the first source line", "<!-- pyroma-pre-commit -->", "prose"])
+    with pytest.raises(ValueError, match=r"README line 2:.*complete yaml code block"):
+        release_docs.precommit_revision(readme)
+
+
+@pytest.mark.parametrize("version", ["9.1.0rc1", "9.1.0.dev0"])
+@pytest.mark.parametrize("heading", ["missing", "unreleased", DATE])
+def test_tagged_prereleases_require_their_own_dated_heading(project: Path, version: str, heading: str) -> None:
+    replace_once(project / "pyproject.toml", f'version = "{VERSION}"', f'version = "{version}"')
+    replace_once(project / "pyproject.toml", "5 - Production/Stable", "4 - Beta")
+    replace_once(project / "README.md", f'rev: "{VERSION}"', f'rev: "v{version}"')
+    history = project / "docs" / "changelog.md"
+    if heading != "missing":
+        history.write_text(history.read_text() + f"\n## {version} ({heading})\n", encoding="utf-8")
+    if heading == DATE:
+        assert release_docs.check_offline(project, f"v{version}") == f"v{version}"
+    else:
+        with pytest.raises(ValueError, match=f"{re.escape(version)} needs a dated changelog entry"):
+            release_docs.check_offline(project, f"v{version}")
+
+
+@pytest.mark.parametrize(
+    ("failure", "diagnostic"),
+    [
+        (HTTPError("https://user:password@example.com/?token=secret", 404, "secret", {}, None), "HTTP 404"),
+        (URLError("https://user:password@example.com/?token=secret"), "unable to fetch resource"),
+        (URLError(TimeoutError("secret")), "request timed out"),
+        (TimeoutError("secret"), "request timed out"),
+        (OSError("password secret"), "unable to read response"),
+        (IncompleteRead(b"password secret"), "unable to read response"),
+    ],
+)
+@pytest.mark.parametrize("phase", ["open", "read"])
+def test_fetch_errors_identify_resources_without_urls(
+    monkeypatch: pytest.MonkeyPatch, failure: Exception, diagnostic: str, phase: str
+) -> None:
+    response = Mock()
+    response.__enter__ = Mock(return_value=response)
+    response.__exit__ = Mock(return_value=None)
+    if phase == "read":
+        response.read.side_effect = failure
+    opener = Mock(side_effect=failure) if phase == "open" else Mock(return_value=response)
+    monkeypatch.setattr(release_docs, "urlopen", opener)
+    with pytest.raises(ValueError, match=f"Published hook manifest: {diagnostic}") as raised:
+        release_docs.fetch("https://user:password@example.com/?token=secret", label="Published hook manifest")
+    assert not any(secret in str(raised.value) for secret in ("https://", "password", "secret", "user:"))
+
+
+def test_invalid_remote_utf8_is_labelled(monkeypatch: pytest.MonkeyPatch) -> None:
+    response = Mock()
+    response.__enter__ = Mock(return_value=response)
+    response.__exit__ = Mock(return_value=None)
+    response.read.return_value = b"\xffpassword secret"
+    monkeypatch.setattr(release_docs, "urlopen", Mock(return_value=response))
+    with pytest.raises(ValueError, match="PyPI release metadata: response must contain valid UTF-8") as raised:
+        release_docs.fetch("https://example.com/?token=secret", label="PyPI release metadata")
+    assert "secret" not in str(raised.value)
+
+
+@pytest.mark.parametrize("resource", ["schemas/v1/rating.json", "pyproject.toml", "pypi"])
+def test_remote_parse_failures_are_labelled_and_controlled(
+    monkeypatch: pytest.MonkeyPatch,
+    project: Path,
+    online_evidence: dict[str, str],
+    capsys: pytest.CaptureFixture,
+    resource: str,
+) -> None:
+    if resource == "pypi":
+        url, label, kind = "https://pypi.org/pypi/pyroma621/json", "PyPI release metadata", "JSON"
+    elif resource == "pyproject.toml":
+        url = f"https://raw.githubusercontent.com/hbmartin/pyroma621/{VERSION}/pyproject.toml"
+        label, kind = "Hook package metadata", "TOML"
+    else:
+        url, label, kind = release_docs.SITE_URL + resource, "Published schema v1/rating.json", "JSON"
+    online_evidence[url] = "[password secret"
+    monkeypatch.setattr(release_docs, "fetch", lambda url, **_kwargs: online_evidence[url])
+    monkeypatch.setattr("sys.argv", ["release_docs", "check", "--online", "--project", str(project)])
+    with pytest.raises(SystemExit) as raised:
+        release_docs.main()
+    assert raised.value.code == 1
+    out, err = capsys.readouterr()
+    assert not out
+    assert f"{label} must contain valid {kind}" in err
+    assert not any(secret in err for secret in ("Traceback", "password", "secret", "https://"))
+
+
+def test_transport_failure_has_a_controlled_cli_diagnostic(
+    monkeypatch: pytest.MonkeyPatch, project: Path, capsys: pytest.CaptureFixture
+) -> None:
+    monkeypatch.setattr(release_docs, "urlopen", Mock(side_effect=URLError("https://example.com/?token=secret")))
+    monkeypatch.setattr("sys.argv", ["release_docs", "check", "--online", "--project", str(project)])
+    with pytest.raises(SystemExit) as raised:
+        release_docs.main()
+    assert raised.value.code == 1
+    out, err = capsys.readouterr()
+    assert not out
+    assert "Documentation home: unable to fetch resource" in err
+    assert not any(secret in err for secret in ("Traceback", "secret", "https://"))
+
+
+@pytest.mark.parametrize("failure", ["", "missing", "mismatch"])
+def test_online_evidence_covers_future_schema_versions(
+    monkeypatch: pytest.MonkeyPatch, project: Path, online_evidence: dict[str, str], failure: str
+) -> None:
+    future = project / "pyroma" / "schemas" / "v2" / "rating.json"
+    future.parent.mkdir()
+    future.write_text('{"title": "Future schema"}', encoding="utf-8")
+    url = release_docs.SITE_URL + "schemas/v2/rating.json"
+    online_evidence[url] = future.read_text() if not failure else "{}"
+
+    def evidence(url: str, **_kwargs: str) -> str:
+        if failure == "missing" and url.endswith("schemas/v2/rating.json"):
+            message = "Published schema v2/rating.json: HTTP 404"
+            raise ValueError(message)
+        return online_evidence[url]
+
+    fetch = Mock(side_effect=evidence)
+    monkeypatch.setattr(release_docs, "fetch", fetch)
+    if failure:
+        with pytest.raises(ValueError, match=re.escape("Published schema v2/rating.json")):
+            release_docs.check_online(project, VERSION)
+    else:
+        release_docs.check_online(project, VERSION)
+        assert url in {call.args[0] for call in fetch.call_args_list}
+
+
+@pytest.mark.parametrize("failure", ["", "missing", "modified", "extra", "guide", "empty-guide"])
+@pytest.mark.skipif(os.name == "nt", reason="Documentation workflows use POSIX shells")
+def test_docs_workflow_checks_all_built_schema_contents(project: Path, failure: str) -> None:
+    future = project / "pyroma" / "schemas" / "v2" / "rating.json"
+    future.parent.mkdir()
+    future.write_text('{"title": "Future schema"}', encoding="utf-8")
+    shutil.copytree(project / "pyroma" / "schemas", project / "site" / "schemas")
+    guide = project / "site" / "json" / "index.html"
+    guide.parent.mkdir()
+    guide.write_text("JSON guide", encoding="utf-8")
+    built = project / "site" / "schemas" / "v2" / "rating.json"
+    if failure == "missing":
+        built.unlink()
+    elif failure == "modified":
+        built.write_text("{}", encoding="utf-8")
+    elif failure == "extra":
+        (built.parent / "extra.json").write_text("{}", encoding="utf-8")
+    elif failure == "guide":
+        guide.unlink()
+    elif failure == "empty-guide":
+        guide.write_text("", encoding="utf-8")
+    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "docs.yml").read_text())
+    step = next(
+        step
+        for step in workflow["jobs"]["build"]["steps"]
+        if step["name"] == "Check JSON guide and schema build outputs"
+    )
+    result = subprocess.run(  # noqa: S603 - execute the repository's workflow step in a temporary tree
+        ["/bin/bash", "-e", "-o", "pipefail", "-c", step["run"]],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert (result.returncode != 0) == bool(failure), result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("missing", ["", "json/", "schemas/v2/rating.json"])
+@pytest.mark.skipif(os.name == "nt", reason="Documentation workflows use POSIX shells")
+def test_deployment_probes_every_canonical_schema(project: Path, missing: str) -> None:
+    future = project / "pyroma" / "schemas" / "v2" / "rating.json"
+    future.parent.mkdir()
+    future.write_text("{}", encoding="utf-8")
+    curl = project / "curl"
+    curl.write_text(
+        "#!/bin/sh\nfor request_url do :; done\n"
+        'printf "%s\\n" "$request_url" >> "$DOCS_PROBE_LOG"\n'
+        '[ "$request_url" != "$DOCS_PROBE_MISSING" ]\n',
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "docs.yml").read_text())
+    step = next(
+        step
+        for step in workflow["jobs"]["deploy"]["steps"]
+        if step["name"] == "Check JSON guide and schema availability"
+    )
+    log = project / "requests"
+    environment = {
+        **os.environ,
+        "PATH": str(project) + os.pathsep + os.environ["PATH"],
+        "DOCS_URL": release_docs.SITE_URL,
+        "DOCS_PROBE_LOG": str(log),
+        "DOCS_PROBE_MISSING": release_docs.SITE_URL + missing if missing else "",
+    }
+    result = subprocess.run(  # noqa: S603 - execute the repository's deployment step with a curl probe
+        ["/bin/bash", "-e", "-o", "pipefail", "-c", step["run"]],
+        cwd=project,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert (result.returncode != 0) == bool(missing), result.stdout + result.stderr
+    if not missing:
+        assert set(log.read_text().splitlines()) == {
+            release_docs.SITE_URL + path
+            for path in ("json/", "schemas/v1/error.json", "schemas/v1/rating.json", "schemas/v2/rating.json")
+        }
+
+
+@pytest.mark.parametrize("failed_gate", ["", "lock", "preflight", "check", "build", "3.11", "3.13", "3.14"])
+@pytest.mark.skipif(os.name == "nt", reason="Documented local release commands use a POSIX shell")
+def test_documented_release_sequence_stops_at_first_failure(tmp_path: Path, failed_gate: str) -> None:
+    uv = tmp_path / "uv"
+    uv.write_text(
+        '#!/bin/sh\ncase "$1" in\n'
+        '  lock|build) gate="$1" ;;\n'
+        '  *) gate="$7"; if [ "$gate" = validate ]; then gate="${11}"; fi ;;\n'
+        'esac\nprintf "%s\\n" "$gate" >> "$RELEASE_PROBE_LOG"\n'
+        '[ "$gate" != "$RELEASE_PROBE_FAILURE" ]\n',
+        encoding="utf-8",
+    )
+    uv.chmod(0o755)
+    log = tmp_path / "calls"
+    text = (ROOT / "docs" / "development.md").read_text()
+    command = next(
+        block for block in re.findall(r"```console\n(.*?)\n```", text, re.DOTALL) if "RELEASE_TAG=6.2.0" in block
+    )
+    environment = {
+        **os.environ,
+        "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+        "TMPDIR": str(tmp_path),
+        "RELEASE_PROBE_LOG": str(log),
+        "RELEASE_PROBE_FAILURE": failed_gate,
+    }
+    result = subprocess.run(  # noqa: S603 - execute documented commands with a local uv probe
+        ["/bin/sh", "-c", command],
+        env=environment,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    expected = ["lock", "preflight", "check", "build", "3.11", "3.13", "3.14"]
+    if failed_gate:
+        expected = expected[: expected.index(failed_gate) + 1]
+    assert log.read_text().splitlines() == expected
+    assert (result.returncode != 0) == bool(failed_gate), result.stdout + result.stderr

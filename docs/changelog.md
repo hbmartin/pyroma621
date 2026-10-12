@@ -6,11 +6,15 @@
   selection, keep parser error formatting consistent across ordinary and
   intermixed parses, and resolve checker metadata once per CLI invocation.
 - Record configuration as loaded only after its skip selectors are validated.
-- Parse marked pre-commit examples structurally and require literal release refs,
+- Parse every marked pre-commit example as Markdown, including lists and
+  blockquotes, reject malformed fences with source-line diagnostics, and require
+  consistent literal release refs. Accept README files with a UTF-8 BOM,
   describe features by their introduction version, and rebuild downloadable
   schemas without stale generated files or installing the runtime package.
 - Keep package publishing independent of live documentation; check JSON guide
-  and schema build outputs before upload and availability after Pages deployment.
+  and all canonical schema contents before upload and availability after Pages
+  deployment. Local release instructions clear stale artifacts and stop at the
+  first failed validation.
   Offline release checks validate the local hook manifest, final releases accept
   Production/Stable or Mature, and fetch errors identify resources without URLs.
 - Keep release lifecycle tests independent of the current checkout version,
