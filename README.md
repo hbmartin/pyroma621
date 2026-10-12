@@ -2,6 +2,7 @@
 
 [![PyPI - Version](https://img.shields.io/pypi/v/pyroma621)](https://pypi.org/project/pyroma621/)
 [![Lint](https://github.com/hbmartin/pyroma621/actions/workflows/lint.yml/badge.svg)](https://github.com/hbmartin/pyroma621/actions/workflows/lint.yml)
+[![Codecov](https://codecov.io/gh/hbmartin/pyroma621/branch/master/graph/badge.svg)](https://app.codecov.io/gh/hbmartin/pyroma621)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![ty](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ty/main/assets/badge/v0.json)](https://github.com/astral-sh/ty)
 [![CodeFactor](https://www.codefactor.io/repository/github/hbmartin/pyroma621/badge)](https://www.codefactor.io/repository/github/hbmartin/pyroma621)

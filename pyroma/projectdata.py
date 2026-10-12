@@ -1,6 +1,7 @@
 """Extract and normalize package metadata from a local project directory."""
 
 # Kept at runtime so the public Pathish alias resolves through get_type_hints.
+import errno
 import os
 import subprocess
 import tomllib
@@ -145,21 +146,16 @@ def _has_direct_sources(path: Path) -> bool:
 
 
 def _venv_marker(marker: Path) -> bool:
-    """Require a regular config or a symlink that resolves to a regular file."""
+    """Recognize regular configs and conservatively exclude uncertain marker targets."""
     try:
         mode = marker.lstat().st_mode
+        if S_ISLNK(mode):
+            mode = marker.stat().st_mode
+        return S_ISREG(mode)
     except (FileNotFoundError, NotADirectoryError):
         return False
-    except OSError:
-        return True
-    if S_ISREG(mode):
-        return True
-    if not S_ISLNK(mode):
-        return False
-    try:
-        return S_ISREG(marker.stat().st_mode)
-    except OSError:
-        return False
+    except OSError as error:
+        return error.errno != errno.ELOOP
 
 
 def _environment_directory(path: Path) -> bool:

@@ -38,7 +38,28 @@ jobs:
           version: '0.13.0'
           python-version: ${{ matrix.python-version }}
       - name: Run tests
-        run: uv run --locked --no-default-groups --group test python -bb -X dev -m pytest --cov --cov-report=term-missing --cov-report=xml
+        run: >-
+          uv run --locked --no-default-groups --group test python -bb -X dev -m pytest
+          --cov --cov-report=term-missing --cov-report=xml --junitxml=test-results.xml
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-results-${{ matrix.os }}-${{ matrix.python-version }}
+          path: test-results.xml
+          if-no-files-found: warn
+      - name: Upload coverage to Codecov
+        if: >-
+          ${{ !cancelled() && hashFiles('coverage.xml') != '' &&
+              (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        continue-on-error: true
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          disable_search: true
+          fail_ci_if_error: false
+          name: source-${{ matrix.os }}-${{ matrix.python-version }}
       - name: Upload coverage
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -7,7 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from ci import check_release_dispatch as module
+from ci import package_artifacts as module
+
+
+@pytest.fixture
+def project(tmp_path: Path) -> Path:
+    path = tmp_path / "pyproject.toml"
+    path.write_text('[project]\nversion="6.1.0"\n', encoding="utf-8")
+    return path
 
 
 @pytest.mark.parametrize(
@@ -21,8 +28,8 @@ from ci import check_release_dispatch as module
         ("pull_request", "refs/pull/1/merge", "v6.1.0"),
     ],
 )
-def test_dispatch_guard_allows_matching_tags_and_other_events(event_name: str, ref: str, tag: str) -> None:
-    module.check_dispatch(event_name, ref, tag)
+def test_preflight_allows_matching_tags_and_other_events(project: Path, event_name: str, ref: str, tag: str) -> None:
+    module.preflight(project, tag, event_name, ref)
 
 
 @pytest.mark.parametrize(
@@ -36,17 +43,32 @@ def test_dispatch_guard_allows_matching_tags_and_other_events(event_name: str, r
         ("", "v6.1.0"),
     ],
 )
-def test_dispatch_guard_requires_exact_tag_identity(ref: str, tag: str) -> None:
+def test_preflight_requires_exact_tag_identity(project: Path, ref: str, tag: str) -> None:
     with pytest.raises(ValueError, match="Dispatch ref"):
-        module.check_dispatch("workflow_dispatch", ref, tag)
+        module.preflight(project, tag, "workflow_dispatch", ref)
+
+
+@pytest.mark.parametrize("tag", ["vgarbage", "vv6.1.0", "V6.1.0", "v6.foo", "v6.2.0", "v6.1.0 "])
+def test_preflight_rejects_bad_versions_on_matching_refs(project: Path, tag: str) -> None:
+    with pytest.raises(ValueError, match=r"Release tag|Invalid version"):
+        module.preflight(project, tag, "workflow_dispatch", f"refs/tags/{tag}")
+
+
+@pytest.mark.parametrize("tag", ["6.1", "v6.1.0.0"])
+def test_preflight_preserves_version_aliases(project: Path, tag: str) -> None:
+    module.preflight(project, tag, "workflow_dispatch", f"refs/tags/{tag}")
+
+
+def test_tagless_preflight_does_not_require_a_project(tmp_path: Path) -> None:
+    module.preflight(tmp_path / "missing.toml", "", "workflow_dispatch", "refs/heads/master")
 
 
 @pytest.mark.parametrize("ref", ["refs/tags/v6.1.0", "refs/heads/master"])
-def test_dispatch_guard_cli_returns_controlled_status(tmp_path: Path, ref: str) -> None:
+def test_preflight_cli_uses_environment_ref_and_returns_controlled_status(project: Path, ref: str) -> None:
     result = subprocess.run(  # noqa: S603 - fixed Python guard entry point and runner context
-        [sys.executable, str(Path(module.__file__).resolve())],
-        cwd=tmp_path,
-        env={**os.environ, "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": ref, "RELEASE_TAG": "v6.1.0"},
+        [sys.executable, str(Path(module.__file__).resolve()), "preflight", "--release-tag", "v6.1.0"],
+        cwd=project.parent,
+        env={**os.environ, "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": ref},
         capture_output=True,
         text=True,
         timeout=10,
@@ -59,3 +81,45 @@ def test_dispatch_guard_cli_returns_controlled_status(tmp_path: Path, ref: str) 
         assert result.returncode == 1
         assert "Release preflight failed: Dispatch ref" in result.stderr
         assert "Traceback" not in result.stderr
+
+
+def test_preflight_cli_explicit_context_overrides_environment(project: Path) -> None:
+    result = subprocess.run(  # noqa: S603 - fixed validator entry point and explicit release context
+        [
+            sys.executable,
+            str(Path(module.__file__).resolve()),
+            "preflight",
+            "--project",
+            str(project),
+            "--release-tag",
+            "v6.1.0",
+            "--event-name",
+            "workflow_dispatch",
+            "--ref",
+            "refs/tags/v6.1.0",
+        ],
+        cwd=project.parent,
+        env={**os.environ, "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/master"},
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("tag", ["vgarbage", "v6.2.0"])
+def test_preflight_cli_rejects_invalid_tags_before_artifacts_exist(project: Path, tag: str) -> None:
+    result = subprocess.run(  # noqa: S603 - fixed validator entry point and isolated project
+        [sys.executable, str(Path(module.__file__).resolve()), "preflight", "--release-tag", tag],
+        cwd=project.parent,
+        env={**os.environ, "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": f"refs/tags/{tag}"},
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "Release preflight failed: Release tag" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not (project.parent / "dist").exists()

@@ -162,8 +162,10 @@ documentation/test packages can still qualify, since this does not prove
 wheel inclusion. Hidden directories, caches and `node_modules` are pruned.
 Virtual environments are identified by regular `pyvenv.cfg` files or symlinks
 that resolve to regular files, including targets outside the project. Missing,
-looping, inaccessible-target, and directory-target config symlinks do not mark
-environments. Conda environments are identified by regular `history` files
+looping, and directory-target config symlinks do not mark environments.
+Permission failures and other uncertain I/O failures while inspecting either
+the marker or its symlink target conservatively exclude the directory, so
+installed packages cannot supply typing evidence. Conda environments are identified by regular `history` files
 inside real `conda-meta` directories,
 not their directory names. Symlinked Conda marker files and symlinked `conda-meta`
 directories do not mark environments. At the scan
@@ -190,20 +192,27 @@ brackets or backticks do not hide destinations in later paragraphs. Image
 alt text is not scanned for links or HTML tags. Misnested literal end tags
 close only their matching literal region; unmatched end tags leave it open.
 Markdown and HTML destinations use the same URL normalization before relative
-classification, with uppercase percent-escape triplets, then deduplicate their
-display strings. Identical normalized destinations are classified and decoded
-only once. Findings retain document order and display readable Unicode paths,
-including zero-width joiners and non-joiners (U+200D and U+200C). Paths containing
-these joiners also include an encoded destination in a ` (URL: ...)` suffix on
-the same diagnostic line, so visually identical paths remain identifiable.
-Equivalent joiner spellings still count as one finding. Reserved escapes,
-Unicode controls (`Cc`), other format characters (`Cf`), non-ASCII spaces (`Zs`),
-and line and paragraph separators (`Zl` and `Zp`) remain UTF-8 percent-encoded.
-Ordinary ASCII spaces remain readable. URLs containing invalid UTF-8 escapes
-retain those bytes with uppercase escape spelling, while percent-encoded ASCII
-unreserved characters (`A-Z`, `a-z`, digits, `-._~`) become literal characters.
-Equivalent spellings count
-as one finding toward the five-item display limit.
+classification. Deduplication uses a separate canonical URL key: percent-escape
+triplets are uppercase, and only percent-encoded ASCII unreserved characters
+(`A-Z`, `a-z`, digits, `-._~`) become literal characters. Reserved escapes,
+Unicode normalization forms, case and path segments remain distinct.
+For example, `docs/a%28b.md` and `docs/a(b.md` count separately, even when either
+URL also contains invalid UTF-8. Identical normalized destinations are classified
+only once, and each canonical relative destination is displayed once.
+
+Findings retain document order and JSON-quote readable paths. Any destination
+containing valid non-ASCII characters includes its canonical encoded URL, for
+example `"docs/café.md" (URL: "docs/caf%C3%A9.md")`. This also identifies decomposed
+Unicode and invisible characters without changing URL identity. Zero-width
+joiners and non-joiners (U+200D and U+200C) remain readable for script and emoji
+shaping. Unicode controls (`Cc`), other format characters (`Cf`), non-ASCII
+spaces (`Zs`), and line and paragraph separators (`Zl` and `Zp`) remain encoded.
+Encoded reserved characters and unsafe ASCII also remain encoded. Ordinary
+ASCII spaces and unreserved characters are readable even alongside invalid
+UTF-8 bytes, which retain their uppercase escapes. Valid Unicode beside invalid
+bytes remains readable and includes the encoded URL annotation. Display formatting
+never determines deduplication. Equivalent spellings count as one finding toward
+the five-item display limit; distinct canonical URLs remain separate findings.
 Extension-specific syntax is not enabled.
 
 ### Markdown extraction performance
@@ -216,9 +225,9 @@ destination is unique, and items are separated by spaces.
 
 | Input | 2,000 items | 4,000 items | 8,000 items |
 | --- | ---: | ---: | ---: |
-| Markdown links | 20.4 ms | 43.7 ms | 89.7 ms |
-| HTML links | 27.0 ms | 56.8 ms | 131.6 ms |
-| Mixed links | 51.6 ms | 113.9 ms | 246.1 ms |
+| Markdown links | 35.5 ms | 70.9 ms | 141.4 ms |
+| HTML links | 40.8 ms | 85.1 ms | 184.5 ms |
+| Mixed links | 113.2 ms | 177.5 ms | 361.8 ms |
 
 These inputs show approximately linear scaling after removing repeated document
 copies and list searches. Measurements are informational, rather than fixed CI

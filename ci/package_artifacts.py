@@ -36,6 +36,25 @@ def _release_tag_version(tag: str) -> Version:
     return parsed_version(tag)
 
 
+def _project_version(project: Path, release_tag: str) -> Version:
+    """Check the project and release tag with the same policy before and after building."""
+    version = parsed_version(tomllib.loads(project.read_text(encoding="utf-8"))["project"]["version"])
+    if release_tag and _release_tag_version(release_tag) != version:
+        message = f"Release tag {release_tag!r} does not match project version {version}"
+        raise ValueError(message)
+    return version
+
+
+def preflight(project: Path, release_tag: str, event_name: str, ref: str) -> None:
+    """Reject an incorrect release ref, malformed tag, or project version before building."""
+    if not release_tag:
+        return
+    if event_name == "workflow_dispatch" and ref != f"refs/tags/{release_tag}":
+        message = f"Dispatch ref {ref!r} must be 'refs/tags/{release_tag}' when release-tag is supplied"
+        raise ValueError(message)
+    _project_version(project, release_tag)
+
+
 def reject_generated(names: Iterable[str]) -> None:
     """Reject generated metadata, caches, and build outputs in an archive."""
     forbidden = sorted(
@@ -62,10 +81,7 @@ def inspect(dist: Path, project: Path, release_tag: str = "") -> tuple[Path, Pat
     if len(wheels) != 1 or len(sdists) != 1:
         message = "Expected exactly one wheel and one source distribution"
         raise ValueError(message)
-    version = parsed_version(tomllib.loads(project.read_text())["project"]["version"])
-    if release_tag and _release_tag_version(release_tag) != version:
-        message = f"Release tag {release_tag!r} does not match project version {version}"
-        raise ValueError(message)
+    version = _project_version(project, release_tag)
     with zipfile.ZipFile(wheels[0]) as archive:
         reject_generated(archive.namelist())
         required = {"pyroma/__init__.py", "pyroma/__main__.py", "pyroma/tests.py", "pyroma/py.typed"}
@@ -231,6 +247,7 @@ def validate(dist: Path, project: Path, work: Path, python: str, release_tag: st
             "--cov",
             "--cov-report=term-missing",
             f"--cov-report=xml:{work / 'coverage.xml'}",
+            f"--junitxml={work / 'test-results.xml'}",
             *targets,
         ],
         staging,
@@ -243,25 +260,32 @@ def main() -> None:
     """Expose inspection and validation for CI and local release dry runs."""
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for name in ("inspect", "validate"):
+    for name in ("preflight", "inspect", "validate"):
         command = subparsers.add_parser(name)
-        command.add_argument("--dist", type=Path, default=Path("dist"))
         command.add_argument("--project", type=Path, default=Path("pyproject.toml"))
         command.add_argument("--release-tag", default="")
+        if name == "preflight":
+            command.add_argument("--event-name", default=os.environ.get("GITHUB_EVENT_NAME", ""))
+            command.add_argument("--ref", default=os.environ.get("GITHUB_REF", ""))
+        else:
+            command.add_argument("--dist", type=Path, default=Path("dist"))
         if name == "validate":
             command.add_argument("--work", type=Path, required=True)
             command.add_argument("--python", default=sys.executable)
     subparsers.add_parser("smoke").add_argument("--version", required=True)
     args = parser.parse_args()
     try:
-        if args.command == "validate":
+        if args.command == "preflight":
+            preflight(args.project, args.release_tag, args.event_name, args.ref)
+        elif args.command == "validate":
             validate(args.dist.resolve(), args.project.resolve(), args.work.resolve(), args.python, args.release_tag)
         elif args.command == "inspect":
             inspect(args.dist, args.project, args.release_tag)
         else:
             smoke(args.version)
     except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as error:
-        parser.exit(1, f"Artifact validation failed: {error}\n")
+        label = "Release preflight" if args.command == "preflight" else "Artifact validation"
+        parser.exit(1, f"{label} failed: {error}\n")
 
 
 if __name__ == "__main__":
