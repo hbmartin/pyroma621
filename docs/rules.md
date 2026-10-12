@@ -160,8 +160,10 @@ project root, with a regular `.py` or `.pyi` file in its directory or a scanned
 descendant. Isolated documentation/test markers do not count; Python-bearing
 documentation/test packages can still qualify, since this does not prove
 wheel inclusion. Hidden directories, caches and `node_modules` are pruned.
-Virtual environments are identified by `pyvenv.cfg`, and Conda environments
-by a regular `conda-meta/history` file, not their directory names. At the scan
+Virtual environments are identified by regular `pyvenv.cfg` files, and Conda
+environments by regular `history` files inside real `conda-meta` directories,
+not their directory names. Symlinked marker files and symlinked `conda-meta`
+directories do not mark environments. At the scan
 root and nested project boundaries, `build`, `dist` and `_build` directories
 are pruned unless they contain direct Python/stub source files. A nested
 boundary contains a regular `pyproject.toml`, `setup.py` or `setup.cfg`;
@@ -184,9 +186,11 @@ brackets or backticks do not hide destinations in later paragraphs. Image
 alt text is not scanned for links or HTML tags. Misnested literal end tags
 close only their matching literal region; unmatched end tags leave it open.
 Markdown and HTML destinations use the same URL normalization before relative
-classification and deduplication. Findings retain document order and display
-readable Unicode paths, while reserved escapes and ASCII controls remain
-encoded. URLs containing invalid UTF-8 escapes keep their encoded spelling.
+classification, then deduplicate their display strings. Findings retain document
+order and display readable Unicode paths, while reserved escapes, Unicode control
+and format characters (`Cc` and `Cf`), and line and paragraph separators (`Zl`
+and `Zp`) remain UTF-8 percent-encoded. URLs containing invalid UTF-8 escapes keep
+their encoded spelling.
 Extension-specific syntax is not enabled.
 
 ### Markdown extraction performance

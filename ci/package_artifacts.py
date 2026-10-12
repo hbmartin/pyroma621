@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,15 @@ def parsed_version(value: object) -> Version:
         message = f"Expected a version string, got {value!r}"
         raise TypeError(message)
     return Version(value)
+
+
+def _release_tag_version(tag: str) -> Version:
+    """Parse a version tag with at most one lowercase prefix and no whitespace."""
+    version = parsed_version(tag.removeprefix("v"))
+    if re.fullmatch(r"v?[0-9][^\s]*", tag) is None:
+        message = f"Release tag {tag!r} must be a version with at most one lowercase 'v' prefix"
+        raise ValueError(message)
+    return version
 
 
 def reject_generated(names: Iterable[str]) -> None:
@@ -54,7 +64,7 @@ def inspect(dist: Path, project: Path, release_tag: str = "") -> tuple[Path, Pat
         message = "Expected exactly one wheel and one source distribution"
         raise ValueError(message)
     version = parsed_version(tomllib.loads(project.read_text())["project"]["version"])
-    if release_tag and parsed_version(release_tag.removeprefix("v")) != version:
+    if release_tag and _release_tag_version(release_tag) != version:
         message = f"Release tag {release_tag!r} does not match project version {version}"
         raise ValueError(message)
     with zipfile.ZipFile(wheels[0]) as archive:

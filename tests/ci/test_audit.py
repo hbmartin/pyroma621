@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
@@ -13,6 +14,18 @@ import pytest
 from ci import audit_dependencies as module
 
 PINS = [("a-pkg", "1"), ("a-pkg", "2"), ("a-pkg", "3"), ("b", "1"), ("b", "2"), ("single", "1")]
+TODAY = datetime.date(2026, 10, 11)
+
+
+@pytest.fixture(autouse=True)
+def fixed_audit_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = Mock()
+    clock.now.return_value = datetime.datetime(2026, 10, 11, tzinfo=datetime.UTC)
+    monkeypatch.setattr(
+        module,
+        "datetime",
+        SimpleNamespace(datetime=clock, UTC=datetime.UTC, date=datetime.date, timedelta=datetime.timedelta),
+    )
 
 
 @pytest.fixture
@@ -41,11 +54,10 @@ def batch_document(pins: list[tuple[str, str]]) -> dict[str, Any]:
 
 
 def write_exception(path: Path, version: str, advisory: str) -> None:
-    today = datetime.datetime.now(datetime.UTC).date()
     with path.open("a", encoding="utf-8") as stream:
         stream.write(
             f'[[exceptions]]\nadvisory="{advisory}"\npackage="A.PKG"\nversion="{version}"\n'
-            f'reason="Reviewed"\ncreated={today}\nexpires={today + datetime.timedelta(days=1)}\n'
+            f'reason="Reviewed"\ncreated={TODAY}\nexpires={TODAY + datetime.timedelta(days=1)}\n'
         )
 
 
@@ -57,6 +69,7 @@ def test_audit_batches_every_version_once_and_evaluates_exceptions_globally(
     for version in ("1", "2"):
         write_exception(exceptions, version, f"GHSA-{version}")
     report.write_text("stale", encoding="utf-8")
+    report.with_suffix(".requirements.txt").write_text("stale inventory", encoding="utf-8")
     seen = []
     directories = []
 
@@ -77,7 +90,7 @@ def test_audit_batches_every_version_once_and_evaluates_exceptions_globally(
                 ]
         output.write_text(json.dumps(document), encoding="utf-8")
         status = int(any(item["vulns"] for item in document["dependencies"]))
-        return subprocess.CompletedProcess(arguments, status, "", "audit summary")
+        return subprocess.CompletedProcess(arguments, status, f"batch status {status}\n", "audit summary\n")
 
     monkeypatch.setattr(module.subprocess, "run", run)
     module.audit(lock, exceptions, report)
@@ -90,7 +103,77 @@ def test_audit_batches_every_version_once_and_evaluates_exceptions_globally(
     inventory = report.with_suffix(".requirements.txt").read_text()
     assert inventory == module.requirement_text(module.locked_requirements(lock))
     assert all(not directory.exists() for directory in directories)
-    assert "Audited 6 locked package versions; 2 reviewed exceptions" in capsys.readouterr().out
+    output = capsys.readouterr()
+    assert output.out == (
+        "batch status 1\nbatch status 1\nbatch status 0\nAudited 6 locked package versions; 2 reviewed exceptions\n"
+    )
+    assert output.err == "audit summary\n" * 3
+
+
+@pytest.mark.parametrize("failure", ["lock", "exceptions", "toml"])
+def test_input_failure_removes_stale_outputs_before_starting_audit(
+    audit_files: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    lock, exceptions, report = audit_files
+    inventory = report.with_suffix(".requirements.txt")
+    report.write_text("stale", encoding="utf-8")
+    inventory.write_text("stale inventory", encoding="utf-8")
+    if failure == "lock":
+        lock.write_text("package=[]\n", encoding="utf-8")
+    else:
+        exceptions.write_text("exceptions=[1]\n" if failure == "exceptions" else "[", encoding="utf-8")
+    runner = Mock(side_effect=AssertionError("Unexpected audit subprocess"))
+    monkeypatch.setattr(module.subprocess, "run", runner)
+    with pytest.raises((ValueError, TypeError)):
+        module.audit(lock, exceptions, report)
+    runner.assert_not_called()
+    assert not report.exists()
+    assert not inventory.exists()
+
+
+@pytest.mark.parametrize("days", [-1, 0, 1])
+def test_exception_expiration_uses_fixed_utc_date(tmp_path: Path, days: int) -> None:
+    exceptions = tmp_path / "exceptions.toml"
+    write_exception(exceptions, "1", "GHSA-example")
+    exceptions.write_text(
+        exceptions.read_text()
+        .replace(f"created={TODAY}", f"created={TODAY - datetime.timedelta(days=2)}")
+        .replace(f"expires={TODAY + datetime.timedelta(days=1)}", f"expires={TODAY + datetime.timedelta(days=days)}"),
+        encoding="utf-8",
+    )
+    today = module.datetime.datetime.now(datetime.UTC).date()
+    if days > 0:
+        assert len(module.load_exceptions(exceptions, today)) == 1
+    else:
+        with pytest.raises(ValueError, match="Expired"):
+            module.load_exceptions(exceptions, today)
+
+
+@pytest.mark.parametrize("failure", ["unaccepted", "unused"])
+def test_policy_failure_preserves_complete_current_report(
+    audit_files: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    lock, exceptions, report = audit_files
+    if failure == "unused":
+        exceptions.write_text("", encoding="utf-8")
+        write_exception(exceptions, "1", "OLD")
+
+    def run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        output = Path(arguments[arguments.index("--output") + 1])
+        document = batch_document(batch_pins(arguments))
+        for dependency in document["dependencies"]:
+            if (dependency["name"], dependency["version"]) == ("a-pkg", "1"):
+                dependency["vulns"] = [{"id": "NEW"}]
+        output.write_text(json.dumps(document), encoding="utf-8")
+        status = int(any(item["vulns"] for item in document["dependencies"]))
+        return subprocess.CompletedProcess(arguments, status, "", "")
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    with pytest.raises(ValueError, match=r"Unaccepted vulnerabilities|Unused audit exception"):
+        module.audit(lock, exceptions, report)
+    assert len(json.loads(report.read_text())["dependencies"]) == len(PINS)
+    inventory = report.with_suffix(".requirements.txt").read_text()
+    assert inventory == module.requirement_text(module.locked_requirements(lock))
 
 
 @pytest.mark.parametrize(
@@ -181,6 +264,7 @@ def test_fatal_audit_main_uses_controlled_diagnostic(
     assert "Audit failed:" in diagnostic
     assert "did not produce a report" in diagnostic
     assert "OSV unreachable" in diagnostic
+    assert diagnostic.count("OSV unreachable") == 1
     assert "FileNotFoundError" not in diagnostic
 
 

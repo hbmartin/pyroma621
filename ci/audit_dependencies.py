@@ -218,15 +218,19 @@ def audit_batch(requirements_path: Path, report_path: Path, expected: set[tuple[
         if diagnostic:
             message += "\n" + diagnostic
         raise ValueError(message) from error
+    print(result.stdout, end="")
+    print(result.stderr, end="", file=sys.stderr)
     return report
 
 
 def audit(lock: Path, exceptions_path: Path, report_path: Path) -> None:
     """Audit all versions and publish only a complete merged report."""
+    inventory_path = report_path.with_suffix(".requirements.txt")
+    report_path.unlink(missing_ok=True)
+    inventory_path.unlink(missing_ok=True)
     requirements = locked_requirements(lock)
     exceptions = load_exceptions(exceptions_path, datetime.datetime.now(datetime.UTC).date())
-    report_path.with_suffix(".requirements.txt").write_text(requirement_text(requirements), encoding="utf-8")
-    report_path.unlink(missing_ok=True)
+    inventory_path.write_text(requirement_text(requirements), encoding="utf-8")
     merged: dict[str, Any] = {"dependencies": [], "fixes": []}
     with TemporaryDirectory(prefix="pyroma-audit-") as directory:
         for index, batch in enumerate(requirement_batches(requirements)):

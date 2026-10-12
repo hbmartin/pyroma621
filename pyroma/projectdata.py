@@ -156,7 +156,9 @@ def _source_child(root: Path, child: str, *, project_boundary: bool) -> bool:
         return False
     for marker in (path / "pyvenv.cfg", path / "conda-meta" / "history"):
         try:
-            if S_ISREG(marker.stat().st_mode):
+            if marker.name == "history" and not S_ISDIR(marker.parent.lstat().st_mode):
+                continue
+            if S_ISREG(marker.lstat().st_mode):
                 return False
         except (FileNotFoundError, NotADirectoryError):
             pass

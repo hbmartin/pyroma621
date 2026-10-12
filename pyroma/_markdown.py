@@ -2,7 +2,8 @@
 
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any
-from urllib.parse import unquote_to_bytes
+from unicodedata import category
+from urllib.parse import quote, unquote_to_bytes
 
 from markdown_it import MarkdownIt
 
@@ -13,7 +14,7 @@ if TYPE_CHECKING:
 
 _MARKDOWN = MarkdownIt("commonmark", {"html": True})
 _LITERAL_TAGS = frozenset({"pre", "code", "script", "style"})
-_ASCII_CONTROLS = frozenset(chr(value) for value in range(32)) | {"\x7f"}
+_CONTROL_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 
 class _HTMLTargets(HTMLParser):
@@ -63,7 +64,7 @@ def display_destination(target: str) -> str:
     except UnicodeDecodeError:
         return target
     readable = _MARKDOWN.normalizeLinkText(target)
-    return "".join(f"%{ord(char):02X}" if char in _ASCII_CONTROLS else char for char in readable)
+    return "".join(quote(char, safe="") if category(char) in _CONTROL_CATEGORIES else char for char in readable)
 
 
 def _without_literal_definitions(source: str, blocks: "list[Token]") -> str:

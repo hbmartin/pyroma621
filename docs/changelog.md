@@ -13,19 +13,26 @@
   audit failures. Conflicting locked versions are audited in separate batches
   and merged into one complete report. Tool failures retain their diagnostics;
   unused exceptions report new vulnerabilities alongside the cleanup error.
+  Old reports and inventories are removed before input validation, successful
+  batch diagnostics remain visible, and audit tests use a fixed UTC date.
+  The audit dependency group declares its direct `packaging` dependency.
   Workflow linting and tool versions are pinned.
 - Artifact validation rejects generated metadata, caches, and build outputs;
   builds exclude those files while retaining intentional distribution fixtures.
   Release and metadata versions use PEP 440 equivalence, including prerelease
-  spellings. Local artifact validation supports Windows executable paths.
-- Package validation runs on pull requests, `master` pushes, and tags.
+  spellings, with an optional single lowercase `v` prefix for release tags.
+  Local artifact validation supports Windows executable paths and POSIX license
+  paths in smoke-test fixtures.
+- Package validation runs on pull requests, `master` pushes, manual dispatch,
+  and release workflow calls, avoiding a second matrix run on tag pushes.
   Redundant lock checks are removed where locked commands enforce the gate;
   missing diagnostic uploads warn without obscuring an earlier failure.
 - Test fixture setup publishes its temporary path after preparation succeeds;
   teardown restores the original source path so repeated module runs work.
   Failed setup cleans up its temporary directory, and teardown restores state
   even when cleanup raises. Fixture Git commands isolate inherited repository
-  variables and global excludes. Legacy fixture builds allow backend warnings
+  variables and global/system Git configuration, including templates and excludes.
+  Backend-warning policy tests run in-process. Legacy fixture builds allow backend warnings
   by category without depending on setuptools warning prose.
 - Hypothesis profiles load before pytest resolves command-line options,
   including invocations with `.` or individual test files. The default profile
@@ -42,7 +49,9 @@
   descendant. Isolated markers in documentation and test directories no
   longer imply package typing. Inaccessible entries are skipped individually,
   and unrelated files do not incur stat probes. Virtual and Conda environments
-  are identified by `pyvenv.cfg` and `conda-meta/history`. Build-output names
+  are identified by regular `pyvenv.cfg` and `conda-meta/history` files;
+  symlinked markers and symlinked `conda-meta` directories do not prune sources.
+  Build-output names
   are pruned at the scan root and nested project boundaries unless they contain
   direct Python or stub sources. Packages and namespaces named `build`, `dist`,
   `_build`, `env`, or `venv` elsewhere are retained. These remain source
@@ -55,7 +64,9 @@
   open regions, and HTML-looking image alt text cannot change their state.
   Markdown and HTML URLs normalize consistently before deduplication; findings
   display readable Unicode while preserving reserved escapes, invalid UTF-8,
-  and encoded ASCII controls. Findings follow document order and are deduplicated
+  and encoded Unicode controls, format characters, and line/paragraph separators.
+  Findings follow document order and deduplicate display strings, including
+  destinations that differ only in percent-escape case,
   without repeated linear searches.
 - Backend version floors remain strict: wildcard pins can admit prereleases
   below a required final release and therefore trigger an advisory. Explicit
