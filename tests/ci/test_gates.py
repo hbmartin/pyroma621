@@ -186,6 +186,8 @@ def distributions(
     with zipfile.ZipFile(tmp_path / "package.whl", "w") as archive:
         for name in ("__init__.py", "__main__.py", "tests.py", *(("py.typed",) if marker else ())):
             archive.writestr("pyroma/" + name, "")
+        for kind in ("rating", "error"):
+            archive.writestr(f"pyroma/schemas/v1/{kind}.json", "{}")
         archive.writestr(
             "pyroma621-6.1.0.dist-info/METADATA", f"Name: pyroma621\nVersion: {wheel_version or version}\n"
         )

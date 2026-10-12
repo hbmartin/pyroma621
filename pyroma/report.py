@@ -7,10 +7,12 @@ The logging module is reserved for genuine diagnostics.
 import dataclasses
 import json
 import textwrap
+from collections.abc import Mapping
 
 from pyroma.ratings import Problem, RatedProject
 
 FORMATS = ("text", "json")
+SCHEMA_VERSION = 1
 _DIVIDER = "-" * 30
 
 
@@ -39,7 +41,11 @@ def format_text(rated: RatedProject, *, show_advisories: bool = True) -> str:
     return "\n".join(lines)
 
 
-def format_json(rated: RatedProject, meta: dict[str, str] | None = None) -> str:
+def _versioned_meta(meta: Mapping[str, object] | None) -> dict[str, object]:
+    return {**(meta or {}), "schema_version": SCHEMA_VERSION}
+
+
+def format_json(rated: RatedProject, meta: Mapping[str, object] | None = None) -> str:
     """Format the rating result as a machine-readable JSON document."""
     document = {
         "name": rated.name,
@@ -50,12 +56,12 @@ def format_json(rated: RatedProject, meta: dict[str, str] | None = None) -> str:
         # consumer should never have its data silently truncated by a
         # presentation flag.
         "advisories": [dataclasses.asdict(advisory) for advisory in rated.advisories],
-        "_meta": meta or {},
+        "_meta": _versioned_meta(meta),
     }
     return json.dumps(document, indent=2)
 
 
-def format_json_error(error: Exception, meta: dict[str, str] | None = None) -> str:
+def format_json_error(error: Exception, meta: Mapping[str, object] | None = None) -> str:
     """Format a fatal error as a machine-readable JSON document.
 
     The document has an "error" key instead of a "rating" key, so consumers
@@ -63,6 +69,6 @@ def format_json_error(error: Exception, meta: dict[str, str] | None = None) -> s
     """
     document = {
         "error": {"type": type(error).__name__, "message": str(error)},
-        "_meta": meta or {},
+        "_meta": _versioned_meta(meta),
     }
     return json.dumps(document, indent=2)

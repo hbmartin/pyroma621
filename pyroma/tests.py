@@ -978,7 +978,7 @@ class ReportTest(unittest.TestCase):
             document,
             {
                 "error": {"type": "ConfigurationError", "message": "nothing to rate"},
-                "_meta": {"mode": "directory"},
+                "_meta": {"mode": "directory", "schema_version": 1},
             },
         )
 
@@ -1000,7 +1000,7 @@ class ReportTest(unittest.TestCase):
                     }
                 ],
                 "advisories": [],
-                "_meta": {"mode": "directory"},
+                "_meta": {"mode": "directory", "schema_version": 1},
             },
         )
 

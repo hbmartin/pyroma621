@@ -11,6 +11,7 @@ pyroma's own exit code.
 """
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from pyroma import projectdata
@@ -34,6 +35,15 @@ class Config:
     strict: bool = False
     show_advisories: bool = True
     skip_tests: "list[str]" = field(default_factory=list)
+
+
+@dataclass(kw_only=True)
+class ConfigSource:
+    """Configuration discovery state, including an unsuccessful load."""
+
+    enabled: bool = False
+    loaded: bool = False
+    source: str | None = None
 
 
 def _coerce_min_rating(value: object) -> int:
@@ -88,14 +98,23 @@ def from_table(table: object) -> Config:
     return Config(**settings)
 
 
-def from_directory(path: Pathish) -> Config:
+def from_directory(path: Pathish, *, provenance: ConfigSource | None = None) -> Config:
     """Read `[tool.pyroma]` from a project directory's pyproject.toml."""
     # An unreadable or broken pyproject.toml is reported by the rating
     # itself; it must not stop pyroma from running at all.
+    if provenance is not None:
+        provenance.enabled = True
+        provenance.loaded = False
+        candidate = Path(path).resolve() / "pyproject.toml"
+        provenance.source = str(candidate) if candidate.is_file() else None
     parsed, _error = projectdata.read_pyproject(path)
     if parsed is None:
         return Config()
     tools = parsed.get("tool")
     if not isinstance(tools, dict):
         return Config()
-    return from_table(tools.get("pyroma", {}))
+    table = tools.get("pyroma")
+    settings = from_table(table)
+    if provenance is not None:
+        provenance.loaded = isinstance(table, dict)
+    return settings

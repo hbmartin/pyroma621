@@ -231,45 +231,19 @@ Prefer JSON over scraping human-readable output:
 $ pyroma --format json --min 8 .
 ```
 
-A successful JSON document has this shape:
+Rating and error documents use schema version 1. The
+[JSON contract](json.md) contains complete examples and downloadable schemas,
+including required finding arrays, categories, and effective policy metadata.
+An error document has an `error` key instead of `rating`. Argument failures
+use `error.type = "UsageError"` and retain exit code 2, which is also used by
+low-rating reports. Operational and configuration errors use exit code 3.
 
-```json
-{
-  "name": "example-project",
-  "rating": 9,
-  "level": "Cottage Cheese",
-  "problems": [
-    {
-      "test": "Description",
-      "message": "The package's Description is quite short.",
-      "weight": 50,
-      "fatal": false
-    }
-  ],
-  "_meta": {
-    "package": ".",
-    "mode": "directory",
-    "pyroma": "5.1b3.dev0"
-  }
-}
-```
-
-The `pyroma` metadata value is omitted when package-version metadata is not
-available, such as some source-checkout executions. An error document has an
-`error` key instead of `rating`:
-
-```json
-{
-  "error": {
-    "type": "ValueError",
-    "message": "Did not find 'missing-project' on PyPI. Did you misspell it?"
-  },
-  "_meta": {
-    "package": "missing-project",
-    "mode": "pypi"
-  }
-}
-```
+CLI reports include the checker version under `_meta.pyroma`; that value is
+omitted when installed distribution metadata is unavailable. Use
+`pyroma --version` to query it without a package argument, build, or network
+request. Policy is included once settings have been resolved. Configuration
+is discovered only from the target directory's `pyproject.toml`; source
+archive and PyPI modes use flags and defaults.
 
 Machine-readable output is written to stdout. Text-mode operational errors
 are written to stderr. Index-role warnings use the `pyroma.pypidata` logger

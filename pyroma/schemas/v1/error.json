@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hbmartin.github.io/pyroma621/schemas/v1/error.json",
+  "title": "Pyroma621 schema version 1 error report",
+  "type": "object",
+  "$defs": {
+    "meta": {
+      "type": "object",
+      "required": [
+        "schema_version"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "pyroma": {
+          "type": "string"
+        },
+        "package": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "directory",
+            "file",
+            "pypi"
+          ]
+        },
+        "policy": {
+          "type": "object",
+          "required": [
+            "min_rating",
+            "strict",
+            "show_advisories",
+            "skip_tests"
+          ],
+          "properties": {
+            "min_rating": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "strict": {
+              "type": "boolean"
+            },
+            "show_advisories": {
+              "type": "boolean"
+            },
+            "skip_tests": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "uniqueItems": true
+            }
+          }
+        },
+        "config": {
+          "type": "object",
+          "required": [
+            "enabled",
+            "loaded",
+            "source"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "loaded": {
+              "type": "boolean"
+            },
+            "source": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "properties": {
+    "_meta": {
+      "$ref": "#/$defs/meta"
+    },
+    "error": {
+      "type": "object",
+      "required": [
+        "type",
+        "message"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "required": [
+    "error",
+    "_meta"
+  ],
+  "not": {
+    "anyOf": [
+      {
+        "required": [
+          "name"
+        ]
+      },
+      {
+        "required": [
+          "rating"
+        ]
+      },
+      {
+        "required": [
+          "level"
+        ]
+      },
+      {
+        "required": [
+          "problems"
+        ]
+      },
+      {
+        "required": [
+          "advisories"
+        ]
+      }
+    ]
+  }
+}

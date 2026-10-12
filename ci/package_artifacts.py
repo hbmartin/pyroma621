@@ -84,7 +84,14 @@ def inspect(dist: Path, project: Path, release_tag: str = "") -> tuple[Path, Pat
     version = _project_version(project, release_tag)
     with zipfile.ZipFile(wheels[0]) as archive:
         reject_generated(archive.namelist())
-        required = {"pyroma/__init__.py", "pyroma/__main__.py", "pyroma/tests.py", "pyroma/py.typed"}
+        required = {
+            "pyroma/__init__.py",
+            "pyroma/__main__.py",
+            "pyroma/tests.py",
+            "pyroma/py.typed",
+            "pyroma/schemas/v1/rating.json",
+            "pyroma/schemas/v1/error.json",
+        }
         if not required <= set(archive.namelist()):
             message = f"Missing wheel files: {required - set(archive.namelist())}"
             raise ValueError(message)
@@ -129,21 +136,28 @@ def stage(sdist: Path, work: Path) -> Path:
     source = roots[0]
     staging = work / "staging"
     staging.mkdir()
-    for directory in ("tests", "ci"):
+    for directory in ("tests", "ci", "docs"):
         shutil.copytree(source / directory, staging / directory)
+    for filename in ("README.md", "zensical.toml"):
+        shutil.copy(source / filename, staging / filename)
     shutil.copy(source / "conftest.py", staging / "conftest.py")
     shutil.copy(source / "pyproject.toml", staging / "pyproject.toml")
     shutil.copy(source / "uv.lock", staging / "uv.lock")
     return staging
 
 
-def run(arguments: list[str], cwd: Path) -> str:
+def run(arguments: list[str], cwd: Path, *, expected_code: int = 0, clean_stderr: bool = False) -> str:
     """Run a bounded subprocess, retaining its diagnostics on failure."""
-    result = subprocess.run(
-        arguments, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600, check=False
-    )
+    result = subprocess.run(arguments, cwd=cwd, text=True, capture_output=True, timeout=600, check=False)
     print(result.stdout, end="")
-    result.check_returncode()
+    print(result.stderr, end="", file=sys.stderr)
+    if result.returncode != expected_code:
+        result.check_returncode()
+        message = f"Command exited {result.returncode}, expected {expected_code}"
+        raise ValueError(message)
+    if clean_stderr and result.stderr:
+        message = "Installed CLI wrote unexpected stderr"
+        raise ValueError(message)
     return result.stdout
 
 
@@ -174,6 +188,63 @@ def environment(work: Path, python: str, wheel: Path, project: Path, *, tests: b
     run([uv, "pip", "install", "--python", str(executable), "--require-hashes", "-r", str(requirements)], work)
     run([uv, "pip", "install", "--python", str(executable), "--no-deps", str(wheel)], work)
     return executable
+
+
+def _check_schema_resources(package: Path) -> None:
+    """Require readable schemas with their published identities."""
+    for kind in ("rating", "error"):
+        schema = json.loads((package / "schemas" / "v1" / f"{kind}.json").read_text(encoding="utf-8"))
+        if schema["$id"] != f"https://hbmartin.github.io/pyroma621/schemas/v1/{kind}.json":
+            message = "Installed report schema has an incorrect identity"
+            raise ValueError(message)
+
+
+def _smoke_cli(invocation: list[str], package: Path, expected_version: Version) -> None:
+    """Check help, version, rating metadata, and structured usage errors."""
+    run([*invocation, "--help"], Path.cwd())
+    version_output = run([*invocation, "--version"], Path.cwd(), clean_stderr=True).strip()
+    if (
+        not version_output.startswith("pyroma621 ")
+        or parsed_version(version_output.split(" ", 1)[1]) != expected_version
+    ):
+        message = "Installed CLI version option returned the wrong version"
+        raise ValueError(message)
+    output = run(
+        [*invocation, "--directory", "--format", "json", "--min", "10", str(package / "testdata" / "complete")],
+        Path.cwd(),
+        clean_stderr=True,
+    )
+    document = json.loads(output)
+    if document["rating"] != _MAX_RATING or parsed_version(document["_meta"]["pyroma"]) != expected_version:
+        message = "Installed CLI did not return the expected JSON rating/version"
+        raise ValueError(message)
+    if (
+        document["_meta"]["schema_version"] != 1
+        or document["_meta"]["policy"]
+        != {
+            "min_rating": 10,
+            "strict": False,
+            "show_advisories": True,
+            "skip_tests": [],
+        }
+        or not document["_meta"]["config"]["enabled"]
+    ):
+        message = "Installed CLI omitted the report schema version or effective policy"
+        raise ValueError(message)
+    usage = json.loads(
+        run(
+            [*invocation, "--format=json", "--min=11"],
+            Path.cwd(),
+            expected_code=2,
+            clean_stderr=True,
+        )
+    )
+    if usage["error"]["type"] != "UsageError" or usage["_meta"]["schema_version"] != 1:
+        message = "Installed CLI did not return a structured usage error"
+        raise ValueError(message)
+    if parsed_version(usage["_meta"]["pyroma"]) != expected_version:
+        message = "Installed CLI usage error did not report the checker version"
+        raise ValueError(message)
 
 
 def smoke(version: str) -> None:
@@ -209,17 +280,10 @@ def smoke(version: str) -> None:
     if distribution.metadata.get_all("Provides-Extra"):
         message = "Development extras leaked into published metadata"
         raise ValueError(message)
+    _check_schema_resources(package)
     console = script_path(Path(sys.prefix), "pyroma", windows=os.name == "nt")
     for invocation in ([str(console)], [sys.executable, "-m", "pyroma"]):
-        run([*invocation, "--help"], Path.cwd())
-        output = run(
-            [*invocation, "--directory", "--format", "json", "--min", "10", str(package / "testdata" / "complete")],
-            Path.cwd(),
-        )
-        document = json.loads(output)
-        if document["rating"] != _MAX_RATING or parsed_version(document["_meta"]["pyroma"]) != expected_version:
-            message = "Installed CLI did not return the expected JSON rating/version"
-            raise ValueError(message)
+        _smoke_cli(invocation, package, expected_version)
 
 
 def validate(dist: Path, project: Path, work: Path, python: str, release_tag: str) -> None:

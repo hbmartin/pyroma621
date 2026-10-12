@@ -21,6 +21,7 @@ py3*
 .pytest_cache
 .ruff_cache
 site/
+docs/schemas/
 
 coverage.xml
 audit-report.json
