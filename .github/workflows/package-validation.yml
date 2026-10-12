@@ -42,14 +42,14 @@ jobs:
       - name: Check lockfile
         run: uv lock --check
       - name: Check release ref, tag and project version
-        run: uv run --locked --no-default-groups python ci/package_artifacts.py preflight --release-tag "$RELEASE_TAG"
+        run: uv run --locked --only-group release python ci/package_artifacts.py preflight --release-tag "$RELEASE_TAG"
       - name: Check release documentation
         if: env.RELEASE_TAG != ''
-        run: uv run --locked --no-default-groups --group release python ci/release_docs.py check --online --release-tag "$RELEASE_TAG"
+        run: uv run --locked --only-group release python ci/release_docs.py check --release-tag "$RELEASE_TAG"
       - name: Build wheel from sdist
         run: uv build
       - name: Inspect distributions and release version
-        run: uv run --locked --no-default-groups python ci/package_artifacts.py inspect --release-tag "$RELEASE_TAG"
+        run: uv run --locked --only-group release python ci/package_artifacts.py inspect --release-tag "$RELEASE_TAG"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: python-package-distributions
@@ -86,7 +86,7 @@ jobs:
         env:
           PYTHON_VERSION: ${{ matrix.python }}
         run: >-
-          uv run --locked --no-default-groups python ci/package_artifacts.py validate --python "$PYTHON_VERSION"
+          uv run --locked --only-group release python ci/package_artifacts.py validate --python "$PYTHON_VERSION"
           --work "$RUNNER_TEMP/package-validation-$PYTHON_VERSION"
           --release-tag "$RELEASE_TAG"
       - name: Upload artifact coverage

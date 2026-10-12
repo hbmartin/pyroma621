@@ -62,12 +62,10 @@ audit = ["packaging>=26.3", "pip-audit==2.10.1"]
 release = ["packaging>=26.3", "PyYAML>=6.0.3"]
 docs = [{include-group = "release"}, "zensical>=0.0.50"]
 dev = [
+    {include-group = "test"},
     "deptry>=0.25.1",
-    "hypothesis>=6.156.7",
     "lizard>=1.23.0",
     "pyrefly>=1.1.1",
-    "pytest>=9.1.1",
-    "pytest-cov>=7.1.0",
     "ruff==0.15.22",
     "ty>=0.0.61",
 ]
@@ -120,6 +118,7 @@ ignore = ["GAC010", "GAC008", "GAC011"]
 [tool.deptry]
 extend_exclude = ["conftest.py", "pyroma/testdata", "pyroma/tests.py", "tests"]
 known_first_party = ["pyroma"]
+package_module_name_map = {PyYAML = "yaml"}
 
 [tool.deptry.per_rule_ignores]
 # zest.releaser calls this optional integration hook when it is installed.

@@ -334,9 +334,33 @@ def test_schemas_share_metadata_definition(validator: Callable[[str], Draft20201
     assert validator("rating").schema["$defs"]["meta"] == validator("error").schema["$defs"]["meta"]
 
 
-@pytest.mark.parametrize("arguments", [["--form=json", "."], ["--fo", "json", "."], ["--vers"]])
+@pytest.mark.parametrize(
+    ("arguments", "attribute", "expected"),
+    [
+        (["--skip", "Keywords", "."], "skip_tests", ["Keywords"]),
+        (["--no-adv", "."], "show_advisories", False),
+        (["--index", "https://example.com", "."], "index_url", "https://example.com"),
+        (["--form=json", "."], "output_format", "json"),
+        (["--fo", "json", "."], "output_format", "json"),
+    ],
+)
+def test_unambiguous_abbreviations_are_accepted(arguments: list[str], attribute: str, expected: object) -> None:
+    assert getattr(pyroma._build_parser().parse_args(arguments), attribute) == expected
+
+
+def test_abbreviated_version_avoids_rating(monkeypatch: pytest.MonkeyPatch) -> None:
+    blocked = Mock(side_effect=AssertionError("Version queries must not inspect a target"))
+    monkeypatch.setattr(pyroma, "_resolve_config", blocked)
+    code, out, err = invoke(monkeypatch, ["--vers"])
+    assert code == 0
+    assert out.startswith("pyroma621 ")
+    assert err == ""
+    blocked.assert_not_called()
+
+
+@pytest.mark.parametrize("arguments", [["--f=json", "."], ["--no", "."]])
 @pytest.mark.parametrize("json_requested", [False, True])
-def test_abbreviated_options_are_rejected(
+def test_ambiguous_abbreviations_are_rejected(
     monkeypatch: pytest.MonkeyPatch,
     arguments: list[str],
     json_requested: bool,
@@ -352,6 +376,7 @@ def test_abbreviated_options_are_rejected(
         document = json.loads(out)
         validator("error").validate(document)
         assert document["error"]["type"] == "UsageError"
+        assert "ambiguous option" in document["error"]["message"]
         assert err == ""
     else:
         assert out == ""
@@ -359,8 +384,42 @@ def test_abbreviated_options_are_rejected(
     blocked.assert_not_called()
 
 
-@pytest.mark.parametrize("first_method", ["parse_args", "parse_known_args"])
-@pytest.mark.parametrize("second_method", ["parse_args", "parse_known_args"])
+@pytest.mark.parametrize(
+    ("format_arguments", "json_error"),
+    [
+        (["--form=json"], True),
+        (["--fo", "json"], True),
+        (["--format=text", "--fo=json"], True),
+        (["--fo=json", "--format=text"], False),
+        (["--f=json"], False),
+        (["--f=json", "--fo=json"], True),
+        (["--", "--fo=json"], False),
+    ],
+)
+def test_abbreviated_error_format_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    format_arguments: list[str],
+    json_error: bool,
+    validator: Callable[[str], Draft202012Validator],
+) -> None:
+    code, out, err = invoke(monkeypatch, ["--min=11", ".", *format_arguments])
+    assert code == 2
+    if json_error:
+        document = json.loads(out)
+        validator("error").validate(document)
+        assert document["error"]["type"] == "UsageError"
+        assert err == ""
+    else:
+        assert out == ""
+        assert "usage:" in err
+
+
+@pytest.mark.parametrize(
+    "first_method", ["parse_args", "parse_known_args", "parse_intermixed_args", "parse_known_intermixed_args"]
+)
+@pytest.mark.parametrize(
+    "second_method", ["parse_args", "parse_known_args", "parse_intermixed_args", "parse_known_intermixed_args"]
+)
 @pytest.mark.parametrize("json_first", [False, True])
 def test_parser_resets_error_format_and_color(
     capsys: pytest.CaptureFixture, first_method: str, second_method: str, json_first: bool
@@ -382,11 +441,51 @@ def test_parser_resets_error_format_and_color(
     assert vars(parser)["color"] is json_first
 
 
-def test_known_args_retains_namespace_iterators_and_unknowns() -> None:
+@pytest.mark.parametrize("method", ["parse_known_args", "parse_known_intermixed_args"])
+def test_known_args_retains_namespace_iterators_and_unknowns(method: str) -> None:
     namespace = Namespace(custom=True)
-    parsed, unknown = pyroma._build_parser().parse_known_args(iter(["--min=9", ".", "--future"]), namespace)
+    parsed, unknown = getattr(pyroma._build_parser(), method)(iter(["--min=9", ".", "--future"]), namespace)
     assert parsed is namespace
     assert (parsed.min, parsed.custom, unknown) == (9, True, ["--future"])
+
+
+@pytest.mark.parametrize(
+    "method", ["parse_args", "parse_known_args", "parse_intermixed_args", "parse_known_intermixed_args"]
+)
+def test_missing_package_keeps_json_through_nested_parsing(method: str, capsys: pytest.CaptureFixture) -> None:
+    parser = pyroma._build_parser()
+    with pytest.raises(pyroma.UsageError, match=r"required.*package"):
+        getattr(parser, method)(["--fo=json"])
+    assert capsys.readouterr().err == ""
+    # A failed parse must also leave the parser ready for its next invocation.
+    with pytest.raises(SystemExit) as raised:
+        getattr(parser, method)([])
+    assert raised.value.code == 2
+    assert "usage:" in capsys.readouterr().err
+
+
+def test_cli_and_configuration_share_selector_validation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    names = [*pyroma.get_all_tests(), *pyroma.get_all_categories()]
+    source = tmp_path / "pyproject.toml"
+    source.write_text(f"[tool.pyroma]\nskip-tests = {json.dumps(names)}\n", encoding="utf-8")
+    assert config.from_directory(tmp_path).skip_tests == pyroma.skip_tests(",".join(names)) == names
+
+    class CustomRule:
+        pass
+
+    monkeypatch.setattr(ratings, "ALL_TESTS", [CustomRule()])
+    source.write_text('[tool.pyroma]\nskip-tests = ["CustomRule", "practice"]\n', encoding="utf-8")
+    assert config.from_directory(tmp_path).skip_tests == pyroma.skip_tests("CustomRule,practice")
+
+    source.write_text('[tool.pyroma]\nskip-tests = ["Keywords"]\n', encoding="utf-8")
+    with pytest.raises(config.ConfigError) as configuration_error:
+        config.from_directory(tmp_path)
+    with pytest.raises(pyroma.ArgumentTypeError) as cli_error:
+        pyroma.skip_tests("Keywords")
+    config_choices = str(configuration_error.value).split("Available tests:", 1)[1]
+    cli_choices = str(cli_error.value).split("Available tests:", 1)[1]
+    assert config_choices == cli_choices
+    assert "CustomRule" in config_choices
 
 
 @pytest.mark.parametrize("arguments", [["--version"], ["--format=json", "--min=11", "."], ["--format=json", "package"]])

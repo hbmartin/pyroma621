@@ -34,6 +34,7 @@ def replace_once(path: Path, old: str, new: str) -> None:
 def project(tmp_path: Path) -> Path:
     (tmp_path / "pyproject.toml").write_text(
         f'[project]\nname = "pyroma621"\nversion = "{VERSION}"\n'
+        'classifiers = ["Development Status :: 5 - Production/Stable"]\n'
         f'[project.urls]\nDocumentation = "{release_docs.SITE_URL}"\n',
         encoding="utf-8",
     )
@@ -43,7 +44,7 @@ def project(tmp_path: Path) -> Path:
     )
     (tmp_path / "README.md").write_text(
         f"Install with `pip install pyroma621`.\nDocumentation: {release_docs.SITE_URL}\n"
-        f'```yaml\nrepos:\n  - repo: {release_docs.REPOSITORY}\n    rev: "{VERSION}"\n'
+        f'<!-- pyroma-pre-commit -->\n```yaml\nrepos:\n  - repo: {release_docs.REPOSITORY}\n    rev: "{VERSION}"\n'
         "    hooks:\n      - id: pyroma\n```\n",
         encoding="utf-8",
     )
@@ -84,13 +85,16 @@ def test_documentation_consistency() -> None:
     assert Version(version) >= Version(revision)
 
 
-def test_documentation_json_examples(validator: Callable[[str], Draft202012Validator]) -> None:
-    version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
-    for path in (ROOT / "docs").glob("*.md"):
+def validate_examples(project: Path, validator: Callable[[str], Draft202012Validator]) -> None:
+    for path in (project / "docs").glob("*.md"):
         for block in re.findall(r"```json\n(.*?)\n```", path.read_text(encoding="utf-8"), re.DOTALL):
             document = json.loads(block)
             validator("error" if "error" in document else "rating").validate(document)
-            assert document["_meta"]["pyroma"] == version
+            Version(document["_meta"]["pyroma"])
+
+
+def test_documentation_json_examples(validator: Callable[[str], Draft202012Validator]) -> None:
+    validate_examples(ROOT, validator)
 
 
 @pytest.mark.parametrize(
@@ -121,17 +125,38 @@ def test_future_release_needs_a_date(project: Path) -> None:
 
 
 @pytest.mark.parametrize("revision", [VERSION, NEXT_VERSION, f"v{NEXT_VERSION}", "9.1"])
-def test_tagged_release_requires_matching_hook(project: Path, revision: str) -> None:
+@pytest.mark.parametrize("release_tag", [NEXT_VERSION, f"v{NEXT_VERSION}"])
+def test_tagged_release_requires_matching_hook(project: Path, revision: str, release_tag: str) -> None:
     replace_once(project / "pyproject.toml", f'version = "{VERSION}"', f'version = "{NEXT_VERSION}"')
     changelog = project / "docs" / "changelog.md"
     changelog.write_text(changelog.read_text() + f"\n## {NEXT_VERSION} ({DATE})\n")
     replace_once(project / "README.md", f'rev: "{VERSION}"', f'rev: "{revision}"')
     assert release_docs.check_offline(project) == revision
-    if revision == VERSION:
-        with pytest.raises(ValueError, match="pre-commit revision does not match release"):
-            release_docs.check_offline(project, f"v{NEXT_VERSION}")
+    if revision != release_tag:
+        with pytest.raises(ValueError, match="pre-commit revision does not match release tag"):
+            release_docs.check_offline(project, release_tag)
     else:
-        assert release_docs.check_offline(project, f"v{NEXT_VERSION}") == revision
+        assert release_docs.check_offline(project, release_tag) == revision
+
+
+@pytest.mark.parametrize("release_tag", ["9.0", "v9.0.0", "v9.0.0.0"])
+def test_package_versions_allow_equivalence_but_hook_refs_are_literal(project: Path, release_tag: str) -> None:
+    replace_once(project / "README.md", f'rev: "{VERSION}"', f'rev: "{release_tag}"')
+    assert release_docs.check_offline(project, release_tag) == release_tag
+
+
+@pytest.mark.parametrize("version", [VERSION, "9.1.0rc1", "9.1.0.dev0"])
+def test_beta_is_allowed_except_for_final_tagged_releases(project: Path, version: str) -> None:
+    replace_once(project / "pyproject.toml", f'version = "{VERSION}"', f'version = "{version}"')
+    replace_once(project / "pyproject.toml", "5 - Production/Stable", "4 - Beta")
+    replace_once(project / "README.md", f'rev: "{VERSION}"', f'rev: "{version}"')
+    replace_once(project / "docs" / "changelog.md", f"## {VERSION} ({DATE})", f"## {version} ({DATE})")
+    assert release_docs.check_offline(project) == version
+    if version == VERSION:
+        with pytest.raises(ValueError, match=r"Final pyroma621 releases require.*Production/Stable"):
+            release_docs.check_offline(project, version)
+    else:
+        assert release_docs.check_offline(project, version) == version
 
 
 @pytest.mark.parametrize("failure", ["", "distribution", "hook", "date"])
@@ -208,8 +233,10 @@ def test_fetch_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     opener.assert_called_once_with("https://example.com/", timeout=15)
     response.read.assert_called_once_with(release_docs._RESPONSE_LIMIT + 1)
     response.read.return_value = b"x" * (release_docs._RESPONSE_LIMIT + 1)
-    with pytest.raises(ValueError, match="response limit"):
-        release_docs.fetch("https://example.com/")
+    with pytest.raises(ValueError, match="response limit") as raised:
+        release_docs.fetch("https://example.com/?token=secret")
+    assert "secret" not in str(raised.value)
+    assert "https://" not in str(raised.value)
     with pytest.raises(ValueError, match="HTTPS"):
         release_docs.fetch("http://example.com/")
 
@@ -225,15 +252,37 @@ def test_online_failures_are_controlled(
     assert "unavailable" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("repository", [release_docs.REPOSITORY, f'"{release_docs.REPOSITORY}"'])
-def test_precommit_revision_belongs_to_matching_repository(repository: str) -> None:
+@pytest.mark.parametrize("suffix", ["", ".git", "/", ".git/"])
+@pytest.mark.parametrize("quoted", [False, True])
+def test_precommit_revision_belongs_to_matching_repository(suffix: str, quoted: bool) -> None:
+    repository = release_docs.REPOSITORY + suffix
+    if quoted:
+        repository = f'"{repository}"'
     readme = (
-        "```yaml\nrepos:\n"
+        "<!-- pyroma-pre-commit -->\n```yaml\nrepos:\n"
         "  - repo: https://github.com/example/other\n    rev: 99.0.0\n    hooks:\n      - id: pyroma\n"
         f"  - repo: {repository}\n    rev: 98.0.0\n    hooks:\n      - id: unrelated\n"
         f"  - repo: {repository}\n    rev: {VERSION}\n    hooks:\n      - id: pyroma\n```\n"
     )
     assert release_docs.precommit_revision(readme) == VERSION
+
+
+@pytest.mark.parametrize("example", ["repos: [", "a: 1\n---\nb: 2", "...", "!!python/object:example.Unsafe {}"])
+def test_unmarked_yaml_does_not_affect_hook_validation(project: Path, example: str) -> None:
+    readme = (project / "README.md").read_text()
+    unrelated = f"\n```yaml\n{example}\n```\n"
+    assert release_docs.precommit_revision(unrelated + readme + unrelated) == VERSION
+
+
+@pytest.mark.parametrize("replacement", ["", "<!-- unrelated -->", "<!-- pyroma-pre-commit -->\n```yaml\nrepos: ["])
+def test_hook_example_requires_a_marker_and_complete_fence(project: Path, replacement: str) -> None:
+    readme = (project / "README.md").read_text()
+    if "repos: [" in replacement:
+        readme += replacement
+    else:
+        readme = readme.replace("<!-- pyroma-pre-commit -->", replacement)
+    with pytest.raises(ValueError, match="pyroma hook"):
+        release_docs.precommit_revision(readme)
 
 
 @pytest.mark.parametrize(
@@ -273,12 +322,12 @@ def test_precommit_repeated_examples_require_consistent_revisions(project: Path,
             release_docs.precommit_revision(readme + repeated)
 
 
-@pytest.mark.parametrize("example", ["repos: [", "!!python/object:example.Unsafe {}"])
+@pytest.mark.parametrize("example", ["repos: [", "!!python/object:example.Unsafe {}", "a: 1\n---\nb: 2"])
 def test_yaml_failures_are_controlled(
     monkeypatch: pytest.MonkeyPatch, project: Path, capsys: pytest.CaptureFixture, example: str
 ) -> None:
     (project / "README.md").write_text(
-        f"pip install pyroma621\n{release_docs.SITE_URL}\n```yaml\n{example}\n```\n",
+        f"pip install pyroma621\n{release_docs.SITE_URL}\n<!-- pyroma-pre-commit -->\n```yaml\n{example}\n```\n",
         encoding="utf-8",
     )
     monkeypatch.setattr("sys.argv", ["release_docs", "check", "--project", str(project)])
@@ -340,9 +389,9 @@ def test_missing_canonical_schemas_does_not_remove_generated_files(project: Path
 
 def test_prerelease_dates_only_the_unreleased_heading(tmp_path: Path) -> None:
     history = tmp_path / "changelog.md"
-    original = (ROOT / "docs" / "changelog.md").read_text(encoding="utf-8")
+    original = f"# Changelog\n\n## {NEXT_VERSION} (unreleased)\n\n- New feature.\n\n## {VERSION} ({DATE})\n"
     history.write_text(original, encoding="utf-8")
-    version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    version = NEXT_VERSION + ".dev0"
     releaser = Prereleaser.__new__(Prereleaser)
     releaser.vcs = Mock(version=version)
     releaser.vcs.history_file.return_value = str(history)
@@ -359,4 +408,38 @@ def test_prerelease_dates_only_the_unreleased_heading(tmp_path: Path) -> None:
     expected = original.split("\n")
     expected[first["line"]] = f"## {utils.cleanup_version(version)} ({DATE})"
     assert releaser.data["history_lines"] == expected
-    assert "## 6.1.0 (2026-10-12)" in releaser.data["history_lines"]
+    assert f"## {VERSION} ({DATE})" in releaser.data["history_lines"]
+
+
+def test_release_lifecycle_keeps_examples_and_offline_checks_valid(
+    project: Path, validator: Callable[[str], Draft202012Validator], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    blocked = Mock(side_effect=AssertionError("Offline releases must not fetch live documentation"))
+    monkeypatch.setattr(release_docs, "fetch", blocked)
+    examples = project / "docs" / "json.md"
+    shutil.copy(ROOT / "docs" / "json.md", examples)
+    original_examples = examples.read_bytes()
+    metadata = project / "pyproject.toml"
+    history = project / "docs" / "changelog.md"
+    replace_once(metadata, f'version = "{VERSION}"', f'version = "{NEXT_VERSION}.dev0"')
+    replace_once(metadata, "5 - Production/Stable", "4 - Beta")
+    history.write_text(history.read_text().replace("# Changelog\n", f"# Changelog\n\n## {NEXT_VERSION} (unreleased)\n"))
+    assert release_docs.check_offline(project) == VERSION
+    validate_examples(project, validator)
+    with pytest.raises(ValueError, match="dated"):
+        release_docs.check_offline(project, NEXT_VERSION + ".dev0")
+
+    replace_once(metadata, f'version = "{NEXT_VERSION}.dev0"', f'version = "{NEXT_VERSION}"')
+    replace_once(metadata, "4 - Beta", "5 - Production/Stable")
+    replace_once(history, f"## {NEXT_VERSION} (unreleased)", f"## {NEXT_VERSION} ({DATE})")
+    replace_once(project / "README.md", f'rev: "{VERSION}"', f'rev: "v{NEXT_VERSION}"')
+    assert release_docs.check_offline(project, f"v{NEXT_VERSION}") == f"v{NEXT_VERSION}"
+    validate_examples(project, validator)
+
+    replace_once(metadata, f'version = "{NEXT_VERSION}"', 'version = "9.2.0.dev0"')
+    replace_once(metadata, "5 - Production/Stable", "4 - Beta")
+    history.write_text(history.read_text().replace("# Changelog\n", "# Changelog\n\n## 9.2.0 (unreleased)\n"))
+    assert release_docs.check_offline(project) == f"v{NEXT_VERSION}"
+    validate_examples(project, validator)
+    assert examples.read_bytes() == original_examples
+    blocked.assert_not_called()

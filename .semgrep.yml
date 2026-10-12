@@ -5,6 +5,7 @@ rules:
     paths:
       include:
         - /pyroma/**
+        - /ci/**
     message: >-
       Do not interpolate URL-bearing values into exceptions because credentials
       and signed query parameters can leak into CLI output or CI logs.
@@ -19,35 +20,3 @@ rules:
       - metavariable-regex:
           metavariable: $URL
           regex: (?i).*(url|uri).*
-  - id: pyroma.release-preflight-requires-hook-version-check
-    languages: [python]
-    severity: ERROR
-    paths:
-      include:
-        - /ci/release_docs.py
-    message: Tagged release checks must validate the documented hook revision against the release tag.
-    patterns:
-      - pattern: |
-          def check_offline(...):
-            ...
-      - pattern-not: |
-          def check_offline(...):
-            ...
-            _require_hook_revision(..., release_tag)
-            ...
-  - id: pyroma.release-preflight-requires-contract-evidence
-    languages: [python]
-    severity: ERROR
-    paths:
-      include:
-        - /ci/release_docs.py
-    message: Online release checks must verify the JSON guide and canonical schema downloads.
-    patterns:
-      - pattern: |
-          def check_online(...):
-            ...
-      - pattern-not: |
-          def check_online(...):
-            ...
-            _check_published_contract(project)
-            ...

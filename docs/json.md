@@ -1,15 +1,16 @@
 # JSON reports
 
-This guide describes the **unreleased 6.2 development version**. The published
-6.1.0 release does not include schema version 1, JSON argument errors, or
-`--version`. Install a development checkout with `python -m pip install .`
-from the repository root to use the features and examples below.
+Schema version 1, JSON argument errors, and `--version` were introduced in 6.2
+and are unavailable in 6.1.0. Use a 6.2 or newer release, or install a development
+checkout with `python -m pip install .` from the repository root. Checker versions
+in the examples are illustrative; actual reports identify the installed version.
 
 Use `pyroma --format json PACKAGE` to write one JSON document to stdout.
 Both `--format json` and `--format=json` work. Argument errors honor the last
-explicit format option before `--`, even if validation fails before reaching
+unambiguous format option before `--`, even if validation fails before reaching
 that option. `--help` and `--version` still print text and exit successfully.
-Long option names must be written in full; abbreviations are rejected.
+Unambiguous long-option abbreviations are accepted, including `--form=json`.
+Prefer full names in scripts because new options can make a prefix ambiguous.
 
 ## Schemas and compatibility
 

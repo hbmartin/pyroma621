@@ -2,6 +2,9 @@
 
 Run the test suite with pytest:
 
+The default `dev` dependency group includes `test`, so plain `uv run pytest`
+works from a fresh checkout. CI uses the explicit test group shown below.
+
 ```console
 $ uv sync --locked --no-default-groups --group test
 $ uv run --locked --no-default-groups --group test python -bb -X dev -m pytest --cov --cov-report=term-missing --cov-report=xml
@@ -182,8 +185,8 @@ Lizard uses its default strict threshold of 15 and must report no warnings.
 Deptry excludes bundled compatibility fixtures and has narrow exceptions for
 optional or indirectly loaded dependencies documented in `pyproject.toml`.
 Project-specific Semgrep rules prevent URL credentials and signed query
-parameters from being copied into user-facing exceptions, and require the
-release preflight to validate hook versions and published JSON-contract evidence:
+parameters from being copied into user-facing exceptions in both runtime and
+CI code. Behavioral tests cover release preflight requirements:
 
 ```console
 uv run --locked --only-group quality semgrep scan --config .semgrep.yml --error pyroma ci
@@ -224,8 +227,8 @@ from the `pyroma/testdata/complete` directory.
 Publishing a GitHub release, directly or from a saved draft, starts
 `.github/workflows/publish.yml`. Its reusable
 package-validation workflow checks the lockfile, builds an sdist and a wheel from
-that sdist, and tests the installed wheel outside the checkout on Python 3.11 and
-3.14. Property and CI gate tests come from the sdist; unit tests and fixtures come
+that sdist, and tests the installed wheel outside the checkout on Python 3.11,
+3.13, and 3.14. Property and CI gate tests come from the sdist; unit tests and fixtures come
 from the wheel. A separate environment installs only runtime dependencies and
 checks imports, typing/license files, entry points, and both CLI invocation forms.
 
@@ -237,6 +240,8 @@ whitespace. Tag policy is checked before version parsing so invalid prefixes
 and whitespace produce a release-tag diagnostic. Uppercase and repeated prefixes
 are rejected; release-component
 aliases such as `v6.2` and `v6.2.0.0` remain equivalent to version `6.2.0`.
+The documented pre-commit `rev` must equal the literal release tag, since Git
+does not apply PEP 440 equivalence to refs.
 Publishing consumes the same downloaded distributions after validation succeeds,
 from the `pypi` environment using Trusted Publishing. No
 build/test job receives OIDC credentials. PyPI's publisher must identify this
@@ -247,9 +252,9 @@ exercise the identical release validation locally without publishing:
 
 ```console
 uv lock --check
-uv run --locked --no-default-groups python ci/package_artifacts.py preflight --release-tag v6.1.0
+uv run --locked --only-group release python ci/package_artifacts.py preflight --release-tag v6.1.0
 uv build
-uv run --locked --no-default-groups python ci/package_artifacts.py validate --work "$(mktemp -d)/release-check" --python 3.11 --release-tag v6.1.0
+uv run --locked --only-group release python ci/package_artifacts.py validate --work "$(mktemp -d)/release-check" --python 3.11 --release-tag v6.1.0
 ```
 
 The work directory must not already exist and should be outside the checkout,
@@ -400,7 +405,7 @@ The packaged JSON files are the source of truth; `docs/schemas/` is generated
 and ignored. Preparation replaces this generated tree, including all canonical
 schema versions, so repeated builds remove stale downloads. The docs-only
 environment does not install the runtime project. Offline tests validate every
-JSON documentation example and its development version.
+JSON documentation example and the PEP 440 syntax of its illustrative checker version.
 Check documentation consistency locally, or include live release evidence:
 
 ```console
@@ -408,15 +413,23 @@ $ uv run --locked --only-group release python ci/release_docs.py check
 $ uv run --locked --only-group release python ci/release_docs.py check --online
 ```
 
-Tagged package validation runs the online check before building. It requires
-the documented hook revision to match the release version, probes the JSON
-guide and both schema downloads, and compares downloaded JSON with the
-canonical packaged schemas. It also checks the example release's distribution
-and hook, and PyPI upload dates against changelog headings. Semgrep guards
-require hook-version and published-contract validation in the release preflight.
-For a tagged check, pass `--release-tag VERSION` from the corresponding release
+Tagged package validation runs the offline check before building. It requires
+a dated changelog heading, a documented hook revision equal to the literal tag,
+and the Production/Stable classifier for final releases. Publishing is independent
+of the current Pages deployment. After deploying Pages, the docs workflow checks
+availability of the JSON guide and both v1 schema downloads with bounded curl
+retries; it does not compare their contents with a release tag.
+
+The optional `--online` maintainer audit probes live documentation, compares
+downloaded schemas with the checkout, verifies the documented release's
+distribution and hook, and checks PyPI upload dates against changelog headings.
+It is not part of the publish gate and can fail for old checkouts after the live
+site or published release list changes.
+For a tagged offline check, pass `--release-tag TAG` from the corresponding release
 checkout after dating its changelog heading and updating its documented hook.
-Hook examples and published hook definitions are parsed as YAML; repository,
+Only README examples marked `<!-- pyroma-pre-commit -->` are parsed as YAML;
+unrelated YAML blocks are ignored. Repository URLs accept an optional `.git`
+suffix and trailing slash. Published hook definitions are also parsed as YAML; repository,
 hook ID, revision, and entry must belong to the matching entry. The `release`
 dependency group supplies PyYAML and packaging without adding runtime dependencies.
 Requests have 15-second timeouts and 2 MiB response limits. Unit tests mock all
@@ -425,7 +438,8 @@ Installed-artifact validation covers Python 3.11, 3.13, and 3.14, including
 both CLI entry points, schema resources, version output, usage-error JSON,
 and effective policy. The corrected README ships with the next PyPI release;
 GitHub Pages uses the normal documentation deployment workflow.
-Development metadata is `6.2.0.dev0` and its changelog heading is
-`6.2.0 (unreleased)`, which zest.releaser can date during prerelease preparation.
-Its Development Status classifier is `4 - Beta`; restore `5 - Production/Stable`
-when preparing the final release.
+Development versions use a versioned unreleased changelog heading, which
+zest.releaser dates during prerelease preparation. Development and prerelease
+metadata may use `4 - Beta`; final tagged releases require `5 - Production/Stable`.
+The zest lifecycle tests use synthetic history and versions, so they also pass
+on dated release commits and after the next development version bump.
