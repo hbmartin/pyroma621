@@ -44,9 +44,10 @@ def run_fixture_probe(tmp_path: Path, source: str, *arguments: str) -> None:
         )
     except subprocess.TimeoutExpired as error:
         pytest.fail(_probe_diagnostics(arguments, f"timed out after {error.timeout}s", error.stdout, error.stderr))
-    assert result.returncode == 0, _probe_diagnostics(
-        arguments, f"exit status {result.returncode}", result.stdout, result.stderr
-    )
+    if result.returncode != 0:
+        raise AssertionError(
+            _probe_diagnostics(arguments, f"exit status {result.returncode}", result.stdout, result.stderr)
+        )
 
 
 def _probe_diagnostics(
