@@ -89,9 +89,9 @@ For machine-readable output, pass `--format json`:
 $ pyroma --format json .
 ```
 
-The schema version 1 contract, JSON argument errors, and `--version` were
-introduced in 6.2 and are unavailable in 6.1.0. Use a 6.2 or newer release,
-or install a development checkout from the repository root with
+The schema version 1 contract, JSON argument errors, and `--version` require
+6.2 or newer and are available in development checkouts. They are unavailable
+in 6.1.0. Install a development checkout from the repository root with
 `python -m pip install .`. Check the installed version without rating a package
 (the version below is illustrative):
 

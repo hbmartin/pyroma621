@@ -231,9 +231,10 @@ Prefer JSON over scraping human-readable output:
 $ pyroma --format json --min 8 .
 ```
 
-Schema version 1, JSON argument errors, and `--version` were introduced in 6.2
-and are unavailable in 6.1.0. Use a 6.2 or newer release, or install a development
-checkout with `python -m pip install .` from its repository root. The
+Schema version 1, JSON argument errors, and `--version` require 6.2 or newer
+and are available in development checkouts. They are unavailable in 6.1.0.
+Install a development checkout with `python -m pip install .` from its repository
+root. The
 [JSON contract](json.md) contains complete examples and downloadable schemas,
 including required finding arrays, categories, and effective policy metadata.
 An error document has an `error` key instead of `rating`. Argument failures
