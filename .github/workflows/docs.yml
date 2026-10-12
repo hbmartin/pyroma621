@@ -24,6 +24,8 @@ jobs:
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: '0.13.0'
+      - name: Prepare downloadable report schemas
+        run: uv run --locked --no-default-groups python ci/release_docs.py schemas
       - name: Build documentation
         run: uv run --locked --only-group docs zensical build --clean --strict
       - name: Configure GitHub Pages

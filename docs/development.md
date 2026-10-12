@@ -378,3 +378,35 @@ Two improvements were considered but deliberately deferred:
   custom `runner` to `build.util.project_wheel_metadata` (the
   default `quiet_subprocess_runner` discards it), so that backend
   deprecation warnings can be surfaced in a report section.
+
+## JSON contract and release documentation
+
+Contract tests in `tests/contract` validate reports against the packaged
+Draft 2020-12 schemas with the test-only `jsonschema` dependency. They cover
+usage errors, policy precedence, discovery provenance, advisory presentation,
+and version discovery without builds or network requests.
+
+Prepare downloadable schemas before a strict documentation build:
+
+```console
+$ uv run --locked --no-default-groups python ci/release_docs.py schemas
+$ uv run --locked --only-group docs zensical build --clean --strict
+```
+
+The packaged JSON files are the source of truth; `docs/schemas/` is generated
+and ignored. Offline tests validate every JSON documentation example.
+Check documentation consistency locally, or include live release evidence:
+
+```console
+$ uv run --locked --no-default-groups python ci/release_docs.py check
+$ uv run --locked --no-default-groups python ci/release_docs.py check --online --release-tag 6.1.0
+```
+
+Tagged package validation runs the online check before building. It checks
+canonical documentation URLs, the example release's distribution and hook,
+and PyPI upload dates against changelog headings. Requests have 15-second
+timeouts and 2 MiB response limits. Unit tests mock all remote evidence.
+Installed-artifact validation covers Python 3.11, 3.13, and 3.14, including
+both CLI entry points, schema resources, version output, usage-error JSON,
+and effective policy. The corrected README ships with the next PyPI release;
+GitHub Pages uses the normal documentation deployment workflow.

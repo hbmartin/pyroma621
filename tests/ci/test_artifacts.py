@@ -69,6 +69,16 @@ def test_smoke_normalizes_installed_and_reported_versions(
     package = root / "lib" / "pyroma"
     package.mkdir(parents=True)
     (package / "py.typed").touch()
+    schemas = package / "schemas" / "v1"
+    schemas.mkdir(parents=True)
+    for kind in ("rating", "error"):
+        (schemas / f"{kind}.json").write_text(
+            json.dumps(
+                {
+                    "$id": f"https://hbmartin.github.io/pyroma621/schemas/v1/{kind}.json",
+                }
+            )
+        )
     license_file = root / "pyroma621.dist-info" / "licenses" / "LICENSE.txt"
     license_file.parent.mkdir(parents=True)
     license_file.touch()
@@ -81,11 +91,22 @@ def test_smoke_normalizes_installed_and_reported_versions(
         SimpleNamespace(group="console_scripts", name="pyroma", value="pyroma:main"),
         SimpleNamespace(group="zest.releaser.prereleaser.before", name="pyroma", value="pyroma:zester"),
     ]
-    runner = Mock(
-        side_effect=lambda arguments, _cwd: (
-            "" if "--help" in arguments else json.dumps({"rating": 10, "_meta": {"pyroma": reported}})
+
+    def cli_output(arguments: list[str], _cwd: Path, **_kwargs: object) -> str:
+        if "--help" in arguments:
+            return ""
+        if "--version" in arguments:
+            return f"pyroma621 {reported}\n"
+        meta = {"pyroma": reported, "schema_version": 1}
+        if "--min=11" in arguments:
+            return json.dumps({"error": {"type": "UsageError"}, "_meta": meta})
+        meta.update(
+            policy={"min_rating": 10, "strict": False, "show_advisories": True, "skip_tests": []},
+            config={"enabled": True},
         )
-    )
+        return json.dumps({"rating": 10, "_meta": meta})
+
+    runner = Mock(side_effect=cli_output)
     monkeypatch.setattr(module.sys, "prefix", str(root))
     monkeypatch.setattr(pyroma, "__file__", str(package / "__init__.py"))
     distribution.locate_file.side_effect = lambda path: (
@@ -98,6 +119,6 @@ def test_smoke_normalizes_installed_and_reported_versions(
             module.smoke("6.2.0rc1")
     else:
         module.smoke("6.2.0rc1")
-        assert runner.call_count == 4
+        assert runner.call_count == 8
         assert runner.call_args_list[0].args[0][0] == str(module.script_path(root, "pyroma", windows=os.name == "nt"))
-        assert runner.call_args_list[2].args[0] == [module.sys.executable, "-m", "pyroma", "--help"]
+        assert runner.call_args_list[4].args[0] == [module.sys.executable, "-m", "pyroma", "--help"]

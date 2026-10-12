@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hbmartin.github.io/pyroma621/schemas/v1/rating.json",
+  "title": "Pyroma621 schema version 1 rating report",
+  "type": "object",
+  "$defs": {
+    "meta": {
+      "type": "object",
+      "required": [
+        "schema_version"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "pyroma": {
+          "type": "string"
+        },
+        "package": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "directory",
+            "file",
+            "pypi"
+          ]
+        },
+        "policy": {
+          "type": "object",
+          "required": [
+            "min_rating",
+            "strict",
+            "show_advisories",
+            "skip_tests"
+          ],
+          "properties": {
+            "min_rating": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "strict": {
+              "type": "boolean"
+            },
+            "show_advisories": {
+              "type": "boolean"
+            },
+            "skip_tests": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "uniqueItems": true
+            }
+          }
+        },
+        "config": {
+          "type": "object",
+          "required": [
+            "enabled",
+            "loaded",
+            "source"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "loaded": {
+              "type": "boolean"
+            },
+            "source": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "required": [
+        "test",
+        "message",
+        "weight",
+        "fatal",
+        "category"
+      ],
+      "properties": {
+        "test": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string"
+        },
+        "weight": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fatal": {
+          "type": "boolean"
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  },
+  "properties": {
+    "_meta": {
+      "$ref": "#/$defs/meta"
+    },
+    "name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "rating": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10
+    },
+    "level": {
+      "type": "string"
+    },
+    "problems": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    },
+    "advisories": {
+      "type": "array",
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/finding"
+          },
+          {
+            "properties": {
+              "fatal": {
+                "const": false
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "required": [
+    "name",
+    "rating",
+    "level",
+    "problems",
+    "advisories",
+    "_meta"
+  ],
+  "not": {
+    "required": [
+      "error"
+    ]
+  }
+}

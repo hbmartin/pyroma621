@@ -8,6 +8,7 @@ copyright = "Copyright &copy; Pyroma contributors"
 nav = [
   { "Home" = "index.md" },
   { "Rules" = "rules.md" },
+  { "JSON reports" = "json.md" },
   { "Development" = "development.md" },
   { "Upgrading" = "upgrading.md" },
   { "Changelog" = "changelog.md" },

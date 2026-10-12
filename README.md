@@ -23,7 +23,15 @@ It's written so that there are a library with methods to call from Python, as
 well as a script, also called pyroma.
 
 The complete documentation, including the upgrade guide and changelog, is
-published at [hbmartin.github.io/pyroma](https://hbmartin.github.io/pyroma/).
+published at [hbmartin.github.io/pyroma621](https://hbmartin.github.io/pyroma621/).
+
+Install this distribution with:
+
+```console
+$ pip install pyroma621
+$ pyroma --version
+pyroma621 6.1.0
+```
 
 It can be run on a project directory before making a release:
 
@@ -83,10 +91,18 @@ For machine-readable output, pass `--format json`:
 $ pyroma --format json .
 ```
 
+Rating and error reports include `_meta.schema_version`, the installed checker
+version, and the effective policy when settings have been resolved. See the
+[JSON contract and downloadable schemas](https://hbmartin.github.io/pyroma621/json/).
+Invalid arguments also produce JSON when explicitly requested, for example
+`pyroma --format json --min 11 .` reports `UsageError`.
+
 ## Exit codes
 
 - `0`: The package rated equal to or above the `--min` rating (default 8).
-- `2`: The package rated below the `--min` rating.
+- `2`: The package rated below the `--min` rating, or command-line arguments
+  were invalid. With `--format json`, a low rating contains `rating`; an
+  argument failure contains `error.type = "UsageError"` and no rating.
 - `1`: Used by the `zest.releaser` integration when you choose to abort
   the release after a low rating.
 - `3`: An error prevented rating the package: it could not be found or
@@ -114,6 +130,12 @@ Settings can live in the rated project's `pyproject.toml`:
 min-rating = 10
 skip-tests = ["practice"]
 ```
+
+Only directory mode reads `[tool.pyroma]` from the target project's
+`pyproject.toml`. File and PyPI modes use CLI settings and defaults. Explicit
+flags override configuration; `--no-config` disables discovery. JSON reports
+record whether configuration was loaded and its source. `--no-advisories`
+hides findings in text output; JSON always retains them.
 
 This is the list of checks that are currently performed:
 
@@ -195,8 +217,8 @@ commit your work by adding the following to your `.pre-commit-config.yaml`:
 
 ```yaml
 repos:
-  - repo: https://github.com/regebro/pyroma
-    rev: "5.0b2"
+  - repo: https://github.com/hbmartin/pyroma621
+    rev: "6.1.0"
     hooks:
       - id: pyroma
 ```

@@ -26,8 +26,8 @@ repos:
         types_or: [python, pyi]
         require_serial: true
 
-  - repo: https://github.com/regebro/pyroma
-    rev: '5.0b2'
+  - repo: https://github.com/hbmartin/pyroma621
+    rev: '6.1.0'
     hooks:
       - id: pyroma
 

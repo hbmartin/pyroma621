@@ -1,6 +1,20 @@
 # Changelog
 
-## 6.1.0 (unreleased)
+## Unreleased
+
+- Invalid command-line arguments now produce a JSON `UsageError` when JSON
+  output is requested. Usage errors retain exit code 2; low-rating reports
+  remain distinguishable by their `rating` field. Threshold and skip-list
+  diagnostics identify accepted values.
+- Added `pyroma --version`, which requires no target or package build.
+- JSON reports now identify schema version 1 and include effective CLI policy
+  and configuration provenance. Downloadable rating and error schemas ship
+  with the package and documentation.
+- Corrected documentation links, the fork's pre-commit installation example,
+  and published release dates. Tagged-release validation checks documentation
+  and installation evidence; installed-artifact tests also cover Python 3.13.
+
+## 6.1.0 (2026-10-12)
 
 - Removed the published `test` extra. Contributor dependencies now use
   `[dependency-groups].test`; install with `uv sync --group test`.
@@ -109,7 +123,7 @@
   keeping manifest checks consistent with version-controlled files. Repository
   ignores also exclude `.DS_Store` for contributors without global ignores.
 
-## 6.0.0 (unreleased)
+## 6.0.0 (2026-08-01)
 
 - Result dataclasses `TestResult`, `Problem`, and `RatedProject` now require
   keyword arguments when constructed directly. `ratings.rate()` and

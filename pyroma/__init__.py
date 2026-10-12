@@ -2,11 +2,13 @@
 
 import sys
 from argparse import ArgumentParser, ArgumentTypeError, Namespace
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import suppress
+from dataclasses import asdict
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Never, TypeVar, cast, overload
 
 from pyroma import config as config_module
 from pyroma import distributiondata, projectdata, pypidata, ratings, report, rules
@@ -18,6 +20,66 @@ _RELEASE_MIN_RATING = 8
 # The distribution name differs from the import name; version lookups must
 # use the former.
 _DISTRIBUTION_NAME = "pyroma621"
+_Namespace = TypeVar("_Namespace")
+
+
+class UsageError(Exception):
+    """Raised when invalid command-line arguments prevent rating."""
+
+
+def _checker_version() -> str | None:
+    with suppress(PackageNotFoundError):
+        return package_version(_DISTRIBUTION_NAME)
+    return None
+
+
+def _version_meta() -> dict[str, object]:
+    version = _checker_version()
+    return {"pyroma": version} if version is not None else {}
+
+
+def _requested_format(arguments: Sequence[str]) -> str | None:
+    """Find the last exact format option, even after an invalid argument."""
+    output_format = None
+    for index, argument in enumerate(arguments):
+        if argument == "--":
+            break
+        if argument.startswith("--format="):
+            output_format = argument.partition("=")[2]
+        elif argument == "--format":
+            output_format = arguments[index + 1] if index + 1 < len(arguments) else None
+    return output_format
+
+
+class _ArgumentParser(ArgumentParser):
+    """Keep argparse's text behavior and expose JSON usage failures."""
+
+    _json_errors = False
+
+    @overload
+    def parse_args(self, args: Iterable[str] | None = None, namespace: None = None) -> Namespace: ...
+
+    @overload
+    def parse_args(self, args: Iterable[str] | None, namespace: _Namespace) -> _Namespace: ...
+
+    @overload
+    def parse_args(self, *, namespace: _Namespace) -> _Namespace: ...
+
+    def parse_args(
+        self, args: Iterable[str] | None = None, namespace: _Namespace | None = None
+    ) -> Namespace | _Namespace:
+        arguments = list(sys.argv[1:] if args is None else args)
+        self._json_errors = _requested_format(arguments) == "json"
+        # Python 3.14 introduced colored argparse diagnostics.
+        cast("Any", self).color = not self._json_errors
+        if namespace is None:
+            return super().parse_args(arguments)
+        return super().parse_args(arguments, namespace)
+
+    def error(self, message: str) -> Never:
+        if self._json_errors:
+            raise UsageError(message)
+        super().error(message)
 
 
 def zester(data: "dict[str, Any]") -> None:
@@ -45,16 +107,10 @@ def min_argument(arg: str) -> int:
     try:
         f = int(arg)
     except ValueError as e:
-        message = "Must be an integer between 1 and 10"
+        message = f"--min must be an integer between 1 and 10, not {arg!r}"
         raise ArgumentTypeError(message) from e
-    if f < 0:
-        message = "Oh, it's not THAT bad, trust me."
-        raise ArgumentTypeError(message)
-    if f < _MIN_RATING:
-        message = "Why run pyroma if you intend it to always pass?"
-        raise ArgumentTypeError(message)
-    if f > _MAX_RATING:
-        message = "Why run pyroma if you intend it to never pass?"
+    if not _MIN_RATING <= f <= _MAX_RATING:
+        message = f"--min must be an integer between 1 and 10, not {arg!r}"
         raise ArgumentTypeError(message)
     return f
 
@@ -111,7 +167,7 @@ def skip_tests(arg: str) -> "list[str]":
         return test_to_skip
 
     # It returned None, so there was an invalid test mentioned, or none at all
-    message = f"Invalid tests listed. {_available_names_message()}"
+    message = f"Invalid tests listed in --skip-tests: {arg!r}. {_available_names_message()}"
     raise ArgumentTypeError(message)
 
 
@@ -126,10 +182,13 @@ def _validate_config_skips(names: "list[str]") -> None:
 
 def _build_parser() -> ArgumentParser:
     """Construct the command-line argument parser."""
-    parser = ArgumentParser()
+    parser = _ArgumentParser()
     # argparse only grew the color attribute in Python 3.14.
     cast_parser = cast("Any", parser)
     cast_parser.color = True
+    parser.add_argument(
+        "--version", action="version", version=f"{_DISTRIBUTION_NAME} {_checker_version() or 'unknown'}"
+    )
     parser.add_argument(
         "package",
         help="A python package, can be a directory, a distribution file or a PyPI package name.",
@@ -246,7 +305,9 @@ def _build_parser() -> ArgumentParser:
     return parser
 
 
-def _resolve_config(args: Namespace, mode: str) -> config_module.Config:
+def _resolve_config(
+    args: Namespace, mode: str, *, provenance: config_module.ConfigSource | None = None
+) -> config_module.Config:
     """Merge command-line arguments over the project's configuration.
 
     An explicitly supplied flag always wins; the configuration only fills in
@@ -254,7 +315,7 @@ def _resolve_config(args: Namespace, mode: str) -> config_module.Config:
     """
     settings = config_module.Config()
     if args.use_config and mode == "directory":
-        settings = config_module.from_directory(args.package)
+        settings = config_module.from_directory(args.package, provenance=provenance)
         _validate_config_skips(settings.skip_tests)
 
     skip = args.skip_tests or settings.skip_tests
@@ -280,11 +341,19 @@ def _resolve_mode(mode: "str | None", package: str) -> str:
 
 def main() -> None:
     """Run the command-line interface."""
-    args = _build_parser().parse_args()
+    try:
+        args = _build_parser().parse_args()
+    except UsageError as error:
+        print(report.format_json_error(error, _version_meta()))
+        sys.exit(2)
     mode = _resolve_mode(args.mode, args.package)
+    meta = _json_meta(mode, args.package)
+    provenance = config_module.ConfigSource(enabled=args.use_config and mode == "directory")
 
     try:
-        settings = _resolve_config(args, mode)
+        settings = _resolve_config(args, mode, provenance=provenance)
+        meta["policy"] = {**asdict(settings), "skip_tests": sorted(set(settings.skip_tests))}
+        meta["config"] = asdict(provenance)
         rating = run(
             mode,
             args.package,
@@ -294,6 +363,7 @@ def main() -> None:
             args.output_format,
             strict=settings.strict,
             show_advisories=settings.show_advisories,
+            report_meta=meta,
         )
     except (
         OSError,
@@ -302,8 +372,11 @@ def main() -> None:
         config_module.ConfigError,
         ValueError,
     ) as e:
+        if isinstance(e, config_module.ConfigError):
+            provenance.loaded = False
         if args.output_format == "json":
-            print(report.format_json_error(e, _json_meta(mode, args.package)))
+            meta["config"] = asdict(provenance)
+            print(report.format_json_error(e, meta))
         else:
             print(f"Error: {e}", file=sys.stderr)
         sys.exit(3)
@@ -312,11 +385,8 @@ def main() -> None:
     sys.exit(0)
 
 
-def _json_meta(mode: str, argument: str) -> "dict[str, str]":
-    meta = {"package": argument, "mode": mode}
-    with suppress(PackageNotFoundError):
-        meta["pyroma"] = package_version(_DISTRIBUTION_NAME)
-    return meta
+def _json_meta(mode: str, argument: str) -> dict[str, object]:
+    return {"package": argument, "mode": mode, **_version_meta()}
 
 
 def _get_data(mode: str, argument: str, index_url: "str | None" = None) -> metadata_types.Metadata:
@@ -331,7 +401,7 @@ def _get_data(mode: str, argument: str, index_url: "str | None" = None) -> metad
 def _emit(
     rated: ratings.RatedProject,
     output_format: str,
-    meta: "dict[str, str]",
+    meta: Mapping[str, object],
     *,
     quiet: bool,
     show_advisories: bool = True,
@@ -355,6 +425,7 @@ def run(  # noqa: PLR0913 - The positional API is retained for compatibility.
     *,
     strict: bool = False,
     show_advisories: bool = True,
+    report_meta: Mapping[str, object] | None = None,
 ) -> int:
     """Rate a package and print the result. Returns the rating as an int."""
     verbose = not quiet and output_format == "text"
@@ -372,7 +443,7 @@ def run(  # noqa: PLR0913 - The positional API is retained for compatibility.
         _emit(
             rated,
             output_format,
-            _json_meta(mode, argument),
+            report_meta if report_meta is not None else _json_meta(mode, argument),
             quiet=quiet,
             show_advisories=show_advisories,
         )
