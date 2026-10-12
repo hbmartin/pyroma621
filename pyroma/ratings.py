@@ -1353,7 +1353,11 @@ def _relative_description_targets(description: str, content_type: str) -> "list[
     # Preserve document order without repeatedly searching the output list.
     found: list[str] = []
     seen: set[str] = set()
+    seen_raw: set[str] = set()
     for target in targets:
+        if target in seen_raw:
+            continue
+        seen_raw.add(target)
         if not _is_relative_target(target):
             continue
         display = display_destination(target) if content_type == "text/markdown" else target

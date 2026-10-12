@@ -9,7 +9,7 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 from pyroma._markdown import destinations
-from pyroma.ratings import _relative_description_targets
+from pyroma.ratings import ReadmeRelativeLinks, _relative_description_targets
 
 from .strategies import WORDS, markdown_targets
 
@@ -121,6 +121,15 @@ def test_ambiguous_or_unresolved_destinations_are_skipped(source: str) -> None:
         ("docs/a%E2%80%AEb.md", "docs/a%E2%80%AEb.md", "docs/a%E2%80%AEb.md"),
         ("docs/a%E2%80%A8b.md", "docs/a%E2%80%A8b.md", "docs/a%E2%80%A8b.md"),
         ("docs/a%E2%80%A9b.md", "docs/a%E2%80%A9b.md", "docs/a%E2%80%A9b.md"),
+        ("images/👨\u200d👩.png", "images/%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9.png", "images/👨\u200d👩.png"),
+        ("docs/می\u200cروم.md", "docs/%D9%85%DB%8C%E2%80%8C%D8%B1%D9%88%D9%85.md", "docs/می\u200cروم.md"),
+        ("docs/a\u00adb.md", "docs/a%C2%ADb.md", "docs/a%C2%ADb.md"),
+        ("docs/a\u200bb.md", "docs/a%E2%80%8Bb.md", "docs/a%E2%80%8Bb.md"),
+        ("docs/a\u00a0b.md", "docs/a%C2%A0b.md", "docs/a%C2%A0b.md"),
+        ("docs/a\u202fb.md", "docs/a%E2%80%AFb.md", "docs/a%E2%80%AFb.md"),
+        ("docs/a\u3000b.md", "docs/a%E3%80%80b.md", "docs/a%E3%80%80b.md"),
+        ("docs/a%ffb.md", "docs/a%FFb.md", "docs/a%FFb.md"),
+        ("docs/%61.md", "docs/%61.md", "docs/a.md"),
         ("%20https://example.invalid", "%20https://example.invalid", " https://example.invalid"),
     ],
 )
@@ -130,7 +139,7 @@ def test_markdown_and_html_share_urls_but_display_readable_paths(target: str, ca
     assert _relative_description_targets(source, "text/markdown") == [display]
 
 
-@given(st.text(alphabet="abcéñ漢🙂", min_size=1, max_size=12))
+@given(st.text(alphabet="abcéñ漢🙂\u200c\u200d", min_size=1, max_size=12))
 def test_unicode_spellings_deduplicate_across_markdown_html_and_images(stem: str) -> None:
     target = f"docs/{stem}.md"
     canonical = quote(target, safe="/")
@@ -155,6 +164,24 @@ def test_escape_case_variants_deduplicate_by_display_destination() -> None:
         "docs/a/b.md",
         "docs/last.md",
     ]
+
+
+def test_invalid_utf8_duplicates_do_not_consume_the_finding_cap() -> None:
+    targets = ["docs/a%ffb.md", "docs/a%FFb.md", "docs/2.md", "docs/3.md", "docs/4.md", "docs/5.md", "docs/6.md"]
+    source = " ".join(f'[x]({target}) <a href="{target}">x</a>' for target in targets)
+    assert destinations(source)[:4] == ["docs/a%FFb.md"] * 4
+    assert _relative_description_targets(source, "text/markdown") == ["docs/a%FFb.md", *targets[2:]]
+    result = ReadmeRelativeLinks().test({"description": source, "description-content-type": "text/markdown"})
+    assert result.outcome is False
+    assert result.message is not None
+    assert result.message.count("  docs/a%FFb.md\n") == 1
+    assert "  docs/5.md\n  (and 1 more)" in result.message
+    assert "docs/6.md" not in result.message
+
+
+def test_unreserved_escape_spellings_still_deduplicate() -> None:
+    source = '[x](docs/%61.md) <a href="docs/a.md">x</a> ![x](docs/%61.md) [last](docs/last.md)'
+    assert _relative_description_targets(source, "text/markdown") == ["docs/a.md", "docs/last.md"]
 
 
 @pytest.mark.parametrize(

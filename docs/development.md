@@ -220,7 +220,8 @@ from the `pyroma/testdata/complete` directory.
 
 ## Publishing
 
-Creating a GitHub release starts `.github/workflows/publish.yml`. Its reusable
+Publishing a GitHub release, directly or from a saved draft, starts
+`.github/workflows/publish.yml`. Its reusable
 package-validation workflow checks the lockfile, builds an sdist and a wheel from
 that sdist, and tests the installed wheel outside the checkout on Python 3.11 and
 3.14. Property and CI gate tests come from the sdist; unit tests and fixtures come
@@ -231,14 +232,17 @@ The release tag (with an optional single lowercase leading `v`) must match proje
 sdist versions under PEP 440 comparison; for example, `6.2.0-rc1` and `6.2.0rc1`
 are equivalent. Installed metadata and CLI reports use the same comparison.
 Version tags begin with an ASCII digit after the optional prefix and contain no
-whitespace. Uppercase and repeated prefixes are rejected; release-component
+whitespace. Tag policy is checked before version parsing so invalid prefixes
+and whitespace produce a release-tag diagnostic. Uppercase and repeated prefixes
+are rejected; release-component
 aliases such as `v6.2` and `v6.2.0.0` remain equivalent to version `6.2.0`.
 Publishing consumes the same downloaded distributions after validation succeeds,
 from the `pypi` environment using Trusted Publishing. No
 build/test job receives OIDC credentials. PyPI's publisher must identify this
 repository, `publish.yml`, and the `pypi` environment.
 
-Exercise the identical release validation without publishing:
+Before publishing a GitHub release, check out its intended tag or commit and
+exercise the identical release validation locally without publishing:
 
 ```console
 uv lock --check
@@ -248,6 +252,11 @@ uv run --locked --no-default-groups python ci/package_artifacts.py validate --wo
 
 The work directory must not already exist. GitHub's "Validate package artifacts"
 workflow also accepts a release tag through manual dispatch and never publishes.
+Select the intended tag as the dispatch ref and supply it as `release-tag` to
+preflight the exact release revision. Wait for validation to succeed before
+publishing the release. This preflight is manual: the automated gate blocks
+PyPI upload, while a failed release validation can leave an existing GitHub
+release without a PyPI upload.
 It runs on pull requests, `master` pushes, manual dispatch, and release workflow
 calls. Tag pushes do not run a separate validation matrix before release
 validation. The test and lint workflow triggers are unchanged.
@@ -271,10 +280,19 @@ Fixtures are copied into temporary Git repositories so manifest tests work with
 an installed wheel as well as a checkout. Setup publishes the temporary path
 after copying and Git initialization succeed. Teardown restores the original
 source path, supporting repeated module runs and harmless repeated cleanup.
-Fixture Git commands strip inherited `GIT_*` variables and set
-`GIT_CONFIG_GLOBAL` to the null device and `GIT_CONFIG_NOSYSTEM=1`. Global and
-system templates, hook paths, and exclusions cannot affect fixture repositories;
-caller indexes and environments remain untouched and all fixture archives are tracked.
+Fixture Git subprocesses strip inherited `GIT_*` variables and use temporary
+HOME/XDG directories, `GIT_CONFIG_NOSYSTEM=1`, and `GIT_ATTR_NOSYSTEM=1`. They
+explicitly select empty template/hook directories and null external attributes
+and exclusions files. This isolation works with Git versions before 2.32,
+without depending on `GIT_CONFIG_GLOBAL`. Hostile configuration probes cover
+global attributes and executable `post-index-change` hooks; caller indexes and
+environments remain untouched and all fixture archives are tracked.
+
+Typing scans recognize regular `pyvenv.cfg` files and symlinks to regular files
+without entering the environment's installed packages. Broken or directory-target
+config symlinks do not identify an environment. Conda detection still requires a
+regular `conda-meta` directory and regular `history` file; symlinks there do not
+prune sources. Symlinked sources and typing markers do not supply typing evidence.
 
 CI pins uv 0.13.0, actionlint 1.7.12, and ShellCheck 0.11.0. Workflow-checker
 archives are verified against pinned SHA-256 digests. Strict self-rating and
@@ -310,7 +328,9 @@ Audit service failures also fail the job with captured tool diagnostics.
 Accepted batches replay their stdout and stderr, including batches whose findings
 are covered by exceptions. Complete reports remain available when findings or
 unused exceptions fail the policy gate; failed inputs and partial audits cannot
-leave a stale report that appears current. Audit tests use a fixed UTC date.
+leave a stale report that appears current. The CLI computes today's UTC date once
+and passes it explicitly to the audit helper. Audit tests supply fixed dates;
+a separate CLI regression verifies the UTC/local date boundary.
 Unused exceptions list any new unaccepted findings alongside the cleanup error.
 No automatic fixes or blanket package exclusions are performed.
 

@@ -1,12 +1,12 @@
 """Audit every locked registry version, regardless of environment markers."""
 
 import argparse
-import datetime
 import json
 import re
 import subprocess
 import sys
 import tomllib
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -37,7 +37,7 @@ def locked_requirements(lock: Path) -> dict[tuple[str, str], set[str]]:
     return entries
 
 
-def load_exceptions(path: Path, today: datetime.date) -> list[dict[str, Any]]:
+def load_exceptions(path: Path, today: date) -> list[dict[str, Any]]:
     """Require specific, explained exceptions with bounded lifetimes."""
     entries = tomllib.loads(path.read_text()).get("exceptions")
     if not isinstance(entries, list):
@@ -57,12 +57,10 @@ def load_exceptions(path: Path, today: datetime.date) -> list[dict[str, Any]]:
             message = "Exception needs an owner"
             raise ValueError(message)
         created, expires = entry.get("created"), entry.get("expires")
-        if type(created) is not datetime.date or type(expires) is not datetime.date:
+        if type(created) is not date or type(expires) is not date:
             message = "Exception created/expires must be TOML dates"
             raise ValueError(message)
-        if not created <= today < expires or not datetime.timedelta() < expires - created <= datetime.timedelta(
-            days=30
-        ):
+        if not created <= today < expires or not timedelta() < expires - created <= timedelta(days=30):
             message = f"Expired, future, or overlong exception: {entry['advisory']}"
             raise ValueError(message)
         key = entry["advisory"], canonicalize_name(entry["package"]), entry["version"]
@@ -223,13 +221,13 @@ def audit_batch(requirements_path: Path, report_path: Path, expected: set[tuple[
     return report
 
 
-def audit(lock: Path, exceptions_path: Path, report_path: Path) -> None:
+def audit(lock: Path, exceptions_path: Path, report_path: Path, *, today: date) -> None:
     """Audit all versions and publish only a complete merged report."""
     inventory_path = report_path.with_suffix(".requirements.txt")
     report_path.unlink(missing_ok=True)
     inventory_path.unlink(missing_ok=True)
     requirements = locked_requirements(lock)
-    exceptions = load_exceptions(exceptions_path, datetime.datetime.now(datetime.UTC).date())
+    exceptions = load_exceptions(exceptions_path, today)
     inventory_path.write_text(requirement_text(requirements), encoding="utf-8")
     merged: dict[str, Any] = {"dependencies": [], "fixes": []}
     with TemporaryDirectory(prefix="pyroma-audit-") as directory:
@@ -258,7 +256,7 @@ def main() -> None:
     parser.add_argument("--report", type=Path, default=Path("audit-report.json"))
     args = parser.parse_args()
     try:
-        audit(args.lock, args.exceptions, args.report)
+        audit(args.lock, args.exceptions, args.report, today=datetime.now(UTC).date())
     except (OSError, ValueError, KeyError, TypeError) as error:
         parser.exit(1, f"Audit failed: {error}\n")
 

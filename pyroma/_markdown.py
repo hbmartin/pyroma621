@@ -1,5 +1,6 @@
 """Extract CommonMark and HTML destinations without rendering the document."""
 
+import re
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any
 from unicodedata import category
@@ -14,7 +15,9 @@ if TYPE_CHECKING:
 
 _MARKDOWN = MarkdownIt("commonmark", {"html": True})
 _LITERAL_TAGS = frozenset({"pre", "code", "script", "style"})
-_CONTROL_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+_ESCAPED_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Zs"})
+_READABLE_FORMATTING = frozenset({" ", "\u200c", "\u200d"})
+_PERCENT_ESCAPE_RE = re.compile(r"%[0-9a-fA-F]{2}")
 
 
 class _HTMLTargets(HTMLParser):
@@ -64,7 +67,10 @@ def display_destination(target: str) -> str:
     except UnicodeDecodeError:
         return target
     readable = _MARKDOWN.normalizeLinkText(target)
-    return "".join(quote(char, safe="") if category(char) in _CONTROL_CATEGORIES else char for char in readable)
+    return "".join(
+        quote(char, safe="") if char not in _READABLE_FORMATTING and category(char) in _ESCAPED_CATEGORIES else char
+        for char in readable
+    )
 
 
 def _without_literal_definitions(source: str, blocks: "list[Token]") -> str:
@@ -108,4 +114,7 @@ def destinations(source: str) -> list[str]:
                 if isinstance(target, str) and target:
                     html.targets.append(target)
     html.close()
-    return [_MARKDOWN.normalizeLink(target) for target in html.targets]
+    return [
+        _PERCENT_ESCAPE_RE.sub(lambda match: match[0].upper(), _MARKDOWN.normalizeLink(target))
+        for target in html.targets
+    ]

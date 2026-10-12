@@ -144,6 +144,24 @@ def _has_direct_sources(path: Path) -> bool:
     return False
 
 
+def _environment_directory(path: Path) -> bool:
+    """Recognize environments, treating inaccessible markers conservatively."""
+    try:
+        if S_ISREG((path / "pyvenv.cfg").stat().st_mode):
+            return True
+    except (FileNotFoundError, NotADirectoryError):
+        pass
+    except OSError:
+        return True
+    conda_metadata = path / "conda-meta"
+    try:
+        return S_ISDIR(conda_metadata.lstat().st_mode) and S_ISREG((conda_metadata / "history").lstat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+
+
 def _source_child(root: Path, child: str, *, project_boundary: bool) -> bool:
     """Retain source directories, skipping inaccessible entries individually."""
     if child.startswith(".") or child in _EXCLUDED_SOURCE_DIRS:
@@ -154,16 +172,8 @@ def _source_child(root: Path, child: str, *, project_boundary: bool) -> bool:
             return False
     except OSError:
         return False
-    for marker in (path / "pyvenv.cfg", path / "conda-meta" / "history"):
-        try:
-            if marker.name == "history" and not S_ISDIR(marker.parent.lstat().st_mode):
-                continue
-            if S_ISREG(marker.lstat().st_mode):
-                return False
-        except (FileNotFoundError, NotADirectoryError):
-            pass
-        except OSError:
-            return False
+    if _environment_directory(path):
+        return False
     return not project_boundary or child not in _GENERATED_SOURCE_DIRS or _has_direct_sources(path)
 
 
