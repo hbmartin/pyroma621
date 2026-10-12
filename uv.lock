@@ -1965,7 +1965,7 @@ wheels = [
 
 [[package]]
 name = "pyroma621"
-version = "6.1.0"
+version = "6.2.0.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "build" },
@@ -1994,6 +1994,8 @@ dev = [
     { name = "ty" },
 ]
 docs = [
+    { name = "packaging" },
+    { name = "pyyaml" },
     { name = "zensical" },
 ]
 lint = [
@@ -2004,15 +2006,21 @@ quality = [
     { name = "lizard" },
     { name = "semgrep" },
 ]
+release = [
+    { name = "packaging" },
+    { name = "pyyaml" },
+]
 test = [
     { name = "check-manifest" },
     { name = "flit-core" },
     { name = "hypothesis" },
     { name = "jsonschema" },
+    { name = "packaging" },
     { name = "pep440" },
     { name = "pyproject-hooks" },
     { name = "pytest" },
     { name = "pytest-cov" },
+    { name = "pyyaml" },
     { name = "setuptools" },
     { name = "tox" },
     { name = "uv-build" },
@@ -2051,22 +2059,32 @@ dev = [
     { name = "ruff", specifier = "==0.15.22" },
     { name = "ty", specifier = ">=0.0.61" },
 ]
-docs = [{ name = "zensical", specifier = ">=0.0.50" }]
+docs = [
+    { name = "packaging", specifier = ">=26.3" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "zensical", specifier = ">=0.0.50" },
+]
 lint = [{ name = "ruff", specifier = "==0.15.22" }]
 quality = [
     { name = "deptry", specifier = ">=0.25.1" },
     { name = "lizard", specifier = ">=1.23.0" },
     { name = "semgrep", specifier = "==1.180.0" },
 ]
+release = [
+    { name = "packaging", specifier = ">=26.3" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+]
 test = [
     { name = "check-manifest" },
     { name = "flit-core", specifier = ">=3.4,<4" },
     { name = "hypothesis", specifier = ">=6.156.7" },
     { name = "jsonschema", specifier = ">=4.25.1" },
+    { name = "packaging", specifier = ">=26.3" },
     { name = "pep440" },
     { name = "pyproject-hooks", specifier = ">=1.3.3" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "setuptools", specifier = ">=77" },
     { name = "tox", specifier = ">=4.22" },
     { name = "uv-build", specifier = ">=0.13.0,<0.14.0" },

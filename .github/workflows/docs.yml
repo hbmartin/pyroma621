@@ -25,7 +25,7 @@ jobs:
         with:
           version: '0.13.0'
       - name: Prepare downloadable report schemas
-        run: uv run --locked --no-default-groups python ci/release_docs.py schemas
+        run: uv run --locked --only-group docs python ci/release_docs.py schemas
       - name: Build documentation
         run: uv run --locked --only-group docs zensical build --clean --strict
       - name: Configure GitHub Pages

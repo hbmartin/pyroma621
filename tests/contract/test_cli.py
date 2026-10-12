@@ -6,8 +6,8 @@ import json
 import subprocess
 import sys
 from argparse import Namespace
+from collections.abc import Callable
 from importlib.metadata import PackageNotFoundError
-from importlib.resources import files
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -27,12 +27,6 @@ def invoke(monkeypatch: pytest.MonkeyPatch, arguments: list[str]) -> tuple[int, 
     return raised.value.code, out.getvalue(), err.getvalue()
 
 
-def validator(kind: str) -> Draft202012Validator:
-    schema = json.loads(files("pyroma").joinpath("schemas", "v1", f"{kind}.json").read_text(encoding="utf-8"))
-    Draft202012Validator.check_schema(schema)
-    return Draft202012Validator(schema)
-
-
 @pytest.mark.parametrize(
     ("arguments", "message"),
     [(["--min", value, "."], "integer between 1 and 10") for value in ("-1", "0", "11", "abc", "1.5")]
@@ -49,7 +43,11 @@ def validator(kind: str) -> Draft202012Validator:
 )
 @pytest.mark.parametrize("format_args", [["--format", "json"], ["--format=json"]])
 def test_usage_errors(
-    monkeypatch: pytest.MonkeyPatch, arguments: list[str], message: str, format_args: list[str]
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+    message: str,
+    format_args: list[str],
+    validator: Callable[[str], Draft202012Validator],
 ) -> None:
     blocked = Mock(side_effect=AssertionError("Usage errors must not read configuration or packages"))
     monkeypatch.setattr(pyroma, "_resolve_config", blocked)
@@ -106,7 +104,7 @@ def test_version_avoids_rating(monkeypatch: pytest.MonkeyPatch, arguments: list[
     blocked.assert_not_called()
 
 
-def test_uninstalled_version(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_uninstalled_version(monkeypatch: pytest.MonkeyPatch, validator: Callable[[str], Draft202012Validator]) -> None:
     monkeypatch.setattr(pyroma, "package_version", Mock(side_effect=PackageNotFoundError))
     assert invoke(monkeypatch, ["--version"]) == (0, "pyroma621 unknown\n", "")
     _, out, _ = invoke(monkeypatch, ["--format=json", "--min=11", "."])
@@ -141,7 +139,13 @@ def test_parser_retains_namespace_and_iterable_support() -> None:
 
 @pytest.mark.parametrize("mode", ["directory", "file", "pypi"])
 @pytest.mark.parametrize("disable", [False, True])
-def test_policy_discovery(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str, disable: bool) -> None:
+def test_policy_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mode: str,
+    disable: bool,
+    validator: Callable[[str], Draft202012Validator],
+) -> None:
     source = tmp_path / "pyproject.toml"
     source.write_text('[tool.pyroma]\nmin-rating = 10\nstrict = true\nadvisories = false\nskip-tests = ["practice"]\n')
     reader = Mock(wraps=projectdata.read_pyproject)
@@ -193,7 +197,12 @@ def test_cli_overrides_and_canonical_skips(monkeypatch: pytest.MonkeyPatch, tmp_
 
 
 @pytest.mark.parametrize("toml", [None, '[project]\nname="example"\n', "[project\n"])
-def test_absent_and_malformed_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, toml: str | None) -> None:
+def test_absent_and_malformed_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    toml: str | None,
+    validator: Callable[[str], Draft202012Validator],
+) -> None:
     source = tmp_path / "pyproject.toml"
     if toml is not None:
         source.write_text(toml)
@@ -212,7 +221,12 @@ def test_absent_and_malformed_config(monkeypatch: pytest.MonkeyPatch, tmp_path: 
 
 
 @pytest.mark.parametrize("table", ["min-rating=11", 'skip-tests=["not-a-rule"]'])
-def test_config_validation_has_no_effective_policy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, table: str) -> None:
+def test_config_validation_has_no_effective_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    table: str,
+    validator: Callable[[str], Draft202012Validator],
+) -> None:
     source = tmp_path / "pyproject.toml"
     source.write_text(f"[tool.pyroma]\n{table}\n")
     code, out, err = invoke(monkeypatch, ["--format=json", str(tmp_path)])
@@ -226,7 +240,12 @@ def test_config_validation_has_no_effective_policy(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.parametrize("strict", [False, True])
-def test_real_rating_schema(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, strict: bool) -> None:
+def test_real_rating_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    strict: bool,
+    validator: Callable[[str], Draft202012Validator],
+) -> None:
     data = COMPLETE.copy()
     data.pop("keywords")
     monkeypatch.setattr(pyroma, "_get_data", lambda *_args, **_kwargs: data)
@@ -244,7 +263,9 @@ def test_real_rating_schema(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, str
         assert document["rating"] == 9
 
 
-def test_fatal_rating_and_configuration_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_fatal_rating_and_configuration_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, validator: Callable[[str], Draft202012Validator]
+) -> None:
     data = COMPLETE.copy()
     data.pop("name")
     monkeypatch.setattr(pyroma, "_get_data", lambda *_args, **_kwargs: data)
@@ -272,7 +293,7 @@ def test_fatal_rating_and_configuration_error(monkeypatch: pytest.MonkeyPatch, t
 
 
 @pytest.mark.parametrize("rating", [0, 10])
-def test_rating_boundaries_and_additions(rating: int) -> None:
+def test_rating_boundaries_and_additions(rating: int, validator: Callable[[str], Draft202012Validator]) -> None:
     rated = ratings.RatedProject(name=None, rating=rating, level=ratings.LEVELS[rating], problems=[])
     meta = {"schema_version": 99, "future": {"value": True}}
     document = json.loads(report.format_json(rated, meta))
@@ -284,7 +305,7 @@ def test_rating_boundaries_and_additions(rating: int) -> None:
 
 
 @pytest.mark.parametrize("field", ["rating", "problems", "advisories", "_meta"])
-def test_schema_rejects_missing_or_wrong_fields(field: str) -> None:
+def test_schema_rejects_missing_or_wrong_fields(field: str, validator: Callable[[str], Draft202012Validator]) -> None:
     document = json.loads(report.format_json(ratings.RatedProject(name="x", rating=10, level="x", problems=[])))
     invalid = {key: value for key, value in document.items() if key != field}
     with pytest.raises(ValidationError):
@@ -294,7 +315,7 @@ def test_schema_rejects_missing_or_wrong_fields(field: str) -> None:
         validator("rating").validate(document)
 
 
-def test_schema_finding_and_document_discriminators() -> None:
+def test_schema_finding_and_document_discriminators(validator: Callable[[str], Draft202012Validator]) -> None:
     problem = ratings.Problem(test="FutureRule", message="x", weight=1, fatal=False, category="future")
     rated = ratings.RatedProject(name="x", rating=0, level="x", problems=[problem])
     document = json.loads(report.format_json(rated))
@@ -307,3 +328,104 @@ def test_schema_finding_and_document_discriminators() -> None:
     error["rating"] = 0
     with pytest.raises(ValidationError):
         validator("error").validate(error)
+
+
+def test_schemas_share_metadata_definition(validator: Callable[[str], Draft202012Validator]) -> None:
+    assert validator("rating").schema["$defs"]["meta"] == validator("error").schema["$defs"]["meta"]
+
+
+@pytest.mark.parametrize("arguments", [["--form=json", "."], ["--fo", "json", "."], ["--vers"]])
+@pytest.mark.parametrize("json_requested", [False, True])
+def test_abbreviated_options_are_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+    json_requested: bool,
+    validator: Callable[[str], Draft202012Validator],
+) -> None:
+    blocked = Mock(side_effect=AssertionError("Invalid options must not inspect a target"))
+    monkeypatch.setattr(pyroma, "_resolve_config", blocked)
+    monkeypatch.setattr(pyroma, "_get_data", blocked)
+    arguments = [*arguments, *(["--format=json"] if json_requested else [])]
+    code, out, err = invoke(monkeypatch, arguments)
+    assert code == 2
+    if json_requested:
+        document = json.loads(out)
+        validator("error").validate(document)
+        assert document["error"]["type"] == "UsageError"
+        assert err == ""
+    else:
+        assert out == ""
+        assert "usage:" in err
+    blocked.assert_not_called()
+
+
+@pytest.mark.parametrize("first_method", ["parse_args", "parse_known_args"])
+@pytest.mark.parametrize("second_method", ["parse_args", "parse_known_args"])
+@pytest.mark.parametrize("json_first", [False, True])
+def test_parser_resets_error_format_and_color(
+    capsys: pytest.CaptureFixture, first_method: str, second_method: str, json_first: bool
+) -> None:
+    parser = pyroma._build_parser()
+    first_format = "json" if json_first else "text"
+    getattr(parser, first_method)([f"--format={first_format}", "."])
+    assert vars(parser)["color"] is not json_first
+    next_arguments = ["--min=11", "."] if json_first else ["--format=json", "--min=11", "."]
+    if json_first:
+        with pytest.raises(SystemExit) as raised:
+            getattr(parser, second_method)(next_arguments)
+        assert raised.value.code == 2
+        assert "usage:" in capsys.readouterr().err
+    else:
+        with pytest.raises(pyroma.UsageError, match="integer between 1 and 10"):
+            getattr(parser, second_method)(next_arguments)
+        assert capsys.readouterr().err == ""
+    assert vars(parser)["color"] is json_first
+
+
+def test_known_args_retains_namespace_iterators_and_unknowns() -> None:
+    namespace = Namespace(custom=True)
+    parsed, unknown = pyroma._build_parser().parse_known_args(iter(["--min=9", ".", "--future"]), namespace)
+    assert parsed is namespace
+    assert (parsed.min, parsed.custom, unknown) == (9, True, ["--future"])
+
+
+@pytest.mark.parametrize("arguments", [["--version"], ["--format=json", "--min=11", "."], ["--format=json", "package"]])
+@pytest.mark.parametrize("installed", [False, True])
+def test_version_is_resolved_once_per_invocation(
+    monkeypatch: pytest.MonkeyPatch, arguments: list[str], installed: bool
+) -> None:
+    versions = ["6.2.0.dev0", "6.3.0.dev0"]
+    lookup = Mock(side_effect=versions if installed else [PackageNotFoundError(), PackageNotFoundError()])
+    monkeypatch.setattr(pyroma, "package_version", lookup)
+    monkeypatch.setattr(pyroma, "_get_data", lambda *_args, **_kwargs: COMPLETE.copy())
+    for count, version in enumerate(versions, start=1):
+        _, out, err = invoke(monkeypatch, arguments)
+        assert err == ""
+        assert lookup.call_count == count
+        if arguments == ["--version"]:
+            assert out == f"pyroma621 {version if installed else 'unknown'}\n"
+        else:
+            meta = json.loads(out)["_meta"]
+            if installed:
+                assert meta["pyroma"] == version
+            else:
+                assert "pyroma" not in meta
+    assert all(call.args == ("pyroma621",) for call in lookup.call_args_list)
+
+
+@pytest.mark.parametrize("table", ["min-rating=11", 'skip-tests=["not-a-rule"]'])
+def test_configuration_provenance_is_validated_during_loading(tmp_path: Path, table: str) -> None:
+    source = tmp_path / "pyproject.toml"
+    source.write_text(f"[tool.pyroma]\n{table}\n", encoding="utf-8")
+    provenance = config.ConfigSource(loaded=True, source="previous-project")
+    with pytest.raises(config.ConfigError):
+        config.from_directory(tmp_path, provenance=provenance)
+    assert provenance == config.ConfigSource(enabled=True, loaded=False, source=str(source))
+
+
+def test_empty_configuration_is_loaded(tmp_path: Path) -> None:
+    source = tmp_path / "pyproject.toml"
+    source.write_text("[tool.pyroma]\n", encoding="utf-8")
+    provenance = config.ConfigSource()
+    assert config.from_directory(tmp_path, provenance=provenance) == config.Config()
+    assert provenance == config.ConfigSource(enabled=True, loaded=True, source=str(source))
