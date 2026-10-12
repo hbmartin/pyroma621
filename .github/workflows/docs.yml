@@ -30,12 +30,11 @@ jobs:
         run: uv run --locked --only-group docs zensical build --clean --strict
       - name: Check JSON guide and schema build outputs
         run: |
-          for file in site/json/index.html site/schemas/v1/rating.json site/schemas/v1/error.json; do
-            if [ ! -s "$file" ]; then
-              printf 'Missing or empty documentation output: %s\n' "$file" >&2
-              exit 1
-            fi
-          done
+          if [ ! -s site/json/index.html ]; then
+            printf 'Missing or empty documentation output: site/json/index.html\n' >&2
+            exit 1
+          fi
+          diff -r pyroma/schemas site/schemas
       - name: Configure GitHub Pages
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
@@ -61,6 +60,10 @@ jobs:
       cancel-in-progress: false
 
     steps:
+      - name: Checkout canonical schema inventory
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
@@ -68,7 +71,10 @@ jobs:
         env:
           DOCS_URL: ${{ steps.deployment.outputs.page_url }}
         run: |
-          for path in json/ schemas/v1/rating.json schemas/v1/error.json; do
+          {
+            printf 'json/\n'
+            find pyroma/schemas -type f -name '*.json' | sort | sed 's|^pyroma/||'
+          } | while IFS= read -r path; do
             curl --fail --silent --show-error --location \
               --retry 3 --retry-all-errors --retry-delay 5 --max-time 15 \
               --output /dev/null "${DOCS_URL%/}/$path"

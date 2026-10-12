@@ -138,8 +138,10 @@ def stage(sdist: Path, work: Path) -> Path:
     staging.mkdir()
     for directory in ("tests", "ci", "docs"):
         shutil.copytree(source / directory, staging / directory)
-    for filename in ("README.md", "zensical.toml", ".pre-commit-hooks.yaml"):
-        shutil.copy(source / filename, staging / filename)
+    for filename in ("README.md", "zensical.toml", ".pre-commit-hooks.yaml", ".github/workflows/docs.yml"):
+        destination = staging / filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(source / filename, destination)
     shutil.copy(source / "conftest.py", staging / "conftest.py")
     shutil.copy(source / "pyproject.toml", staging / "pyproject.toml")
     shutil.copy(source / "uv.lock", staging / "uv.lock")
