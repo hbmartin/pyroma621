@@ -29,6 +29,8 @@ jobs:
       - name: Build documentation
         run: uv run --locked --only-group docs zensical build --clean --strict
       - name: Check JSON guide and schema build outputs
+        id: schema_build_outputs
+        shell: bash
         run: |
           if [ ! -s site/json/index.html ]; then
             printf 'Missing or empty documentation output: site/json/index.html\n' >&2
@@ -50,6 +52,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pages: write
       id-token: write
     environment:
@@ -60,20 +63,28 @@ jobs:
       cancel-in-progress: false
 
     steps:
-      - name: Checkout canonical schema inventory
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-        with:
-          persist-credentials: false
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
+      - name: Checkout canonical schema inventory
+        id: schema_inventory
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
       - name: Check JSON guide and schema availability
+        id: schema_availability
+        shell: bash
         env:
           DOCS_URL: ${{ steps.deployment.outputs.page_url }}
         run: |
+          schemas=$(find pyroma/schemas -type f -name '*.json' | sort | sed 's|^pyroma/||')
+          if [ -z "$schemas" ]; then
+            printf 'Canonical packaged schema directory has no JSON schemas\n' >&2
+            exit 1
+          fi
           {
             printf 'json/\n'
-            find pyroma/schemas -type f -name '*.json' | sort | sed 's|^pyroma/||'
+            printf '%s\n' "$schemas"
           } | while IFS= read -r path; do
             curl --fail --silent --show-error --location \
               --retry 3 --retry-all-errors --retry-delay 5 --max-time 15 \

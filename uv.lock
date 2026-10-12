@@ -2071,7 +2071,7 @@ dev = [
     { name = "hypothesis", specifier = ">=6.156.7" },
     { name = "jsonschema", specifier = ">=4.25.1" },
     { name = "lizard", specifier = ">=1.23.0" },
-    { name = "markdown-it-py", specifier = ">=4.2.0" },
+    { name = "markdown-it-py", specifier = ">=4.2.0,<5" },
     { name = "packaging", specifier = ">=26.3" },
     { name = "pep440" },
     { name = "pyproject-hooks", specifier = ">=1.3.3" },
@@ -2087,7 +2087,7 @@ dev = [
     { name = "zest-releaser" },
 ]
 docs = [
-    { name = "markdown-it-py", specifier = ">=4.2.0" },
+    { name = "markdown-it-py", specifier = ">=4.2.0,<5" },
     { name = "packaging", specifier = ">=26.3" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "zensical", specifier = ">=0.0.50" },
@@ -2099,7 +2099,7 @@ quality = [
     { name = "semgrep", specifier = "==1.180.0" },
 ]
 release = [
-    { name = "markdown-it-py", specifier = ">=4.2.0" },
+    { name = "markdown-it-py", specifier = ">=4.2.0,<5" },
     { name = "packaging", specifier = ">=26.3" },
     { name = "pyyaml", specifier = ">=6.0.3" },
 ]
@@ -2108,7 +2108,7 @@ test = [
     { name = "flit-core", specifier = ">=3.4,<4" },
     { name = "hypothesis", specifier = ">=6.156.7" },
     { name = "jsonschema", specifier = ">=4.25.1" },
-    { name = "markdown-it-py", specifier = ">=4.2.0" },
+    { name = "markdown-it-py", specifier = ">=4.2.0,<5" },
     { name = "packaging", specifier = ">=26.3" },
     { name = "pep440" },
     { name = "pyproject-hooks", specifier = ">=1.3.3" },

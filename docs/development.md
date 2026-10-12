@@ -254,6 +254,8 @@ illustrative `6.2.0` below with the exact intended Git tag. The checkout must
 have that release version, a dated changelog heading, and the matching literal
 README hook revision:
 
+<!-- pyroma-release-checks -->
+
 ```console
 (
   set -e
@@ -436,7 +438,8 @@ check also requires the local `.pre-commit-hooks.yaml` to provide a `pyroma` hoo
 with `entry: pyroma` in the same entry. Publishing is independent
 of the current Pages deployment. After deploying Pages, the docs workflow checks
 availability of the JSON guide and every canonical schema download with bounded curl
-retries; it does not compare their contents with a release tag.
+retries. Schema inventory checkout follows deployment, and a missing or empty
+inventory fails the availability check; it does not compare contents with a release tag.
 
 The optional `--online` maintainer audit probes live documentation, compares
 downloaded schemas with the checkout, verifies the documented release's
@@ -450,8 +453,12 @@ outside code blocks are parsed as YAML, including examples inside lists and
 blockquotes; literal marker mentions and unrelated YAML blocks are ignored.
 Each marker must precede a complete YAML fence in the same Markdown container,
 with optional blank lines. Markers on fence lines are rejected, and unclosed
-fences identify their opening README line. Every marked example must contain
-the fork's exact `pyroma` hook, and all matching revisions must agree.
+fences identify their opening README line. A marker merged into a larger HTML
+block is rejected at its source line. Separate markers inside HTML wrappers
+such as `<details>` from surrounding HTML with blank lines.
+Every marked example must contain at least one entry with the fork's exact
+`pyroma` hook, and all matching revisions must agree. Other repository or hook
+entries in that block are allowed and do not contribute revisions.
 Repository URLs accept an optional `.git`
 suffix and trailing slash. Published hook definitions are also parsed as YAML; repository,
 hook ID, revision, and entry must belong to the matching entry. The `release`
@@ -459,8 +466,9 @@ dependency group supplies the Markdown parser, PyYAML, and packaging without
 installing the runtime project. README input accepts an initial UTF-8 BOM,
 and diagnostics use Markdown source lines.
 Requests have 15-second timeouts and 2 MiB response limits; fetch, decoding,
-and remote JSON/TOML parsing errors identify the resource without printing its
-URL. Unit tests mock all
+and remote JSON/TOML parsing or structure errors identify the resource and
+invalid field without printing its URL or response values. HTTP error responses
+are closed, and malformed packaged schemas identify their path. Unit tests mock all
 remote evidence.
 Installed-artifact validation covers Python 3.11, 3.13, and 3.14, including
 both CLI entry points, schema resources, version output, usage-error JSON,

@@ -17,6 +17,10 @@
   first failed validation.
   Offline release checks validate the local hook manifest, final releases accept
   Production/Stable or Mature, and fetch errors identify resources without URLs.
+- Reject hook markers swallowed by larger HTML blocks, label malformed remote
+  metadata structures and packaged schemas, and close HTTP error responses.
+  Deploy Pages before checking out schema inventory, and fail availability
+  checks when inventory discovery fails or finds no schemas.
 - Keep release lifecycle tests independent of the current checkout version,
   share CLI/config selector validation, and include test dependencies in the
   default development environment.
