@@ -26,3 +26,5 @@ docs/schemas/
 coverage.xml
 audit-report.json
 audit-report.requirements.txt
+triage_decisions.db
+reviews_triage/

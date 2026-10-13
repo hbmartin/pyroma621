@@ -90,14 +90,13 @@ $ pyroma --format json .
 ```
 
 The schema version 1 contract, JSON argument errors, and `--version` require
-6.2 or newer and are available in development checkouts. They are unavailable
-in 6.1.0. Install a development checkout from the repository root with
-`python -m pip install .`. Check the installed version without rating a package
+6.2 or newer and are unavailable in 6.1.0. Install pyroma621 6.2 or newer
+to use them. Check the installed version without rating a package
 (the version below is illustrative):
 
 ```console
 $ pyroma --version
-pyroma621 6.2.0.dev0
+pyroma621 6.2.0
 ```
 
 Rating and error reports in 6.2 and later include
@@ -232,7 +231,7 @@ commit your work by adding the following to your `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/hbmartin/pyroma621
-    rev: "6.1.0"
+    rev: "6.2.0"
     hooks:
       - id: pyroma
 ```
