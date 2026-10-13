@@ -113,6 +113,43 @@ def matches_open_path(path: Path | str | int, expected: Path, *, dir_fd: int | N
     return (observed.st_dev, observed.st_ino) == (target.st_dev, target.st_ino)
 
 
+def track_schema_descriptors(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    original = os.open
+    descriptors: list[int] = []
+
+    def opened(path: Path | str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        descriptor = original(path, flags, mode, dir_fd=dir_fd)
+        descriptors.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(os, "open", opened)
+    return descriptors
+
+
+def failing_schema_stream(
+    monkeypatch: pytest.MonkeyPatch, failure: BaseException, cleanup: BaseException | None = None
+) -> list[object]:
+    original = release_docs.io.BufferedReader
+    streams = []
+
+    def buffered(raw: object) -> object:
+        actual = original(raw)
+        streams.append(actual)
+        stream = Mock()
+        stream.read.side_effect = failure
+
+        def close() -> None:
+            actual.close()
+            if cleanup is not None:
+                raise cleanup
+
+        stream.close.side_effect = close
+        return stream
+
+    monkeypatch.setattr(release_docs.io, "BufferedReader", buffered)
+    return streams
+
+
 def mock_inventory_stream(monkeypatch: pytest.MonkeyPatch, output: Mock) -> None:
     """Create the exclusive file before substituting a failing stream."""
     original = Path.open
@@ -172,8 +209,7 @@ from ci import release_docs
 project = Path(sys.argv[2])
 race = sys.argv[3]
 fail_swap = sys.argv[4] == "fail"
-original_paths = release_docs.schema_paths
-original_inventory = release_docs._schema_inventory
+original_open = os.open
 victim = project / ("site" if race.startswith("built") else "pyroma") / "schemas/v1/error.json"
 if race.startswith("guide"):
     victim = project / "site/json/index.html"
@@ -193,21 +229,19 @@ def swap():
         victim.symlink_to(external, target_is_directory=True)
     else:
         victim.symlink_to(project / "pyroma/schemas/v1/rating.json")
-def discover(project):
-    paths = original_paths(project)
-    swap()
-    return paths
-def inventory(directory, label, **kwargs):
-    result = original_inventory(directory, label, **kwargs)
-    if directory == project / "site/schemas":
-        swap()
-    return result
-if race.startswith("guide"):
-    swap()
-elif race.startswith("canonical"):
-    release_docs.schema_paths = discover
-elif race.startswith("built"):
-    release_docs._schema_inventory = inventory
+def opened(path, flags, mode=0o777, *, dir_fd=None):
+    expected = project / ("site" if race.startswith(("built", "guide")) else "pyroma")
+    expected /= "json/index.html" if race.startswith("guide") else "schemas/v1/error.json"
+    if race and Path(path).name == expected.name and not backup.exists():
+        if dir_fd is None:
+            matches = Path(path) == expected
+        else:
+            info, target = os.fstat(dir_fd), expected.parent.stat()
+            matches = (info.st_dev, info.st_ino) == (target.st_dev, target.st_ino)
+        if matches:
+            swap()
+    return original_open(path, flags, mode, dir_fd=dir_fd)
+os.open = opened
 def fetch(*args, **kwargs):
     raise AssertionError("Special entries must fail before fetching")
 release_docs.fetch = fetch
@@ -2373,7 +2407,9 @@ def test_schema_scan_read_races_are_rejected_promptly(project: Path, race: str) 
     if race.endswith("fifo"):
         assert "regular file" in result.stderr
     else:
-        assert "symlink not permitted" in result.stderr or "path component is not a directory" in result.stderr
+        assert (
+            "directory changed during validation" if race.endswith("directory-symlink") else "symlink not permitted"
+        ) in result.stderr
     assert "Traceback" not in result.stderr
     assert str(project) not in result.stderr
     assert (project / "docs/schemas/v1/error.json").read_bytes() == previous
@@ -2769,6 +2805,7 @@ def test_manifest_stdout_failures_are_labelled(
 ) -> None:
     prepare_site(project)
     stream = Mock()
+    stream.buffer.write.side_effect = len
     getattr(stream.buffer, phase).side_effect = OSError(errno.EIO, "password secret")
     monkeypatch.setattr(
         "sys.argv", ["release_docs", "check-schemas", "--project", str(project), "--inventory-output", "-"]
@@ -2823,18 +2860,7 @@ def test_protected_schema_reader_closes_descriptors_and_preserves_failures(
     close = Mock(wraps=os.close)
     monkeypatch.setattr(os, "close", close)
     if operation == "read":
-        original = os.fdopen
-
-        def fdopen(descriptor: int, mode: str) -> object:
-            actual = original(descriptor, mode)
-            output = Mock()
-            output.read.side_effect = failure
-            output.close.side_effect = actual.close
-            output.actual = actual
-            return output
-
-        opened = Mock(side_effect=fdopen)
-        monkeypatch.setattr(os, "fdopen", opened)
+        streams = failing_schema_stream(monkeypatch, failure)
     else:
         function = {"open": "open", "stat": "fstat"}[operation]
         monkeypatch.setattr(os, function, Mock(side_effect=failure))
@@ -2845,9 +2871,9 @@ def test_protected_schema_reader_closes_descriptors_and_preserves_failures(
         with pytest.raises(type(failure)):
             release_docs._read_schema_bytes(source, "Packaged schema schemas/schema.json")
     if operation == "read":
-        assert opened.call_args is not None
-        with pytest.raises(OSError, match="Bad file descriptor"):
-            os.fstat(opened.call_args.args[0])
+        assert streams
+        assert all(stream.closed for stream in streams)
+        assert close.call_count == 1
     else:
         assert close.call_count == (0 if operation == "open" else 1)
 
@@ -2860,11 +2886,11 @@ def test_protected_schema_reader_checks_the_opened_descriptor(
     source.write_bytes(b"{}")
     monkeypatch.setattr(release_docs, "_anchored_paths_supported", lambda: False)
     monkeypatch.setattr(os, "fstat", Mock(return_value=Mock(st_mode=mode)))
-    read = Mock(side_effect=AssertionError("Never read a nonregular descriptor"))
-    monkeypatch.setattr(os, "read", read)
+    acquire = Mock(side_effect=AssertionError("Never acquire a stream for a nonregular descriptor"))
+    monkeypatch.setattr(release_docs.io, "FileIO", acquire)
     with pytest.raises(ValueError, match="file must be a regular file"):
         release_docs._read_schema_bytes(source, "Packaged schema schemas/schema.json")
-    read.assert_not_called()
+    acquire.assert_not_called()
 
 
 @pytest.mark.parametrize("linked", [False, True])
@@ -2987,6 +3013,7 @@ def test_stdout_requires_a_binary_buffer(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_stdout_cleanup_does_not_hide_the_write_diagnostic(monkeypatch: pytest.MonkeyPatch) -> None:
     stream = Mock()
+    stream.buffer.write.side_effect = len
     stream.buffer.flush.side_effect = OSError(errno.ENOSPC, "secret")
     stream.close.side_effect = OSError(errno.EIO, "cleanup secret")
     with monkeypatch.context() as patch:
@@ -3002,6 +3029,7 @@ def test_stdout_interrupts_propagate(
     monkeypatch: pytest.MonkeyPatch, phase: str, interrupt: type[BaseException]
 ) -> None:
     stream = Mock()
+    stream.buffer.write.side_effect = len
     if phase == "cleanup":
         stream.buffer.write.side_effect = OSError(errno.EIO, "secret")
         stream.close.side_effect = interrupt
@@ -3116,34 +3144,31 @@ def test_nonfollowing_open_errors_have_portable_diagnostics(
 def test_confirmed_regular_file_is_read_in_blocking_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     source = tmp_path / "schema.json"
     source.write_bytes(b"{}")
-    original = os.fdopen
+    original = release_docs.io.FileIO
     modes = []
 
-    def opened(descriptor: int, mode: str) -> object:
+    def opened(descriptor: int, mode: str, *, closefd: bool) -> object:
         modes.append(os.get_blocking(descriptor))
-        return original(descriptor, mode)
+        assert not closefd
+        return original(descriptor, mode, closefd=closefd)
 
-    monkeypatch.setattr(os, "fdopen", opened)
+    monkeypatch.setattr(release_docs.io, "FileIO", opened)
     assert release_docs._read_schema_bytes(source, "Packaged schema schemas/schema.json") == b"{}"
     assert modes == [True]
 
 
-@pytest.mark.parametrize("operation", ["set_blocking", "fdopen"])
+@pytest.mark.parametrize("operation", ["set_blocking", "FileIO", "BufferedReader"])
 def test_schema_stream_acquisition_failures_close_the_descriptor(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, operation: str
 ) -> None:
     source = tmp_path / "schema.json"
     source.write_bytes(b"{}")
-    descriptors = []
-    original = os.open
-
-    def opened(path: Path | str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
-        descriptor = original(path, flags, mode, dir_fd=dir_fd)
-        descriptors.append(descriptor)
-        return descriptor
-
-    monkeypatch.setattr(os, "open", opened)
-    monkeypatch.setattr(os, operation, Mock(side_effect=OSError(errno.EIO, "secret")))
+    descriptors = track_schema_descriptors(monkeypatch)
+    monkeypatch.setattr(
+        os if operation == "set_blocking" else release_docs.io,
+        operation,
+        Mock(side_effect=OSError(errno.EIO, "secret")),
+    )
     with pytest.raises(ValueError, match="I/O failure"):
         release_docs._read_schema_bytes(source, "Packaged schema schemas/schema.json")
     for descriptor in descriptors:
@@ -3189,29 +3214,22 @@ def test_race_fixture_restores_a_victim_after_failed_replacement_creation(projec
     previous = source.read_bytes()
     result = run_fifo_checks(project, race="canonical-fifo", fail_swap=True)
     assert result.returncode == 0, result.stderr
-    assert result.stderr.count("simulated replacement creation failure") == 2
+    assert result.stderr.count("Packaged schema schemas/v1/error.json: unable to read file (I/O failure)") == 2
+    assert "simulated replacement creation failure" not in result.stderr
     assert "FileNotFoundError" not in result.stderr
     assert source.read_bytes() == previous
     assert not source.with_name("race-backup").exists()
 
 
 @pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
-@pytest.mark.parametrize("operation", ["set_blocking", "fdopen"])
+@pytest.mark.parametrize("operation", ["set_blocking", "FileIO", "BufferedReader"])
 def test_schema_stream_acquisition_interrupts_close_owned_descriptors(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, operation: str, interrupt: type[BaseException]
 ) -> None:
     source = tmp_path / "schema.json"
     source.write_bytes(b"{}")
-    original = os.open
-    descriptors = []
-
-    def opened(path: Path | str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
-        descriptor = original(path, flags, mode, dir_fd=dir_fd)
-        descriptors.append(descriptor)
-        return descriptor
-
-    monkeypatch.setattr(os, "open", opened)
-    monkeypatch.setattr(os, operation, Mock(side_effect=interrupt))
+    descriptors = track_schema_descriptors(monkeypatch)
+    monkeypatch.setattr(os if operation == "set_blocking" else release_docs.io, operation, Mock(side_effect=interrupt))
     with pytest.raises(interrupt):
         release_docs._read_schema_bytes(source, "Packaged schema schemas/schema.json")
     for descriptor in descriptors:
@@ -3222,24 +3240,306 @@ def test_schema_stream_acquisition_interrupts_close_owned_descriptors(
 def test_schema_read_cleanup_preserves_the_primary_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     source = tmp_path / "schema.json"
     source.write_bytes(b"{}")
-    original = os.fdopen
-    streams = []
-
-    def opened(descriptor: int, mode: str) -> object:
-        actual = original(descriptor, mode)
-        streams.append(actual)
-        output = Mock()
-        output.read.side_effect = OSError(errno.EACCES, "read secret")
-
-        def close() -> None:
-            actual.close()
-            raise OSError(errno.EIO, "cleanup secret")
-
-        output.close.side_effect = close
-        return output
-
-    monkeypatch.setattr(os, "fdopen", opened)
+    streams = failing_schema_stream(
+        monkeypatch, OSError(errno.EACCES, "read secret"), OSError(errno.EIO, "cleanup secret")
+    )
     with pytest.raises(ValueError, match=r"unable to read file.*permission denied") as raised:
         release_docs._read_schema_bytes(source, "Packaged schema schemas/schema.json")
     assert all(stream.closed for stream in streams)
     assert "secret" not in str(raised.value)
+
+
+@pytest.mark.parametrize("progress", [None, 0])
+@pytest.mark.parametrize("partial", [False, True])
+def test_stdout_requires_progress_and_closes_a_failed_stream(
+    monkeypatch: pytest.MonkeyPatch, progress: int | None, partial: bool
+) -> None:
+    output = Mock()
+    output.buffer.write.side_effect = [2, progress] if partial else [progress]
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "stdout", output)
+        with pytest.raises(ValueError, match=r"Schema inventory output: unable to write file \(output would block\)"):
+            release_docs._write_inventory_stdout(b"[]\n")
+    assert output.buffer.write.call_count == (2 if partial else 1)
+    output.buffer.flush.assert_not_called()
+    output.close.assert_called_once()
+
+
+def test_stdout_retries_only_unwritten_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    received = BytesIO()
+    output = Mock()
+
+    def write(payload: bytes) -> int:
+        return received.write(payload[:2])
+
+    output.buffer.write.side_effect = write
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "stdout", output)
+        release_docs._write_inventory_stdout(b'["schemas/v1/error.json"]\n')
+    assert received.getvalue() == b'["schemas/v1/error.json"]\n'
+    output.buffer.flush.assert_called_once()
+    output.close.assert_not_called()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX nonblocking pipes")
+@pytest.mark.parametrize("full", [False, True])
+def test_actual_unbuffered_cli_never_accepts_a_truncated_manifest(project: Path, full: bool) -> None:
+    prepare_site(project)
+    if not full:
+        for root in [project / "pyroma/schemas/v99", project / "site/schemas/v99"]:
+            root.mkdir()
+            for index in range(2048):
+                (root / f"future-{index:04d}-{'x' * 80}.json").write_bytes(b"{}")
+    reader, writer = os.pipe()
+    os.set_blocking(writer, False)
+    filled = 0
+    try:
+        if full:
+            try:
+                while True:
+                    filled += os.write(writer, b"x" * 4096)
+            except BlockingIOError:
+                pass
+        result = subprocess.run(  # noqa: S603 - exercise actual unbuffered output to a real nonblocking pipe
+            [
+                sys.executable,
+                "-u",
+                str(ROOT / "ci/release_docs.py"),
+                "check-schemas",
+                "--project",
+                str(project),
+                "--inventory-output",
+                "-",
+            ],
+            stdout=writer,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=10,
+        )
+    finally:
+        os.close(writer)
+    try:
+        received = bytearray()
+        while chunk := os.read(reader, 65536):
+            received.extend(chunk)
+    finally:
+        os.close(reader)
+    assert result.returncode == 1
+    assert b"Schema inventory output: unable to write file (output would block)" in result.stderr
+    assert b"Traceback" not in result.stderr
+    assert b"Exception ignored" not in result.stderr
+    if full:
+        assert len(received) == filled
+    else:
+        assert received
+        assert not received.endswith(b"]\n")
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize("ancestor", ["project", "pyroma", "site", "site/json"])
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="Requires non-root POSIX permissions")
+def test_search_only_ancestors_remain_supported(
+    monkeypatch: pytest.MonkeyPatch, project: Path, ancestor: str, fallback: bool
+) -> None:
+    prepare_site(project)
+    if fallback:
+        monkeypatch.setattr(release_docs, "_SEARCH_FLAG", None)
+    directory = project if ancestor == "project" else project / ancestor
+    previous = directory.stat().st_mode & 0o777
+    directory.chmod(0o311)
+    try:
+        assert release_docs.schema_paths(project)
+        assert release_docs.check_schema_outputs(project, project / "site")
+    finally:
+        directory.chmod(previous)
+
+
+@pytest.mark.parametrize("ancestor", ["pyroma", "site/json", "project", "site"])
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory links")
+def test_existing_ancestor_links_remain_supported(project: Path, ancestor: str) -> None:
+    prepare_site(project)
+    selected_project, selected_site = project, project / "site"
+    if ancestor == "project":
+        selected_project = project / "project-link"
+        selected_project.symlink_to(project, target_is_directory=True)
+    elif ancestor == "site":
+        selected_site = project / "site-link"
+        selected_site.symlink_to(project / "site", target_is_directory=True)
+    else:
+        directory = project / ancestor
+        target = directory.with_name(directory.name + "-target")
+        directory.rename(target)
+        directory.symlink_to(target.name, target_is_directory=True)
+    assert release_docs.schema_paths(selected_project)
+    assert release_docs.check_schema_outputs(selected_project, selected_site)
+
+
+@pytest.mark.parametrize(
+    "location", ["pyroma/schemas", "pyroma/schemas/v1", "site/schemas", "site/schemas/v1", "site/json"]
+)
+@pytest.mark.parametrize("replacement", ["directory", "symlink"])
+@pytest.mark.skipif(not release_docs._anchored_paths_supported(), reason="Requires directory anchoring")
+def test_inventory_rejects_directory_identity_changes_after_reading(
+    monkeypatch: pytest.MonkeyPatch, project: Path, location: str, replacement: str
+) -> None:
+    prepare_site(project)
+    victim = project / location
+    backup = victim.with_name("original-tree")
+    external = project / "external-tree"
+    shutil.copytree(victim, external)
+    original = release_docs._read_schema_bytes
+    changed = False
+
+    def read(path: Path, label: str, **kwargs: object) -> bytes:
+        nonlocal changed
+        payload = original(path, label, **kwargs)
+        if not changed and path.is_relative_to(victim):
+            changed = True
+            victim.rename(backup)
+            if replacement == "symlink":
+                victim.symlink_to(external, target_is_directory=True)
+            else:
+                shutil.copytree(external, victim)
+                (victim / "unexpected.json").write_bytes(b"{}")
+        return payload
+
+    monkeypatch.setattr(release_docs, "_read_schema_bytes", read)
+    fetch = Mock(side_effect=AssertionError("No fetches after changed source evidence"))
+    monkeypatch.setattr(release_docs, "fetch", fetch)
+    previous = (project / "docs/schemas/v1/error.json").read_bytes()
+    operation = (
+        (lambda: release_docs.check_online(project, VERSION))
+        if location.startswith("pyroma")
+        else (lambda: release_docs.check_schema_outputs(project, project / "site"))
+    )
+    with pytest.raises(ValueError, match="directory changed during validation") as raised:
+        operation()
+    assert "schemas" in str(raised.value) or "json" in str(raised.value)
+    assert str(project) not in str(raised.value)
+    fetch.assert_not_called()
+    assert (project / "docs/schemas/v1/error.json").read_bytes() == previous
+
+
+@pytest.mark.parametrize("ancestor", ["pyroma", "site/json"])
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory links")
+def test_existing_ancestor_link_retargeting_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, project: Path, ancestor: str
+) -> None:
+    prepare_site(project)
+    link = project / ancestor
+    first = link.with_name(link.name + "-first")
+    second = link.with_name(link.name + "-second")
+    link.rename(first)
+    shutil.copytree(first, second)
+    link.symlink_to(first.name, target_is_directory=True)
+    original = release_docs._read_schema_bytes
+    changed = False
+
+    def read(path: Path, label: str, **kwargs: object) -> bytes:
+        nonlocal changed
+        payload = original(path, label, **kwargs)
+        if not changed and path.is_relative_to(link):
+            changed = True
+            link.unlink()
+            link.symlink_to(second.name, target_is_directory=True)
+        return payload
+
+    monkeypatch.setattr(release_docs, "_read_schema_bytes", read)
+    with pytest.raises(ValueError, match="directory changed during validation"):
+        release_docs.check_schema_outputs(project, project / "site")
+
+
+@pytest.mark.parametrize("destination", ["//dev/stdout", "directory-alias", "parent-descriptor", "terminal-chain"])
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor namespaces")
+def test_descriptor_alias_detection_includes_parent_components(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, destination: str
+) -> None:
+    if destination == "//dev/stdout":
+        path = Path(destination)
+    else:
+        parent = tmp_path / "alias"
+        parent.symlink_to("/dev/fd/1" if destination == "parent-descriptor" else "/dev", target_is_directory=True)
+        path = parent / ("child.json" if destination == "parent-descriptor" else "stdout")
+        if destination == "terminal-chain":
+            link = tmp_path / "inventory.json"
+            link.symlink_to(path)
+            path = link
+    temporary = Mock(side_effect=AssertionError("Never touch descriptor output destinations"))
+    monkeypatch.setattr(release_docs.tempfile, "TemporaryDirectory", temporary)
+    with pytest.raises(ValueError, match="use --inventory-output - for stdout"):
+        release_docs._write_inventory(path, b"[]\n")
+    temporary.assert_not_called()
+
+
+@pytest.mark.parametrize("phase", ["raw", "buffered"])
+def test_partial_stream_acquisition_never_transfers_descriptor_ownership(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, phase: str
+) -> None:
+    source = tmp_path / "schema.json"
+    source.write_bytes(b"{}")
+    descriptors = track_schema_descriptors(monkeypatch)
+    original_raw = release_docs.io.FileIO
+    original_buffered = release_docs.io.BufferedReader
+    extra = None
+
+    def failed_raw(descriptor: int, mode: str, *, closefd: bool) -> object:
+        nonlocal extra
+        raw = original_raw(descriptor, mode, closefd=closefd)
+        raw.close()
+        assert os.fstat(descriptor).st_size == 2
+        extra = os.open(source, os.O_RDONLY)
+        assert extra != descriptor
+        raise MemoryError
+
+    def failed_buffered(raw: object) -> object:
+        nonlocal extra
+        buffered = original_buffered(raw)
+        descriptor = buffered.fileno()
+        buffered.close()
+        assert os.fstat(descriptor).st_size == 2
+        extra = os.open(source, os.O_RDONLY)
+        assert extra != descriptor
+        raise MemoryError
+
+    close = Mock(wraps=os.close)
+    monkeypatch.setattr(os, "close", close)
+    monkeypatch.setattr(
+        release_docs.io,
+        "FileIO" if phase == "raw" else "BufferedReader",
+        failed_raw if phase == "raw" else failed_buffered,
+    )
+    try:
+        with pytest.raises(MemoryError):
+            release_docs._read_schema_bytes(source, "Packaged schema schemas/schema.json")
+        assert extra is not None
+        assert os.fstat(extra).st_size == 2
+        for descriptor in descriptors:
+            if descriptor != extra:
+                assert sum(call.args == (descriptor,) for call in close.call_args_list) == 1
+                with pytest.raises(OSError, match="Bad file descriptor"):
+                    os.fstat(descriptor)
+    finally:
+        if extra is not None:
+            os.close(extra)
+
+
+@pytest.mark.parametrize("race", ["guide-fifo", "guide-directory-symlink"])
+@pytest.mark.skipif(os.name == "nt", reason="POSIX race fixtures")
+def test_guide_race_fixture_restores_after_acquisition_failure(project: Path, race: str) -> None:
+    prepare_site(project)
+    guide = project / "site/json/index.html"
+    previous = guide.read_bytes()
+    result = run_fifo_checks(project, race=race, fail_swap=True)
+    assert result.returncode == 0, result.stderr
+    assert "Built JSON guide json/index.html: unable to read file (I/O failure)" in result.stderr
+    assert "FileNotFoundError" not in result.stderr
+    assert guide.read_bytes() == previous
+    assert not guide.with_name("race-backup").exists()
+    assert not guide.parent.with_name("race-backup").exists()
+
+
+def test_schema_discovery_does_not_read_or_parse_files(monkeypatch: pytest.MonkeyPatch, project: Path) -> None:
+    reader = Mock(side_effect=AssertionError("Discovery must not read schema bytes"))
+    monkeypatch.setattr(release_docs, "_read_schema_bytes", reader)
+    assert release_docs.schema_paths(project)
+    reader.assert_not_called()

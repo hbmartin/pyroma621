@@ -1,10 +1,10 @@
 # JSON reports
 
 Schema version 1, JSON argument errors, and `--version` require 6.2 or newer
-and are available in development checkouts. They are unavailable in 6.1.0.
-Install a development checkout with `python -m pip install .` from the repository
-root. Checker versions in the examples are illustrative; actual reports identify
-the installed version.
+and are unavailable in 6.1.0. Install 6.2 or newer with
+`python -m pip install --upgrade pyroma621` after the release is published.
+Checker versions in the examples are illustrative; actual reports identify the
+installed version.
 
 Use `pyroma --format json PACKAGE` to write one JSON document to stdout.
 Both `--format json` and `--format=json` work. Argument errors honor the last
@@ -57,7 +57,7 @@ identify the checker release that produced the findings.
   "advisories": [],
   "_meta": {
     "schema_version": 1,
-    "pyroma": "6.2.0.dev0",
+    "pyroma": "6.2.0",
     "package": ".",
     "mode": "directory",
     "policy": {
@@ -100,7 +100,7 @@ findings. `--quiet` also leaves JSON complete.
   },
   "_meta": {
     "schema_version": 1,
-    "pyroma": "6.2.0.dev0"
+    "pyroma": "6.2.0"
   }
 }
 ```
