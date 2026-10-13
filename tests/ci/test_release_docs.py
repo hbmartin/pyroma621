@@ -56,11 +56,18 @@ def release_check_commands(text: str) -> str:
         if token.type == "html_block" and token.content.strip() == RELEASE_CHECKS_MARKER
     ]
     assert len(matches) == 1, f"Expected exactly one {RELEASE_CHECKS_MARKER} block; found {len(matches)}"
+    marker = tokens[matches[0]]
     index = matches[0] + 1
     assert index < len(tokens), "Release-check marker must precede a console fence"
     token = tokens[index]
+    assert token.level == marker.level, "Release-check marker and console fence must share a Markdown container"
     assert token.type == "fence", "Release-check marker must precede a console fence"
     assert token.info == "console", "Release-check marker must precede a console fence"
+    content_lines = token.content.count("\n") + bool(token.content and not token.content.endswith("\n"))
+    assert token.map is not None, "Release-check console fence must have source lines"
+    assert token.map[1] - token.map[0] == content_lines + 2, (
+        "Release-check console fence must have an explicit closing fence"
+    )
     return token.content
 
 
@@ -1208,3 +1215,361 @@ def test_release_command_selector_requires_one_marker(count: int) -> None:
 def test_release_command_selector_requires_console_commands(following: str) -> None:
     with pytest.raises(AssertionError, match="must precede a console fence"):
         release_check_commands(RELEASE_CHECKS_MARKER + "\n\n" + following)
+
+
+@pytest.mark.parametrize("prefix", ["Paragraph ", "# Heading ", "| Table | ", "- List item "])
+@pytest.mark.parametrize("bad_first", [False, True])
+def test_inline_prose_markers_keep_examples_unmarked(project: Path, prefix: str, bad_first: bool) -> None:
+    valid = hook_example(project)
+    stale = valid.replace(VERSION, "0.1.0").replace("<!-- pyroma-pre-commit -->", prefix + "<!-- pyroma-pre-commit -->")
+    readme = stale + "\n" + valid if bad_first else valid + "\n" + stale
+    assert release_docs.precommit_revision(readme) == VERSION
+
+
+@pytest.mark.parametrize("html", ["<pre>\n{marker}\n</pre>", "<code>\n{marker}\n</code>", "<!-- Note: {marker}\n-->"])
+def test_raw_html_literal_mentions_still_require_marker_placement(project: Path, html: str) -> None:
+    readme = html.format(marker="<!-- pyroma-pre-commit -->") + "\n\n" + hook_example(project)
+    with pytest.raises(ValueError, match=r"README line \d+:.*marker must be on its own line"):
+        release_docs.precommit_revision(readme)
+
+
+@pytest.mark.parametrize(
+    ("text", "field"),
+    [
+        ("", "project"),
+        ('project = "password secret"', "project"),
+        ("project = []", "project"),
+        ('[project]\nversion = "9.0.0"', "project.name"),
+        ("[project]\nname = 42", "project.name"),
+        ('[project]\nname = " "', "project.name"),
+        ('[project]\nname = "pyroma621"', "project.version"),
+        ('[project]\nname = "pyroma621"\nversion = []', "project.version"),
+        ('[project]\nname = "pyroma621"\nversion = "password secret"', "project.version"),
+        ('[project]\nname = "pyroma621"\nversion = "9.0.0"', "project.urls"),
+        ('[project]\nname = "pyroma621"\nversion = "9.0.0"\nurls = []', "project.urls"),
+        ('[project]\nname = "pyroma621"\nversion = "9.0.0"\n[project.urls]', "project.urls.Documentation"),
+        (
+            '[project]\nname = "pyroma621"\nversion = "9.0.0"\n[project.urls]\nDocumentation = 42',
+            "project.urls.Documentation",
+        ),
+        (
+            '[project]\nname = "pyroma621"\nversion = "9.0.0"\n[project.urls]\nDocumentation = " "',
+            "project.urls.Documentation",
+        ),
+    ],
+)
+def test_local_project_structure_has_controlled_field_diagnostics(
+    monkeypatch: pytest.MonkeyPatch, project: Path, capsys: pytest.CaptureFixture, text: str, field: str
+) -> None:
+    (project / "pyproject.toml").write_text(text, encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["release_docs", "check", "--project", str(project)])
+    with pytest.raises(SystemExit) as raised:
+        release_docs.main()
+    assert raised.value.code == 1
+    out, err = capsys.readouterr()
+    assert not out
+    assert f"Local pyproject.toml: {field} must be" in err
+    assert not any(secret in err for secret in ("Traceback", "password", "secret", "https://"))
+
+
+@pytest.mark.parametrize("classifiers", ['"password secret"', "{}", "[42]", '["Stable", 42]'])
+def test_local_classifiers_require_strings(
+    monkeypatch: pytest.MonkeyPatch, project: Path, capsys: pytest.CaptureFixture, classifiers: str
+) -> None:
+    replace_once(project / "pyproject.toml", '["Development Status :: 5 - Production/Stable"]', classifiers)
+    monkeypatch.setattr("sys.argv", ["release_docs", "check", "--project", str(project)])
+    with pytest.raises(SystemExit) as raised:
+        release_docs.main()
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert "Local pyproject.toml: project.classifiers must be a list of strings" in err
+    assert not any(secret in err for secret in ("Traceback", "password", "secret"))
+
+
+def test_optional_local_classifiers_can_be_absent(project: Path) -> None:
+    replace_once(project / "pyproject.toml", 'classifiers = ["Development Status :: 5 - Production/Stable"]\n', "")
+    assert release_docs.check_offline(project) == VERSION
+    with pytest.raises(ValueError, match="Final pyroma621 releases require"):
+        release_docs.check_offline(project, VERSION)
+
+
+@pytest.mark.parametrize(
+    ("text", "field"),
+    [
+        ("", "project"),
+        ('project = "password secret"', "project"),
+        ("project = []", "project"),
+        ("[project]", "project.site_url"),
+        ("[project]\nsite_url = []", "project.site_url"),
+        ('[project]\nsite_url = " "', "project.site_url"),
+    ],
+)
+def test_local_site_structure_has_controlled_field_diagnostics(
+    monkeypatch: pytest.MonkeyPatch, project: Path, capsys: pytest.CaptureFixture, text: str, field: str
+) -> None:
+    (project / "zensical.toml").write_text(text, encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["release_docs", "check", "--project", str(project)])
+    with pytest.raises(SystemExit) as raised:
+        release_docs.main()
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert f"Local zensical.toml: {field} must be" in err
+    assert not any(secret in err for secret in ("Traceback", "password", "secret", "https://"))
+
+
+@pytest.mark.parametrize("filename", ["pyproject.toml", "zensical.toml"])
+@pytest.mark.parametrize("failure", ["syntax", "utf8", "missing"])
+def test_local_toml_read_and_parse_failures_are_labelled(
+    monkeypatch: pytest.MonkeyPatch, project: Path, capsys: pytest.CaptureFixture, filename: str, failure: str
+) -> None:
+    path = project / filename
+    if failure == "missing":
+        path.unlink()
+        message = "unable to read file"
+    else:
+        path.write_bytes(b"\xffpassword secret" if failure == "utf8" else b"[password secret")
+        message = "valid UTF-8" if failure == "utf8" else "valid TOML"
+    monkeypatch.setattr("sys.argv", ["release_docs", "check", "--project", str(project)])
+    with pytest.raises(SystemExit) as raised:
+        release_docs.main()
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert f"Local {filename}" in err
+    assert message in err
+    assert not any(secret in err for secret in ("Traceback", "password", "secret", "https://"))
+
+
+def test_invalid_packaged_schema_utf8_names_the_path(
+    monkeypatch: pytest.MonkeyPatch, project: Path, online_evidence: dict[str, str], capsys: pytest.CaptureFixture
+) -> None:
+    (project / "pyroma/schemas/v1/rating.json").write_bytes(b"\xffpassword secret")
+    monkeypatch.setattr(release_docs, "fetch", lambda url, **_kwargs: online_evidence[url])
+    monkeypatch.setattr("sys.argv", ["release_docs", "check", "--online", "--project", str(project)])
+    with pytest.raises(SystemExit) as raised:
+        release_docs.main()
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert "Packaged schema schemas/v1/rating.json must contain valid UTF-8" in err
+    assert not any(secret in err for secret in ("Traceback", "password", "secret", "https://"))
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "date"),
+    [
+        ("2026-10-13T01:00:00+05:00", "2026-10-12"),
+        ("2026-10-12T23:00:00-05:00", "2026-10-13"),
+        ("2026-10-12t17:42:33.123456Z", DATE),
+        ("2026-10-12 17:42:33+00:00", DATE),
+        ("20261012T174233Z", DATE),
+        ("2026-10-12T17:42:33.123456+00:00", DATE),
+    ],
+)
+def test_upload_dates_use_utc_and_supported_iso_forms(timestamp: str, date: str) -> None:
+    assert release_docs._upload_date({"upload_time_iso_8601": timestamp}) == date
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "2026-10-12",
+        "2026-10-12T17:42:33",
+        "2026-10-12t17:42:33",
+        "password secret",
+        "0001-01-01T00:00:00+01:00",
+        "9999-12-31T23:59:59-01:00",
+    ],
+)
+def test_bad_upload_timestamps_fail_safely_through_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    project: Path,
+    online_evidence: dict[str, str],
+    capsys: pytest.CaptureFixture,
+    timestamp: str,
+) -> None:
+    online_evidence["https://pypi.org/pypi/pyroma621/json"] = json.dumps(
+        {"releases": {VERSION: [{"upload_time_iso_8601": timestamp}]}}
+    )
+    monkeypatch.setattr(release_docs, "fetch", lambda url, **_kwargs: online_evidence[url])
+    monkeypatch.setattr("sys.argv", ["release_docs", "check", "--online", "--project", str(project)])
+    with pytest.raises(SystemExit) as raised:
+        release_docs.main()
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert "PyPI release metadata: upload_time_iso_8601 must be" in err
+    assert not any(secret in err for secret in ("Traceback", "password", "secret", "https://"))
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_pypi_local_version_labels_cannot_leak(
+    monkeypatch: pytest.MonkeyPatch,
+    project: Path,
+    online_evidence: dict[str, str],
+    capsys: pytest.CaptureFixture,
+    empty: bool,
+) -> None:
+    artifacts = [] if empty else [{"upload_time_iso_8601": f"{DATE}T00:00:00Z"}]
+    online_evidence["https://pypi.org/pypi/pyroma621/json"] = json.dumps(
+        {"releases": {"9.0.0+password.secret": artifacts}}
+    )
+    monkeypatch.setattr(release_docs, "fetch", lambda url, **_kwargs: online_evidence[url])
+    monkeypatch.setattr("sys.argv", ["release_docs", "check", "--online", "--project", str(project)])
+    if empty:
+        release_docs.main()
+    else:
+        with pytest.raises(SystemExit) as raised:
+            release_docs.main()
+        assert raised.value.code == 1
+    out, err = capsys.readouterr()
+    assert not out
+    if not empty:
+        assert "PyPI release metadata: release keys must be public version strings without local labels" in err
+    assert not any(secret in err for secret in ("Traceback", "password", "secret", "https://"))
+
+
+@pytest.mark.parametrize("heading", ["", "unreleased", "2026-10-13"])
+def test_online_changelog_errors_do_not_echo_remote_release_keys(
+    monkeypatch: pytest.MonkeyPatch,
+    project: Path,
+    online_evidence: dict[str, str],
+    capsys: pytest.CaptureFixture,
+    heading: str,
+) -> None:
+    replace_once(project / "docs/changelog.md", f"## {VERSION} ({DATE})", f"## {VERSION} ({heading})")
+    monkeypatch.setattr(release_docs, "fetch", lambda url, **_kwargs: online_evidence[url])
+    monkeypatch.setattr("sys.argv", ["release_docs", "check", "--online", "--project", str(project)])
+    with pytest.raises(SystemExit) as raised:
+        release_docs.main()
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert "PyPI release metadata: Changelog must have a matching dated entry" in err
+    assert VERSION not in err
+    assert not any(secret in err for secret in ("Traceback", "https://"))
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_http_cleanup_preserves_interrupts(monkeypatch: pytest.MonkeyPatch, interrupt: type[BaseException]) -> None:
+    body = BytesIO(b"response")
+    error = HTTPError("https://example.com/", 500, "failure", {}, body)
+    close = error.close
+
+    def cleanup() -> None:
+        close()
+        raise interrupt
+
+    monkeypatch.setattr(error, "close", cleanup)
+    monkeypatch.setattr(release_docs, "urlopen", Mock(side_effect=error))
+    with pytest.raises(interrupt):
+        release_docs.fetch("https://example.com/", label="Published hook manifest")
+    assert body.closed
+
+
+@pytest.mark.parametrize("following", ["> ```console\n> true\n> ```\n", "```console\ntrue\n", "```console\n"])
+def test_release_command_selector_rejects_wrong_containers_and_unclosed_fences(following: str) -> None:
+    with pytest.raises(AssertionError, match=r"must precede a console fence|explicit closing fence"):
+        release_check_commands(RELEASE_CHECKS_MARKER + "\n\n" + following)
+
+
+def test_release_command_selector_rejects_a_fence_outside_the_marker_container() -> None:
+    with pytest.raises(AssertionError, match="must share a Markdown container"):
+        release_check_commands("> " + RELEASE_CHECKS_MARKER + "\n\n```console\ntrue\n```\n")
+
+
+@pytest.mark.parametrize("delimiter", ["```", "~~~", "````"])
+def test_release_command_selector_accepts_closed_nested_fences(delimiter: str) -> None:
+    text = "> " + RELEASE_CHECKS_MARKER + f"\n>\n> {delimiter}console\n> true\n> {delimiter}"
+    assert release_check_commands(text) == "true\n"
+
+
+@pytest.mark.parametrize("links", ["files", "directory", "root", "broken-root"])
+@pytest.mark.skipif(os.name == "nt", reason="Schema deployment uses POSIX symlinks and shells")
+def test_python_and_deployment_schema_inventories_agree_on_symlinks(project: Path, links: str) -> None:
+    schemas = project / "pyroma/schemas"
+    future = schemas / "v2/rating.json"
+    future.parent.mkdir()
+    future.write_text("{}", encoding="utf-8")
+    target = project / "external.json"
+    target.write_text("{}", encoding="utf-8")
+    if links == "files":
+        (schemas / "linked.json").symlink_to(target)
+        (schemas / "broken.json").symlink_to(project / "absent.json")
+    elif links == "directory":
+        directory = project / "external-schemas"
+        directory.mkdir()
+        (directory / "outside.json").write_text("{}", encoding="utf-8")
+        (schemas / "v99").symlink_to(directory, target_is_directory=True)
+    else:
+        destination = project / "inventory"
+        schemas.rename(destination)
+        schemas.symlink_to(destination if links == "root" else project / "absent", target_is_directory=True)
+    workflow = yaml.safe_load((ROOT / ".github/workflows/docs.yml").read_text())
+    step = workflow_step(workflow["jobs"]["deploy"]["steps"], "schema_availability")
+    curl = project / "curl"
+    curl.write_text('#!/bin/sh\nfor request_url do :; done\nprintf "%s\\n" "$request_url"\n', encoding="utf-8")
+    curl.chmod(0o755)
+    result = subprocess.run(  # noqa: S603 - execute the actual schema workflow with a local probe
+        workflow_bash_command(step),
+        cwd=project,
+        env={**os.environ, "PATH": str(project) + os.pathsep + os.environ["PATH"], "DOCS_URL": release_docs.SITE_URL},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    if links in {"root", "broken-root"}:
+        with pytest.raises(ValueError, match="Canonical packaged schema directory must not be a symlink"):
+            release_docs.schema_paths(project)
+        assert result.returncode != 0
+        assert "Canonical packaged schema directory must not be a symlink" in result.stderr
+        assert not result.stdout
+    else:
+        expected = {"schemas/v1/error.json", "schemas/v1/rating.json", "schemas/v2/rating.json"}
+        assert {path.as_posix() for path in release_docs.schema_paths(project)} == expected
+        assert result.returncode == 0, result.stderr
+        assert set(result.stdout.splitlines()) == {release_docs.SITE_URL + path for path in {"json/", *expected}}
+
+
+@pytest.mark.parametrize(
+    ("inventory", "message"),
+    [
+        ("missing", "Canonical packaged schema directory is missing"),
+        ("empty", "Canonical packaged schema directory has no JSON schemas"),
+        ("failed", "Unable to read canonical schema inventory"),
+    ],
+)
+@pytest.mark.skipif(os.name == "nt", reason="Schema deployment uses POSIX shells")
+def test_workflow_inventory_failures_have_explicit_diagnostics(project: Path, inventory: str, message: str) -> None:
+    if inventory != "failed":
+        shutil.rmtree(project / "pyroma/schemas")
+        if inventory == "empty":
+            (project / "pyroma/schemas").mkdir()
+        with pytest.raises(ValueError, match=message):
+            release_docs.schema_paths(project)
+    else:
+        find = project / "find"
+        find.write_text("#!/bin/sh\nprintf 'pyroma/schemas/v1/rating.json\\n'\nexit 1\n", encoding="utf-8")
+        find.chmod(0o755)
+    curl = project / "curl"
+    curl.write_text("#!/bin/sh\nprintf 'unexpected probe\\n'\n", encoding="utf-8")
+    curl.chmod(0o755)
+    workflow = yaml.safe_load((ROOT / ".github/workflows/docs.yml").read_text())
+    step = workflow_step(workflow["jobs"]["deploy"]["steps"], "schema_availability")
+    result = subprocess.run(  # noqa: S603 - exercise failed inventory discovery using local tools
+        workflow_bash_command(step),
+        cwd=project,
+        env={**os.environ, "PATH": str(project) + os.pathsep + os.environ["PATH"], "DOCS_URL": release_docs.SITE_URL},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert not result.stdout, "Inventory failures must precede every probe"
+
+
+def test_schema_inventory_checkout_is_sparse() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/docs.yml").read_text())
+    step = workflow_step(workflow["jobs"]["deploy"]["steps"], "schema_inventory")
+    assert step["with"]["sparse-checkout"] == "pyroma/schemas"
+    assert step["with"]["sparse-checkout-cone-mode"] is False
+    assert step["with"]["persist-credentials"] is False

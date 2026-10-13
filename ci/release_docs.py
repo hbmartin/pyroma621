@@ -8,6 +8,7 @@ import json
 import re
 import shutil
 import tomllib
+from contextlib import suppress
 from http.client import HTTPException
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -192,13 +193,16 @@ def check_offline(project: Path, release_tag: str = "") -> str:
     _require_hook_definition(
         (project / ".pre-commit-hooks.yaml").read_text(encoding="utf-8"), "Local .pre-commit-hooks.yaml"
     )
-    metadata = tomllib.loads((project / "pyproject.toml").read_text(encoding="utf-8"))["project"]
-    site = tomllib.loads((project / "zensical.toml").read_text(encoding="utf-8"))["project"]
+    metadata_label = "Local pyproject.toml"
+    name, project_version, documentation, classifiers = _local_project_metadata(
+        _read_utf8(project / "pyproject.toml", metadata_label)
+    )
+    site_url = _local_site_url(_read_utf8(project / "zensical.toml", "Local zensical.toml"))
     readme = (project / "README.md").read_text(encoding="utf-8-sig")
-    if metadata["name"] != "pyroma621" or "pip install pyroma621" not in readme:
+    if name != "pyroma621" or "pip install pyroma621" not in readme:
         message = "Installation documentation must select the pyroma621 distribution"
         raise ValueError(message)
-    if metadata["urls"]["Documentation"] != SITE_URL or site["site_url"] != SITE_URL:
+    if documentation != SITE_URL or site_url != SITE_URL:
         message = "Project metadata and documentation site must use the canonical documentation URL"
         raise ValueError(message)
     if SITE_URL not in readme or "https://hbmartin.github.io/pyroma/" in readme:
@@ -208,13 +212,11 @@ def check_offline(project: Path, release_tag: str = "") -> str:
     for version, date in RELEASE_DATES.items():
         _require_date(entries, version, date)
     if release_tag:
-        if Version(release_tag) != Version(metadata["version"]):
+        if Version(release_tag) != Version(project_version):
             message = "Documentation release tag does not match project version"
             raise ValueError(message)
-        _require_date(entries, metadata["version"])
-        if not Version(metadata["version"]).is_prerelease and not _FINAL_STATUSES.intersection(
-            metadata.get("classifiers", [])
-        ):
+        _require_date(entries, project_version)
+        if not Version(project_version).is_prerelease and not _FINAL_STATUSES.intersection(classifiers):
             message = "Final pyroma621 releases require Development Status :: 5 - Production/Stable or 6 - Mature"
             raise ValueError(message)
     revision = precommit_revision(readme)
@@ -232,10 +234,9 @@ def fetch(url: str, *, label: str = "Release evidence") -> str:
             payload = response.read(_RESPONSE_LIMIT + 1)
     except HTTPError as error:
         message = f"{label}: HTTP {error.code}"
-        try:
+        with suppress(Exception):
             error.close()
-        finally:
-            raise ValueError(message) from error
+        raise ValueError(message) from error
     except TimeoutError as error:
         message = f"{label}: request timed out"
         raise ValueError(message) from error
@@ -272,6 +273,66 @@ def _load_toml(text: str, label: str) -> dict[str, object]:
         raise ValueError(message) from error
 
 
+def _read_utf8(path: Path, label: str) -> str:
+    """Label local file reading and decoding without copying exception text."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        message = f"{label} must contain valid UTF-8"
+        raise ValueError(message) from error
+    except OSError as error:
+        message = f"{label}: unable to read file"
+        raise ValueError(message) from error
+
+
+def _local_project_metadata(text: str) -> tuple[str, str, str, list[str]]:
+    """Validate the local project fields consumed by documentation checks."""
+    label = "Local pyproject.toml"
+    project = _load_toml(text, label).get("project")
+    if not isinstance(project, dict):
+        message = f"{label}: project must be a table"
+        raise ValueError(message)  # noqa: TRY004 - malformed release evidence
+    name = project.get("name")
+    if not isinstance(name, str) or not name.strip():
+        message = f"{label}: project.name must be a nonempty string"
+        raise ValueError(message)
+    version = project.get("version")
+    message = f"{label}: project.version must be a valid version string"
+    if not isinstance(version, str):
+        raise ValueError(message)  # noqa: TRY004 - malformed release evidence
+    try:
+        Version(version)
+    except ValueError as error:
+        raise ValueError(message) from error
+    urls = project.get("urls")
+    if not isinstance(urls, dict):
+        message = f"{label}: project.urls must be a table"
+        raise ValueError(message)  # noqa: TRY004 - malformed release evidence
+    documentation = urls.get("Documentation")
+    if not isinstance(documentation, str) or not documentation.strip():
+        message = f"{label}: project.urls.Documentation must be a nonempty string"
+        raise ValueError(message)
+    classifiers = project.get("classifiers", [])
+    if not isinstance(classifiers, list) or not all(isinstance(value, str) for value in classifiers):
+        message = f"{label}: project.classifiers must be a list of strings"
+        raise ValueError(message)
+    return name, version, documentation, classifiers
+
+
+def _local_site_url(text: str) -> str:
+    """Validate the local documentation site's canonical URL field."""
+    label = "Local zensical.toml"
+    project = _load_toml(text, label).get("project")
+    if not isinstance(project, dict):
+        message = f"{label}: project must be a table"
+        raise ValueError(message)  # noqa: TRY004 - malformed release evidence
+    site_url = project.get("site_url")
+    if not isinstance(site_url, str) or not site_url.strip():
+        message = f"{label}: project.site_url must be a nonempty string"
+        raise ValueError(message)
+    return site_url
+
+
 def _hook_package_metadata(text: str) -> tuple[str, Version]:
     """Validate the fields consumed from the documented hook's package."""
     label = "Hook package metadata"
@@ -301,11 +362,18 @@ def _upload_date(artifact: object) -> str:
         raise ValueError(message)  # noqa: TRY004 - malformed release evidence
     timestamp = artifact.get("upload_time_iso_8601")
     message = f"{label}: upload_time_iso_8601 must be an ISO timestamp string"
-    if not isinstance(timestamp, str) or "T" not in timestamp:
+    if not isinstance(timestamp, str):
+        raise ValueError(message)  # noqa: TRY004 - malformed release evidence
+    try:
+        uploaded = datetime.datetime.fromisoformat(timestamp)
+    except ValueError as error:
+        raise ValueError(message) from error
+    if uploaded.tzinfo is None or uploaded.utcoffset() is None:
+        message = f"{label}: upload_time_iso_8601 must be a timezone-aware ISO timestamp string"
         raise ValueError(message)
     try:
-        return datetime.datetime.fromisoformat(timestamp).date().isoformat()
-    except ValueError as error:
+        return uploaded.astimezone(datetime.UTC).date().isoformat()
+    except (ValueError, OverflowError) as error:
         raise ValueError(message) from error
 
 
@@ -328,10 +396,13 @@ def _published_release_dates(text: str) -> dict[str, str]:
         if not artifacts:
             continue
         try:
-            Version(version)
+            parsed_version = Version(version)
         except ValueError as error:
             message = f"{label}: release keys must be valid version strings"
             raise ValueError(message) from error
+        if parsed_version.local is not None:
+            message = f"{label}: release keys must be public version strings without local labels"
+            raise ValueError(message)
         dates[version] = min(_upload_date(artifact) for artifact in artifacts)
     return dates
 
@@ -339,7 +410,16 @@ def _published_release_dates(text: str) -> dict[str, str]:
 def schema_paths(project: Path) -> list[Path]:
     """Discover every canonical JSON schema relative to the package."""
     package = project / "pyroma"
-    paths = sorted(path.relative_to(package) for path in (package / "schemas").rglob("*.json") if path.is_file())
+    source = package / "schemas"
+    if source.is_symlink():
+        message = "Canonical packaged schema directory must not be a symlink"
+        raise ValueError(message)
+    if not source.is_dir():
+        message = "Canonical packaged schema directory is missing"
+        raise ValueError(message)
+    paths = sorted(
+        path.relative_to(package) for path in source.rglob("*.json") if not path.is_symlink() and path.is_file()
+    )
     if not paths:
         message = "Canonical packaged schema directory has no JSON schemas"
         raise ValueError(message)
@@ -351,9 +431,8 @@ def _check_published_contract(project: Path) -> None:
     fetch(SITE_URL + "json/", label="JSON guide")
     for relative in schema_paths(project):
         label = f"Published schema {relative.relative_to('schemas').as_posix()}"
-        canonical = _load_json(
-            (project / "pyroma" / relative).read_text(encoding="utf-8"), f"Packaged schema {relative.as_posix()}"
-        )
+        packaged_label = f"Packaged schema {relative.as_posix()}"
+        canonical = _load_json(_read_utf8(project / "pyroma" / relative, packaged_label), packaged_label)
         published = _load_json(fetch(SITE_URL + relative.as_posix(), label=label), label)
         if published != canonical:
             message = f"{label} does not match packaged schema"
@@ -371,8 +450,8 @@ def check_online(project: Path, revision: str) -> None:
         fetch(SITE_URL + page, label=label)
     _check_published_contract(project)
     base = "https://raw.githubusercontent.com/hbmartin/pyroma621/" + quote(revision, safe="") + "/"
-    name, version = _hook_package_metadata(fetch(base + "pyproject.toml", label="Hook package metadata"))
-    if name != "pyroma621" or version != Version(revision):
+    name, hook_version = _hook_package_metadata(fetch(base + "pyproject.toml", label="Hook package metadata"))
+    if name != "pyroma621" or hook_version != Version(revision):
         message = "Documented pre-commit revision must install a pyroma621 release"
         raise ValueError(message)
     _require_hook_definition(
@@ -380,8 +459,12 @@ def check_online(project: Path, revision: str) -> None:
     )
     entries = changelog_entries((project / "docs" / "changelog.md").read_text(encoding="utf-8"))
     dates = _published_release_dates(fetch("https://pypi.org/pypi/pyroma621/json", label="PyPI release metadata"))
-    for version, date in dates.items():
-        _require_date(entries, version, date)
+    for release_version, date in dates.items():
+        try:
+            _require_date(entries, release_version, date)
+        except ValueError as error:
+            message = "PyPI release metadata: Changelog must have a matching dated entry for each published release"
+            raise ValueError(message) from error
 
 
 def prepare_schemas(project: Path) -> None:
