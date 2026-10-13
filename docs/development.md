@@ -421,15 +421,21 @@ The packaged JSON files are the source of truth; `docs/schemas/` is generated
 and ignored. Preparation replaces this generated tree, including all canonical
 schema versions, so repeated builds remove stale downloads. Discovery includes
 regular JSON files and excludes file and directory symlinks; a symlinked root
-is rejected. Missing, empty, or unreadable inventories fail explicitly, and
-all schemas must decode as UTF-8 and parse as JSON before preparation replaces
-existing generated files. The docs-only
+is rejected. Other special filesystem entries, including FIFOs, sockets and
+devices, are rejected with their relative paths. Missing, empty, or unreadable
+inventories fail explicitly, and all schemas must decode as UTF-8 and parse as
+JSON before preparation replaces existing generated files. The docs-only
 environment does not install the runtime project. Offline tests validate every
 JSON documentation example and the PEP 440 syntax of its illustrative checker version.
 After the strict build, CI requires a nonempty JSON guide and compares the
 permitted schema paths and original bytes before uploading it; unexpected files
-and built symlinks fail verification. This also runs on pull requests and covers
-every schema version. `check-schemas` accepts `--site PATH` (default: the project's
+and built symlinks fail verification. Built directories must be exactly the
+parents required by the schema files, so unexpected empty directories also fail.
+Inventory mismatches list sorted missing and extra relative paths; paths in
+diagnostics escape control characters. Generated `docs/schemas` must be a real
+directory when present; normal and broken symlinks are rejected. This also runs
+on pull requests and covers every schema version. `check-schemas` accepts
+`--site PATH` (default: the project's
 `site/`) and `--inventory-output PATH` to write the verified, sorted paths as
 compact JSON. Failed verification does not overwrite an existing inventory.
 Check documentation consistency locally, or include live release evidence:
@@ -440,7 +446,8 @@ $ uv run --locked --only-group release python ci/release_docs.py check --online
 ```
 
 Tagged package validation runs the offline check before building. It requires
-a dated changelog heading, a documented hook revision equal to the literal tag,
+a dated changelog heading using the exact `YYYY-MM-DD` spelling and a valid
+calendar date, a documented hook revision equal to the literal tag,
 and a Production/Stable or Mature classifier for final releases. Every offline
 check requires a valid static project version and the local `.pre-commit-hooks.yaml` to provide a `pyroma` hook
 with `entry: pyroma` in the same entry. Publishing is independent
@@ -456,6 +463,9 @@ contents with a release tag.
 The optional `--online` maintainer audit probes live documentation, compares
 downloaded schemas with the checkout, verifies the documented release's
 distribution and hook, and checks PyPI upload dates against changelog headings.
+Schema comparison uses JSON value types: booleans differ from numbers, numeric
+values such as `1` and `1.0` are equivalent, array order matters, and object-key
+order does not. Online changelog dates require the same `YYYY-MM-DD` spelling.
 It is not part of the publish gate and can fail for old checkouts after the live
 site or published release list changes. It reads and validates all local schemas
 and the changelog before making any network requests.
@@ -487,8 +497,11 @@ and remote JSON/TOML parsing or structure errors identify the resource and
 invalid field without printing its URL or response values. Local project and site
 TOML syntax, decoding, and field errors identify the file; README, changelog,
 hook-manifest, and packaged-schema read or decoding failures also identify their
-resource. OS failures distinguish missing files, permission failures, directories
-instead of files, and I/O failures without copying raw exception text.
+resource. Generated-schema directory inspection, removal, creation and writes,
+and verified inventory output writes, also report a resource label and safe
+OS category without printing absolute output paths. OS failures distinguish
+missing files, permission failures, directories instead of files, and I/O
+failures without copying raw exception text.
 PyPI release keys must be public versions
 without local labels, and upload timestamps must include a timezone. Upload dates
 use UTC, including timestamps supplied with another offset. Online changelog
