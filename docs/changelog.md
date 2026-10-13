@@ -21,6 +21,10 @@
   metadata structures and packaged schemas, and close HTTP error responses.
   Deploy Pages before checking out schema inventory, and fail availability
   checks when inventory discovery fails or finds no schemas.
+- Label local documentation metadata and packaged-schema decoding failures,
+  reject local-version PyPI evidence, compare upload dates in UTC, and preserve
+  interrupts during HTTP error cleanup. Match regular-file schema inventories
+  across release and deployment checks and use a sparse inventory checkout.
 - Keep release lifecycle tests independent of the current checkout version,
   share CLI/config selector validation, and include test dependencies in the
   default development environment.

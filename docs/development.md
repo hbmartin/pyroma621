@@ -438,8 +438,11 @@ check also requires the local `.pre-commit-hooks.yaml` to provide a `pyroma` hoo
 with `entry: pyroma` in the same entry. Publishing is independent
 of the current Pages deployment. After deploying Pages, the docs workflow checks
 availability of the JSON guide and every canonical schema download with bounded curl
-retries. Schema inventory checkout follows deployment, and a missing or empty
-inventory fails the availability check; it does not compare contents with a release tag.
+retries. A sparse checkout of the schema tree follows deployment. Inventories
+include regular JSON files and exclude file and directory symlinks; a symlinked
+inventory root is rejected. Missing, empty, or unreadable inventories fail with
+explicit diagnostics before any probes. The availability check does not compare
+contents with a release tag.
 
 The optional `--online` maintainer audit probes live documentation, compares
 downloaded schemas with the checkout, verifies the documented release's
@@ -450,12 +453,16 @@ For a tagged offline check, pass `--release-tag TAG` from the corresponding rele
 checkout after dating its changelog heading and updating its documented hook.
 Only README examples preceded by a standalone `<!-- pyroma-pre-commit -->`
 outside code blocks are parsed as YAML, including examples inside lists and
-blockquotes; literal marker mentions and unrelated YAML blocks are ignored.
+blockquotes. Inline marker mentions in paragraph, heading, table-row, or list-item
+prose are ignored, as are mentions inside Markdown inline, indented, or fenced
+code and unrelated YAML blocks.
 Each marker must precede a complete YAML fence in the same Markdown container,
 with optional blank lines. Markers on fence lines are rejected, and unclosed
 fences identify their opening README line. A marker merged into a larger HTML
-block is rejected at its source line. Separate markers inside HTML wrappers
-such as `<details>` from surrounding HTML with blank lines.
+block is rejected at its source line, including raw HTML `<pre>` or `<code>`
+regions and larger maintainer comments. Use Markdown code formatting for literal
+HTML marker examples. Separate markers inside HTML wrappers such as `<details>`
+from surrounding HTML with blank lines.
 Every marked example must contain at least one entry with the fork's exact
 `pyroma` hook, and all matching revisions must agree. Other repository or hook
 entries in that block are allowed and do not contribute revisions.
@@ -467,9 +474,14 @@ installing the runtime project. README input accepts an initial UTF-8 BOM,
 and diagnostics use Markdown source lines.
 Requests have 15-second timeouts and 2 MiB response limits; fetch, decoding,
 and remote JSON/TOML parsing or structure errors identify the resource and
-invalid field without printing its URL or response values. HTTP error responses
-are closed, and malformed packaged schemas identify their path. Unit tests mock all
-remote evidence.
+invalid field without printing its URL or response values. Local project and site
+TOML syntax, decoding, and field errors identify the file; malformed or undecodable
+packaged schemas identify their path. PyPI release keys must be public versions
+without local labels, and upload timestamps must include a timezone. Upload dates
+use UTC, including timestamps supplied with another offset. Online changelog
+failures do not print remote release keys. HTTP error responses are closed;
+ordinary cleanup failures preserve the status diagnostic, while interrupts
+propagate. Unit tests mock all remote evidence.
 Installed-artifact validation covers Python 3.11, 3.13, and 3.14, including
 both CLI entry points, schema resources, version output, usage-error JSON,
 and effective policy. The corrected README ships with the next PyPI release;

@@ -71,13 +71,26 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
+          sparse-checkout: pyroma/schemas
+          sparse-checkout-cone-mode: false
       - name: Check JSON guide and schema availability
         id: schema_availability
         shell: bash
         env:
           DOCS_URL: ${{ steps.deployment.outputs.page_url }}
         run: |
-          schemas=$(find pyroma/schemas -type f -name '*.json' | sort | sed 's|^pyroma/||')
+          if [ -L pyroma/schemas ]; then
+            printf 'Canonical packaged schema directory must not be a symlink\n' >&2
+            exit 1
+          fi
+          if [ ! -d pyroma/schemas ]; then
+            printf 'Canonical packaged schema directory is missing\n' >&2
+            exit 1
+          fi
+          if ! schemas=$(find pyroma/schemas -type f -name '*.json' | sort | sed 's|^pyroma/||'); then
+            printf 'Unable to read canonical schema inventory\n' >&2
+            exit 1
+          fi
           if [ -z "$schemas" ]; then
             printf 'Canonical packaged schema directory has no JSON schemas\n' >&2
             exit 1
