@@ -27,6 +27,11 @@
   Validate all local schemas before fetching live evidence, label README,
   changelog and hook-manifest read failures with safe OS categories, and explain
   online changelog failures with the expected UTC date without remote release keys.
+  Require calendar changelog dates in `YYYY-MM-DD` form and distinguish boolean
+  values from numbers when comparing published schemas. Reject special schema
+  filesystem entries and unexpected built directories; inventory diagnostics name
+  sorted missing and extra relative paths. Generated-schema and inventory-output
+  failures use safe resource labels, including symlinked generated directories.
 - Keep release lifecycle tests independent of the current checkout version,
   share CLI/config selector validation, and include test dependencies in the
   default development environment.

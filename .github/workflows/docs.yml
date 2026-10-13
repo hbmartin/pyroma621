@@ -36,14 +36,8 @@ jobs:
         run: |
           uv run --locked --only-group docs python ci/release_docs.py check-schemas \
             --inventory-output "$RUNNER_TEMP/schema-inventory.json"
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-
-          manifest = Path(os.environ["RUNNER_TEMP"]) / "schema-inventory.json"
-          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
-              output.write("schema_paths=" + manifest.read_text(encoding="utf-8").strip() + "\n")
-          PY
+          manifest=$(cat "$RUNNER_TEMP/schema-inventory.json")
+          printf 'schema_paths=%s\n' "$manifest" >> "$GITHUB_OUTPUT"
       - name: Configure GitHub Pages
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
@@ -59,7 +53,6 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     permissions:
-      contents: read
       pages: write
       id-token: write
     environment:

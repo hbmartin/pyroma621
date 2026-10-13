@@ -36,6 +36,7 @@ _RESPONSE_LIMIT = 2 * 1024 * 1024
 _PRECOMMIT_MARKER = "<!-- pyroma-pre-commit -->"
 _FINAL_STATUSES = {"Development Status :: 5 - Production/Stable", "Development Status :: 6 - Mature"}
 _LOCAL_PROJECT_LABEL = "Local pyproject.toml"
+_CHANGELOG_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,12 @@ class _LocalProjectMetadata:
 class _SchemaEvidence:
     payload: bytes
     document: object
+
+
+@dataclass(frozen=True)
+class _SchemaInventory:
+    files: frozenset[Path]
+    directories: frozenset[Path]
 
 
 def changelog_entries(text: str) -> dict[str, str]:
@@ -188,10 +195,18 @@ def _is_pyroma_repository(repository: object) -> bool:
     return isinstance(repository, str) and repository.rstrip("/").removesuffix(".git") == REPOSITORY
 
 
+def _changelog_date(value: str) -> datetime.date:
+    """Require the documented calendar-date spelling before parsing it."""
+    if _CHANGELOG_DATE.fullmatch(value) is None:
+        message = "Changelog dates must use YYYY-MM-DD"
+        raise ValueError(message)
+    return datetime.date.fromisoformat(value)
+
+
 def _require_date(entries: dict[str, str], version: str, expected: str | None = None) -> None:
     value = entries.get(version, "")
     try:
-        datetime.date.fromisoformat(value)
+        _changelog_date(value)
     except ValueError as error:
         message = f"Published/release version {version} needs a dated changelog entry"
         raise ValueError(message) from error
@@ -307,6 +322,14 @@ def _read_bytes(path: Path, label: str) -> bytes:
         return path.read_bytes()
     except OSError as error:
         message = f"{label}: unable to read file ({_os_error_reason(error)})"
+        raise ValueError(message) from error
+
+
+def _write_bytes(path: Path, payload: bytes, label: str) -> None:
+    try:
+        path.write_bytes(payload)
+    except OSError as error:
+        message = f"{label}: unable to write file ({_os_error_reason(error)})"
         raise ValueError(message) from error
 
 
@@ -446,31 +469,48 @@ def _published_release_dates(text: str) -> dict[str, str]:
     return dates
 
 
-def _scan_inventory(folder: Path, root: Path, label: str, *, ignore_symlinks: bool) -> list[Path]:
-    paths: list[Path] = []
+def _escaped_path(path: Path) -> str:
+    """Display relative paths without embedding control characters."""
+    return json.dumps(path.as_posix())[1:-1]
+
+
+def _scan_inventory(folder: Path, root: Path, label: str, *, ignore_symlinks: bool) -> _SchemaInventory:
+    files: set[Path] = set()
+    directories: set[Path] = set()
     try:
         with os.scandir(folder) as entries:
             for entry in entries:
-                entry_mode = entry.stat(follow_symlinks=False).st_mode
                 path = Path(entry.path)
+                relative = path.relative_to(root)
+                try:
+                    entry_mode = entry.stat(follow_symlinks=False).st_mode
+                except OSError as error:
+                    message = f"{label}: unable to stat entry {_escaped_path(relative)} ({_os_error_reason(error)})"
+                    raise ValueError(message) from error
                 if stat.S_ISLNK(entry_mode):
                     if not ignore_symlinks:
-                        message = f"{label}: symlinks are not permitted"
+                        message = f"{label}: symlinks are not permitted at {_escaped_path(relative)}"
                         raise ValueError(message)
                 elif stat.S_ISDIR(entry_mode):
-                    paths.extend(_scan_inventory(path, root, label, ignore_symlinks=ignore_symlinks))
+                    directories.add(relative)
+                    nested = _scan_inventory(path, root, label, ignore_symlinks=ignore_symlinks)
+                    files.update(nested.files)
+                    directories.update(nested.directories)
                 elif stat.S_ISREG(entry_mode):
-                    paths.append(path.relative_to(root))
-                elif not ignore_symlinks:
-                    message = f"{label}: entries must be regular files or directories"
+                    files.add(relative)
+                else:
+                    message = f"{label}: entries must be regular files or directories at {_escaped_path(relative)}"
                     raise ValueError(message)
     except OSError as error:
-        message = f"{label}: unable to read inventory ({_os_error_reason(error)})"
+        message = (
+            f"{label}: unable to read inventory at {_escaped_path(folder.relative_to(root))} "
+            f"({_os_error_reason(error)})"
+        )
         raise ValueError(message) from error
-    return paths
+    return _SchemaInventory(frozenset(files), frozenset(directories))
 
 
-def _inventory_files(directory: Path, label: str, *, ignore_symlinks: bool) -> list[Path]:
+def _schema_inventory(directory: Path, label: str, *, ignore_symlinks: bool) -> _SchemaInventory:
     """Scan without following links or suppressing directory/stat failures."""
     try:
         mode = directory.lstat().st_mode
@@ -486,18 +526,15 @@ def _inventory_files(directory: Path, label: str, *, ignore_symlinks: bool) -> l
     if not stat.S_ISDIR(mode):
         message = f"{label} is not a directory"
         raise ValueError(message)
-    return sorted(_scan_inventory(directory, directory, label, ignore_symlinks=ignore_symlinks))
+    return _scan_inventory(directory, directory, label, ignore_symlinks=ignore_symlinks)
 
 
 def schema_paths(project: Path) -> list[Path]:
     """Discover every canonical JSON schema relative to the package."""
-    paths = [
-        Path("schemas") / path
-        for path in _inventory_files(
-            project / "pyroma" / "schemas", "Canonical packaged schema directory", ignore_symlinks=True
-        )
-        if path.name.endswith(".json")
-    ]
+    inventory = _schema_inventory(
+        project / "pyroma" / "schemas", "Canonical packaged schema directory", ignore_symlinks=True
+    )
+    paths = sorted(Path("schemas") / path for path in inventory.files if path.name.endswith(".json"))
     if not paths:
         message = "Canonical packaged schema directory has no JSON schemas"
         raise ValueError(message)
@@ -508,20 +545,35 @@ def _canonical_schemas(project: Path) -> dict[Path, _SchemaEvidence]:
     """Read all schema evidence before modifying output or fetching resources."""
     schemas = {}
     for relative in schema_paths(project):
-        label = f"Packaged schema {relative.as_posix()}"
+        label = f"Packaged schema {_escaped_path(relative)}"
         payload = _read_bytes(project / "pyroma" / relative, label)
         document = _load_json(_decode_utf8(payload, label), label)
         schemas[relative] = _SchemaEvidence(payload, document)
     return schemas
 
 
+def _json_equal(left: object, right: object) -> bool:
+    """Compare JSON values without treating booleans as numbers."""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return left == right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(_json_equal(value, right[key]) for key, value in left.items())
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(_json_equal(a, b) for a, b in zip(left, right, strict=True))
+    return left == right
+
+
 def _check_published_contract(schemas: dict[Path, _SchemaEvidence]) -> None:
     """Require the JSON guide and canonical schema downloads to be published."""
     fetch(SITE_URL + "json/", label="JSON guide")
     for relative, evidence in schemas.items():
-        label = f"Published schema {relative.relative_to('schemas').as_posix()}"
+        label = f"Published schema {_escaped_path(relative.relative_to('schemas'))}"
         published = _load_json(fetch(SITE_URL + quote(relative.as_posix(), safe="/"), label=label), label)
-        if published != evidence.document:
+        if not _json_equal(published, evidence.document):
             message = f"{label} does not match packaged schema"
             raise ValueError(message)
 
@@ -554,7 +606,7 @@ def check_online(project: Path, revision: str) -> None:
             message = f"{context} has no matching heading"
             raise ValueError(message)
         try:
-            datetime.date.fromisoformat(value)
+            _changelog_date(value)
         except ValueError as error:
             message = f"{context} needs a valid dated heading"
             raise ValueError(message) from error
@@ -567,12 +619,41 @@ def prepare_schemas(project: Path) -> None:
     """Copy the canonical packaged schemas into the documentation input."""
     schemas = _canonical_schemas(project)
     destination = project / "docs" / "schemas"
-    if destination.exists():
-        shutil.rmtree(destination)
+    label = "Generated schema directory docs/schemas"
+    try:
+        mode = destination.lstat().st_mode
+    except FileNotFoundError:
+        mode = None
+    except OSError as error:
+        message = f"{label}: unable to inspect directory ({_os_error_reason(error)})"
+        raise ValueError(message) from error
+    if mode is not None:
+        if stat.S_ISLNK(mode):
+            message = f"{label} must not be a symlink"
+            raise ValueError(message)
+        if not stat.S_ISDIR(mode):
+            message = f"{label} is not a directory"
+            raise ValueError(message)
+        try:
+            shutil.rmtree(destination)
+        except OSError as error:
+            message = f"{label}: unable to remove directory ({_os_error_reason(error)})"
+            raise ValueError(message) from error
     for relative, evidence in schemas.items():
         path = project / "docs" / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(evidence.payload)
+        label = f"Generated schema {_escaped_path(relative)}"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            message = f"{label}: unable to create directory ({_os_error_reason(error)})"
+            raise ValueError(message) from error
+        _write_bytes(path, evidence.payload, label)
+
+
+def _inventory_difference(kind: str, built: set[Path], expected: set[Path]) -> str:
+    extra = json.dumps(sorted(path.as_posix() for path in built - expected))
+    missing = json.dumps(sorted(path.as_posix() for path in expected - built))
+    return f"{kind}: extra {extra}; missing {missing}"
 
 
 def check_schema_outputs(project: Path, site: Path) -> list[Path]:
@@ -582,15 +663,22 @@ def check_schema_outputs(project: Path, site: Path) -> list[Path]:
     if not _read_bytes(guide, "Built JSON guide json/index.html"):
         message = "Built JSON guide json/index.html must not be empty"
         raise ValueError(message)
-    built = {
-        Path("schemas") / path
-        for path in _inventory_files(site / "schemas", "Built schema directory", ignore_symlinks=False)
-    }
-    if built != set(schemas):
-        message = "Built schema files do not match the canonical packaged inventory"
+    inventory = _schema_inventory(site / "schemas", "Built schema directory", ignore_symlinks=False)
+    built = {Path("schemas") / path for path in inventory.files}
+    directories = {Path("schemas") / path for path in inventory.directories}
+    expected = set(schemas)
+    expected_directories = {parent for path in expected for parent in path.parents if parent != Path()}
+    directories.add(Path("schemas"))
+    if built != expected or directories != expected_directories:
+        message = "Built schema files do not match the canonical packaged inventory; " + "; ".join(
+            [
+                _inventory_difference("files", built, expected),
+                _inventory_difference("directories", directories, expected_directories),
+            ]
+        )
         raise ValueError(message)
     for relative, evidence in schemas.items():
-        label = f"Built schema {relative.as_posix()}"
+        label = f"Built schema {_escaped_path(relative)}"
         if _read_bytes(site / relative, label) != evidence.payload:
             message = f"{label} does not match packaged schema bytes"
             raise ValueError(message)
@@ -615,8 +703,10 @@ def main() -> None:
         elif args.command == "check-schemas":
             paths = check_schema_outputs(args.project, args.site if args.site is not None else args.project / "site")
             if args.inventory_output is not None:
-                args.inventory_output.write_text(
-                    json.dumps([path.as_posix() for path in paths], separators=(",", ":")) + "\n", encoding="utf-8"
+                _write_bytes(
+                    args.inventory_output,
+                    (json.dumps([path.as_posix() for path in paths], separators=(",", ":")) + "\n").encode("utf-8"),
+                    "Schema inventory output",
                 )
         else:
             revision = check_offline(args.project, args.release_tag)
