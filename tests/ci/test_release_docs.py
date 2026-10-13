@@ -2180,7 +2180,7 @@ def test_built_inventory_diagnostics_name_relative_entries(
         expected = 'missing ["schemas/v1/rating.json"]'
     elif failure == "extra-directory":
         (schemas / "v99/nested").mkdir(parents=True)
-        expected = 'directories: extra ["schemas/v99", "schemas/v99/nested"]'
+        expected = 'directories: extra ["schemas/v99"]'
     elif failure == "missing-directory":
         shutil.rmtree(schemas / "v1")
         expected = 'directories: extra []; missing ["schemas/v1"]'
@@ -2418,7 +2418,11 @@ def test_schema_scan_read_races_are_rejected_promptly(project: Path, race: str) 
     else:
         if race.endswith("directory-symlink"):
             if race.startswith("guide"):
-                expected = "Built JSON guide json/index.html at json: directory changed during validation"
+                expected = (
+                    "Built JSON guide json/index.html at json: directory changed during validation"
+                    if release_docs._search_anchors_supported()
+                    else "Built JSON guide json/index.html: file changed during validation"
+                )
             elif release_docs._anchored_paths_supported():
                 label = (
                     "Built schema directory (schemas relative to the site directory)"
@@ -3166,6 +3170,7 @@ def test_output_link_inspection_failures_preserve_the_entry(
 def test_nonfollowing_open_errors_have_portable_diagnostics(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, number: int
 ) -> None:
+    (tmp_path / "schema.json").write_bytes(b"{}")
     monkeypatch.setattr(release_docs, "_anchored_paths_supported", lambda: False)
     monkeypatch.setattr(os, "open", Mock(side_effect=OSError(number, "secret")))
     with pytest.raises(ValueError, match="symlink not permitted"):
@@ -3285,7 +3290,7 @@ def test_schema_read_cleanup_preserves_the_primary_error(monkeypatch: pytest.Mon
 def test_stdout_requires_progress_and_closes_a_failed_stream(
     monkeypatch: pytest.MonkeyPatch, progress: int | None, partial: bool
 ) -> None:
-    output = Mock()
+    output = stdout_stream()
     output.buffer.write.side_effect = [2, progress] if partial else [progress]
     with monkeypatch.context() as patch:
         patch.setattr(sys, "stdout", output)
@@ -3300,7 +3305,7 @@ def test_stdout_requires_progress_and_closes_a_failed_stream(
 
 def test_stdout_retries_only_unwritten_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
     received = BytesIO()
-    output = Mock()
+    output = stdout_stream()
 
     def write(payload: bytes) -> int:
         return received.write(payload[:2])
@@ -3417,8 +3422,14 @@ def test_inventory_rejects_directory_identity_changes_after_reading(
     monkeypatch: pytest.MonkeyPatch, project: Path, location: str, replacement: str, search_only: bool
 ) -> None:
     prepare_site(project)
-    if not search_only:
+    if search_only:
+        if not release_docs._search_anchors_supported():
+            pytest.skip("Search-only anchoring is unavailable")
+        assert release_docs._search_anchors_supported()
+    else:
         monkeypatch.setattr(release_docs, "_SEARCH_FLAG", None)
+        assert release_docs._anchored_paths_supported()
+        assert not release_docs._search_anchors_supported()
     victim = project / location
     backup = victim.with_name("original-tree")
     external = project / "external-tree"
@@ -3748,3 +3759,331 @@ def test_schema_discovery_does_not_read_or_parse_files(monkeypatch: pytest.Monke
     monkeypatch.setattr(release_docs, "_read_schema_bytes", reader)
     assert release_docs.schema_paths(project)
     reader.assert_not_called()
+
+
+def select_read_capability(monkeypatch: pytest.MonkeyPatch, capability: str) -> None:
+    """Assert the selected path instead of silently repeating another case."""
+    if capability == "search":
+        if not release_docs._search_anchors_supported():
+            pytest.skip("Search-only anchoring is unavailable")
+        assert release_docs._search_anchors_supported()
+    else:
+        monkeypatch.setattr(release_docs, "_SEARCH_FLAG", None)
+        if capability == "path":
+            monkeypatch.setattr(release_docs, "_DIRECTORY_OPERATIONS", False)
+        elif not release_docs._anchored_paths_supported():
+            pytest.skip("Descriptor traversal is unavailable")
+        assert not release_docs._search_anchors_supported()
+        assert release_docs._anchored_paths_supported() == (capability == "descriptor")
+
+
+@pytest.mark.parametrize("capability", ["descriptor", "path"])
+@pytest.mark.parametrize("race", ["file", "parent-roundtrip"])
+@pytest.mark.parametrize("output", ["stdout", "existing", "new"])
+@pytest.mark.skipif(os.name != "posix", reason="POSIX guide identity races")
+def test_guide_identity_is_checked_even_after_parent_restoration(  # noqa: PLR0913 - fixtures and independent race/output cases
+    monkeypatch: pytest.MonkeyPatch,
+    project: Path,
+    capsys: pytest.CaptureFixture,
+    capability: str,
+    race: str,
+    output: str,
+) -> None:
+    prepare_site(project)
+    select_read_capability(monkeypatch, capability)
+    guide = project / "site/json/index.html"
+    victim = guide if race == "file" else guide.parent
+    backup = victim.with_name("original-guide")
+    external = project / "alternate-json"
+    external.mkdir()
+    (external / "index.html").write_bytes(b"Substituted guide")
+    manifest = project / "inventory.json"
+    if output == "existing":
+        manifest.write_bytes(b"previous inventory")
+    descriptors = track_schema_descriptors(monkeypatch)
+    original = os.open
+    changed = False
+
+    def opened(path: Path | str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        nonlocal changed
+        if Path(path) != guide or dir_fd is not None:
+            return original(path, flags, mode, dir_fd=dir_fd)
+        victim.rename(backup)
+        changed = True
+        if race == "file":
+            victim.write_bytes(b"Substituted guide")
+            return original(path, flags, mode, dir_fd=dir_fd)
+        victim.symlink_to(external, target_is_directory=True)
+        try:
+            return original(path, flags, mode, dir_fd=dir_fd)
+        finally:
+            victim.unlink()
+            backup.rename(victim)
+            changed = False
+
+    monkeypatch.setattr(os, "open", opened)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "release_docs",
+            "check-schemas",
+            "--project",
+            str(project),
+            "--inventory-output",
+            "-" if output == "stdout" else str(manifest),
+        ],
+    )
+    try:
+        with pytest.raises(SystemExit) as raised:
+            release_docs.main()
+        assert raised.value.code == 1
+        out, error = capsys.readouterr()
+        assert out == ""
+        assert error == (
+            "Release documentation check failed: Built JSON guide json/index.html: file changed during validation\n"
+        )
+        assert manifest.read_bytes() == b"previous inventory" if output == "existing" else not manifest.exists()
+        assert not list(project.glob(".schema-inventory-*"))
+        for descriptor in set(descriptors):
+            with pytest.raises(OSError, match="Bad file descriptor"):
+                os.fstat(descriptor)
+    finally:
+        if changed:
+            victim.unlink()
+            backup.rename(victim)
+
+
+@pytest.mark.parametrize("capability", ["search", "descriptor", "path"])
+@pytest.mark.parametrize("resource", ["canonical", "built"])
+@pytest.mark.parametrize("location", ["schemas", "schemas/v1"])
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory identity races")
+def test_inventory_directory_changes_have_complete_context(
+    monkeypatch: pytest.MonkeyPatch, project: Path, capability: str, resource: str, location: str
+) -> None:
+    prepare_site(project)
+    select_read_capability(monkeypatch, capability)
+    base = project / ("pyroma" if resource == "canonical" else "site")
+    victim = base / location
+    backup = victim.with_name("original-tree")
+    original = release_docs._read_regular_stream
+    changed = False
+
+    def read(*args: object, **kwargs: object) -> bytes:
+        nonlocal changed
+        payload = original(*args, **kwargs)
+        if not changed and str(args[1]).startswith("Packaged schema" if resource == "canonical" else "Built schema"):
+            victim.rename(backup)
+            changed = True
+            shutil.copytree(backup, victim)
+        return payload
+
+    monkeypatch.setattr(release_docs, "_read_regular_stream", read)
+    fetch = Mock(side_effect=AssertionError("Invalid canonical evidence must precede fetches"))
+    monkeypatch.setattr(release_docs, "fetch", fetch)
+    previous = (project / "docs/schemas/v1/error.json").read_bytes()
+    try:
+        operation = (
+            (lambda: release_docs.check_online(project, VERSION))
+            if resource == "canonical"
+            else (lambda: release_docs.check_schema_outputs(project, project / "site"))
+        )
+        with pytest.raises(ValueError, match="directory changed during validation") as raised:
+            operation()
+        directory_label = (
+            "Canonical packaged schema directory (pyroma/schemas)"
+            if resource == "canonical"
+            else "Built schema directory (schemas relative to the site directory)"
+        )
+        prefix = "Packaged schema" if resource == "canonical" else "Built schema"
+        context = f"{prefix} schemas/v1/error.json" if capability == "path" else directory_label
+        assert str(raised.value) == f"{context} at {location}: directory changed during validation"
+        fetch.assert_not_called()
+        assert (project / "docs/schemas/v1/error.json").read_bytes() == previous
+    finally:
+        if changed:
+            shutil.rmtree(victim)
+            backup.rename(victim)
+
+
+@pytest.mark.parametrize("kind", ["unreadable", "large"])
+@pytest.mark.parametrize("missing", [False, True])
+def test_extra_directory_boundaries_are_reported_without_opening(
+    monkeypatch: pytest.MonkeyPatch, project: Path, kind: str, missing: bool
+) -> None:
+    prepare_site(project)
+    extra = project / "site/schemas/v99"
+    extra.mkdir()
+    if kind == "large":
+        for index in range(128):
+            (extra / f"nested-{index}").mkdir()
+    else:
+        extra.chmod(0)
+    if missing:
+        (project / "site/schemas/v1/error.json").unlink()
+    scan = os.scandir
+    opened = os.open
+
+    def no_extra_scan(path: Path | str | int) -> object:
+        assert not matches_open_path(path, extra), "Never scan an unexpected directory"
+        return scan(path)
+
+    def no_extra_open(path: Path | str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        assert not matches_open_path(path, extra, dir_fd=dir_fd), "Never open an unexpected directory"
+        return opened(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "scandir", no_extra_scan)
+    monkeypatch.setattr(os, "open", no_extra_open)
+    try:
+        with pytest.raises(ValueError, match="do not match the canonical packaged inventory") as raised:
+            release_docs.check_schema_outputs(project, project / "site")
+        absent = '["schemas/v1/error.json"]' if missing else "[]"
+        assert str(raised.value) == (
+            "Built schema files do not match the canonical packaged inventory; "
+            f'files: extra []; missing {absent}; directories: extra ["schemas/v99"]; missing []'
+        )
+    finally:
+        extra.chmod(0o700)
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="Non-root POSIX permissions")
+def test_required_built_directory_still_reports_permission_failure(project: Path) -> None:
+    prepare_site(project)
+    required = project / "site/schemas/v1"
+    required.chmod(0)
+    try:
+        with pytest.raises(ValueError, match="permission denied") as raised:
+            release_docs.check_schema_outputs(project, project / "site")
+        assert str(raised.value) == (
+            "Built schema directory (schemas relative to the site directory): "
+            "unable to read inventory at schemas/v1 (permission denied)"
+        )
+    finally:
+        required.chmod(0o700)
+
+
+@pytest.mark.parametrize("optimized", [False, True])
+def test_directory_descriptor_capability_guard_is_not_an_assert(optimized: bool) -> None:
+    script = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from ci import release_docs
+release_docs._SEARCH_FLAG = None
+try:
+    with release_docs._directory_descriptor(Path.cwd(), Path.cwd(), [], "Guide resource"):
+        raise AssertionError("Unavailable capability must fail")
+except ValueError as error:
+    print(error)
+"""
+    result = subprocess.run(  # noqa: S603 - compare the explicit guard with and without optimization
+        [sys.executable, *(["-O"] if optimized else []), "-c", script, str(ROOT)],
+        env={**os.environ, "PYTHONSAFEPATH": "1"},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "Guide resource: search-only directory anchoring is unavailable\n"
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("alias", ["stdout", "fd/1", "fd/1/child.json", "42/task/73/fd/1"])
+@pytest.mark.parametrize("chain", [False, True])
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor namespaces")
+def test_namespace_identity_rejects_aliases_before_terminal_inspection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, alias: str, chain: bool
+) -> None:
+    namespace = tmp_path / "CaseNamespace"
+    namespace.mkdir()
+    info = namespace.stat()
+    canonical = Path("/proc" if alias.startswith("42/") else "/dev")
+    monkeypatch.setattr(release_docs, "_descriptor_namespaces", lambda: {(info.st_dev, info.st_ino): canonical})
+    output = namespace / alias
+    if chain:
+        link = tmp_path / "output-link"
+        link.symlink_to(output)
+        output = link
+    original = release_docs._output_entry
+
+    def inspected(path: Path) -> object:
+        assert path != namespace / alias, "Reject the alias before inspecting its descriptor"
+        return original(path)
+
+    monkeypatch.setattr(release_docs, "_output_entry", inspected)
+    temporary = Mock(side_effect=AssertionError("Never create output in a descriptor namespace"))
+    monkeypatch.setattr(release_docs.tempfile, "TemporaryDirectory", temporary)
+    with pytest.raises(ValueError, match="use --inventory-output - for stdout"):
+        release_docs._write_inventory(output, b"[]\n")
+    temporary.assert_not_called()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor namespaces")
+def test_namespace_identity_does_not_reject_another_directory_on_the_same_device(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    namespace = tmp_path / "namespace"
+    namespace.mkdir()
+    other = tmp_path / "Dev"
+    other.mkdir()
+    info = namespace.stat()
+    assert other.stat().st_dev == info.st_dev
+    assert other.stat().st_ino != info.st_ino
+    monkeypatch.setattr(release_docs, "_descriptor_namespaces", lambda: {(info.st_dev, info.st_ino): Path("/dev")})
+    output = other / "stdout"
+    release_docs._write_inventory(output, b"[]\n")
+    assert output.read_bytes() == b"[]\n"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX namespace and parent-component semantics")
+def test_namespace_identity_does_not_change_parent_component_resolution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    namespace = tmp_path / "namespace"
+    namespace.mkdir()
+    destination = tmp_path / "dev/stdout"
+    destination.parent.mkdir()
+    info = namespace.stat()
+    monkeypatch.setattr(release_docs, "_descriptor_namespaces", lambda: {(info.st_dev, info.st_ino): Path("/dev")})
+    release_docs._write_inventory(namespace / ".." / "dev/stdout", b"[]\n")
+    assert destination.read_bytes() == b"[]\n"
+
+
+@pytest.mark.parametrize("alias", ["/DEV/stdout", "/Dev/fd/1", "/DEV/fd/1/child.json", "chain"])
+def test_native_case_aliases_are_rejected_with_regular_stdout(tmp_path: Path, alias: str) -> None:
+    if os.name != "posix" or not Path("/DEV").exists() or not Path("/DEV").samefile("/dev"):
+        pytest.skip("Requires a case variant resolving to /dev")
+    output = tmp_path / "stdout-file"
+    link = tmp_path / "alias-chain"
+    link.symlink_to("/Dev/stdout")
+    argument = str(link) if alias == "chain" else alias
+    script = """
+import sys
+from pathlib import Path
+from unittest.mock import Mock
+sys.path.insert(0, sys.argv[1])
+from ci import release_docs
+temporary = Mock(side_effect=AssertionError("Never modify system entries"))
+release_docs.tempfile.TemporaryDirectory = temporary
+try:
+    release_docs._write_inventory(Path(sys.argv[2]), b"[]\\n")
+except ValueError as error:
+    assert str(error) == release_docs._INVENTORY_DESTINATION_ERROR
+else:
+    raise AssertionError("Descriptor alias was accepted")
+temporary.assert_not_called()
+"""
+    with output.open("wb") as stream:
+        result = subprocess.run(  # noqa: S603 - only validation runs against system namespaces
+            [sys.executable, "-c", script, str(ROOT), argument],
+            env={**os.environ, "PYTHONSAFEPATH": "1"},
+            stdout=stream,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    assert result.returncode == 0, result.stderr
+    assert output.read_bytes() == b""
+    assert link.is_symlink()

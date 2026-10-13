@@ -437,6 +437,11 @@ identities are captured and rechecked without opening them for reading; guide
 reads retain weaker path-based parent protection. Directory identities are
 recorded and rechecked before evidence is accepted; real-directory replacement
 and ancestor-link retargeting fail with relative-path diagnostics.
+Guide reads also capture the file's non-following identity before opening and
+compare it with the opened descriptor, including when a substituted parent is
+restored before the parent identity check. Fallback schema reads retain their
+package/site-relative `schemas/...` context rather than naming the file's parent
+as the selected root.
 Schema files and the built JSON guide use nonblocking, non-following opens and
 descriptor validation. After confirming the file is regular, reads restore
 blocking mode and consume that same descriptor. File and directory symlinks
@@ -452,6 +457,10 @@ After the strict build, CI requires a nonempty JSON guide and compares the
 permitted schema paths and original bytes before uploading it; unexpected files
 and built symlinks fail verification. Built directories must be exactly the
 parents required by the schema files, so unexpected empty directories also fail.
+Unexpected directory boundaries are reported without opening their subtrees;
+their descendants are not included in the extra-file or extra-directory lists.
+Unreadable required directories still fail with resource-labelled permission
+diagnostics.
 Inventory mismatches list sorted missing and extra paths. Unexpected built JSON
 files are reported without opening their contents, including unreadable or huge
 extra files. Expected schemas retain protected reads and byte comparison. Schema
@@ -477,7 +486,12 @@ standard descriptor aliases such as `/dev/stdout`, `/dev/fd/1`, and
 `/proc/self/fd/1`, including repeated leading separators, parent-directory aliases, and symlink
 chains pointing to them, are rejected even
 when redirected to regular files. Use `-` and shell redirection for streams.
-This includes `/proc/<pid>/task/<tid>/fd/N`. Destination resolution expands each
+This includes `/proc/<pid>/task/<tid>/fd/N`.
+Descriptor namespace directories are also recognized by device and inode, so
+case variants that resolve to the same directory, such as `/DEV/stdout` on a
+case-insensitive macOS root, receive the same stdout guidance. A directory on
+the same device with a different inode is not treated as a namespace.
+Destination resolution expands each
 link before applying following `..` components, so valid paths are not rejected
 by lexical normalization. Revisiting a link with a different remaining path does
 not end alias checks; the bound counts all link expansions.
