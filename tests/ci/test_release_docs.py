@@ -76,6 +76,60 @@ def schema_build_environment(project: Path) -> dict[str, str]:
     }
 
 
+def run_schema_build(project: Path, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Execute the actual build step with the same bounded Bash invocation."""
+    workflow = yaml.safe_load((ROOT / ".github/workflows/docs.yml").read_text())
+    return subprocess.run(  # noqa: S603 - exercise the repository's actual workflow command
+        workflow_bash_command(workflow_step(workflow["jobs"]["build"]["steps"], "schema_build_outputs")),
+        cwd=project,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+
+
+def scandir_entries(*entries: Mock) -> Mock:
+    """Provide context-managed entries for stat and special-file simulations."""
+    scan = Mock()
+    scan.__enter__ = Mock(return_value=iter(entries))
+    scan.__exit__ = Mock(return_value=False)
+    return scan
+
+
+def run_fifo_checks(project: Path, *, faulty: bool = False, timeout: float = 10) -> subprocess.CompletedProcess[str]:
+    """Keep real FIFO reads out of the pytest process, including faulty scans."""
+    script = """
+import sys
+from pathlib import Path
+from ci import release_docs
+
+project = Path(sys.argv[1])
+if sys.argv[2] == "faulty":
+    release_docs.stat.S_ISREG = lambda mode: not release_docs.stat.S_ISDIR(mode)
+def fetch(*args, **kwargs):
+    raise AssertionError("Special entries must fail before fetching")
+release_docs.fetch = fetch
+for command in [["schemas"], ["check", "--online"]]:
+    sys.argv = ["release_docs", *command, "--project", str(project)]
+    try:
+        release_docs.main()
+    except SystemExit as error:
+        assert error.code == 1
+    else:
+        raise AssertionError("Special entries must be rejected")
+"""
+    return subprocess.run(  # noqa: S603 - bound real pipe reads and verify zero fetches in the child
+        [sys.executable, "-c", script, str(project), "faulty" if faulty else "normal"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=timeout,
+    )
+
+
 def prepare_site(project: Path) -> None:
     release_docs.prepare_schemas(project)
     shutil.copytree(project / "docs/schemas", project / "site/schemas")
@@ -197,7 +251,7 @@ def test_documentation_regressions(project: Path, filename: str, old: str, new: 
 def test_future_release_needs_a_date(project: Path) -> None:
     replace_once(project / "pyproject.toml", f'version = "{VERSION}"', f'version = "{NEXT_VERSION}"')
     assert release_docs.check_offline(project) == VERSION
-    with pytest.raises(ValueError, match="dated"):
+    with pytest.raises(ValueError, match="has no matching heading"):
         release_docs.check_offline(project, NEXT_VERSION)
     with pytest.raises(ValueError, match="does not match"):
         release_docs.check_offline(project, VERSION)
@@ -310,8 +364,8 @@ def test_online_release_evidence(
             "Upgrade guide",
             "Changelog",
             "JSON guide",
-            "Published schema v1/rating.json",
-            "Published schema v1/error.json",
+            "Published schema schemas/v1/rating.json",
+            "Published schema schemas/v1/error.json",
             "Hook package metadata",
             "Published hook manifest",
             "PyPI release metadata",
@@ -341,12 +395,12 @@ def test_online_schemas_must_match_package(
     url = release_docs.SITE_URL + f"schemas/v1/{kind}.json"
     if failure == "invalid":
         online_evidence[url] = "not JSON"
-        message = f"Published schema v1/{kind}.json must contain valid JSON"
+        message = f"Published schema schemas/v1/{kind}.json must contain valid JSON"
     else:
         schema = json.loads(online_evidence[url])
         schema["title"] = "Stale published schema"
         online_evidence[url] = json.dumps(schema)
-        message = f"Published schema v1/{kind}.json does not match packaged schema"
+        message = f"Published schema schemas/v1/{kind}.json does not match packaged schema"
     monkeypatch.setattr(release_docs, "fetch", lambda url, **_kwargs: online_evidence[url])
     with pytest.raises(ValueError, match=message):
         release_docs.check_online(project, VERSION)
@@ -622,7 +676,7 @@ def test_release_lifecycle_keeps_examples_and_offline_checks_valid(
     replace_once(metadata, f'version = "{NEXT_VERSION}.dev0"', f'version = "{NEXT_VERSION}"')
     replace_once(metadata, "4 - Beta", "5 - Production/Stable")
     replace_once(project / "README.md", f'rev: "{VERSION}"', f'rev: "v{NEXT_VERSION}"')
-    with pytest.raises(ValueError, match=f"{NEXT_VERSION} needs a dated changelog entry"):
+    with pytest.raises(ValueError, match=f"Local docs/changelog.md: Release {NEXT_VERSION} is unreleased"):
         release_docs.check_offline(project, f"v{NEXT_VERSION}")
     replace_once(history, f"## {NEXT_VERSION} (unreleased)", f"## {NEXT_VERSION} ({DATE})")
     assert release_docs.check_offline(project, f"v{NEXT_VERSION}") == f"v{NEXT_VERSION}"
@@ -754,7 +808,8 @@ def test_tagged_prereleases_require_their_own_dated_heading(project: Path, versi
     if heading == DATE:
         assert release_docs.check_offline(project, f"v{version}") == f"v{version}"
     else:
-        with pytest.raises(ValueError, match=f"{re.escape(version)} needs a dated changelog entry"):
+        message = "has no matching heading" if heading == "missing" else "is unreleased"
+        with pytest.raises(ValueError, match=f"Local docs/changelog.md: Release {re.escape(version)} {message}"):
             release_docs.check_offline(project, f"v{version}")
 
 
@@ -810,7 +865,7 @@ def test_remote_parse_failures_are_labelled_and_controlled(
         url = f"https://raw.githubusercontent.com/hbmartin/pyroma621/{VERSION}/pyproject.toml"
         label, kind = "Hook package metadata", "TOML"
     else:
-        url, label, kind = release_docs.SITE_URL + resource, "Published schema v1/rating.json", "JSON"
+        url, label, kind = release_docs.SITE_URL + resource, "Published schema schemas/v1/rating.json", "JSON"
     online_evidence[url] = "[password secret"
     monkeypatch.setattr(release_docs, "fetch", lambda url, **_kwargs: online_evidence[url])
     monkeypatch.setattr("sys.argv", ["release_docs", "check", "--online", "--project", str(project)])
@@ -849,14 +904,14 @@ def test_online_evidence_covers_future_schema_versions(
 
     def evidence(url: str, **_kwargs: str) -> str:
         if failure == "missing" and url.endswith("schemas/v2/rating.json"):
-            message = "Published schema v2/rating.json: HTTP 404"
+            message = "Published schema schemas/v2/rating.json: HTTP 404"
             raise ValueError(message)
         return online_evidence[url]
 
     fetch = Mock(side_effect=evidence)
     monkeypatch.setattr(release_docs, "fetch", fetch)
     if failure:
-        with pytest.raises(ValueError, match=re.escape("Published schema v2/rating.json")):
+        with pytest.raises(ValueError, match=re.escape("Published schema schemas/v2/rating.json")):
             release_docs.check_online(project, VERSION)
     else:
         release_docs.check_online(project, VERSION)
@@ -884,18 +939,8 @@ def test_docs_workflow_checks_all_built_schema_contents(project: Path, failure: 
         guide.unlink()
     elif failure == "empty-guide":
         guide.write_text("", encoding="utf-8")
-    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "docs.yml").read_text())
-    step = workflow_step(workflow["jobs"]["build"]["steps"], "schema_build_outputs")
     environment = schema_build_environment(project)
-    result = subprocess.run(  # noqa: S603 - execute the repository's workflow step in a temporary tree
-        workflow_bash_command(step),
-        cwd=project,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=10,
-    )
+    result = run_schema_build(project, environment)
     assert (result.returncode != 0) == bool(failure), result.stdout + result.stderr
     output = Path(environment["GITHUB_OUTPUT"])
     if failure:
@@ -911,6 +956,8 @@ def test_docs_workflow_checks_all_built_schema_contents(project: Path, failure: 
 @pytest.mark.parametrize("missing", ["", "json/", "schemas/v2/rating.json"])
 @pytest.mark.skipif(os.name == "nt", reason="Documentation workflows use POSIX shells")
 def test_deployment_probes_every_manifest_schema_without_a_checkout(project: Path, missing: str) -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/docs.yml").read_text())
+    step = workflow_step(workflow["jobs"]["deploy"]["steps"], "schema_availability")
     shutil.rmtree(project / "pyroma")
     curl = project / "curl"
     curl.write_text(
@@ -920,8 +967,6 @@ def test_deployment_probes_every_manifest_schema_without_a_checkout(project: Pat
         encoding="utf-8",
     )
     curl.chmod(0o755)
-    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "docs.yml").read_text())
-    step = workflow_step(workflow["jobs"]["deploy"]["steps"], "schema_availability")
     log = project / "requests"
     environment = {
         **os.environ,
@@ -1475,11 +1520,11 @@ def test_pypi_local_version_labels_cannot_leak(
     "case",
     [
         ("", "has no matching heading"),
-        ("unreleased", "needs a valid dated heading"),
-        ("password secret", "needs a valid dated heading"),
-        ("20261012", "needs a valid dated heading"),
-        ("2026-W42-1", "needs a valid dated heading"),
-        ("2026-02-29", "needs a valid dated heading"),
+        ("unreleased", "is unreleased; needs a dated heading in YYYY-MM-DD format"),
+        ("password secret", ": Changelog dates must use YYYY-MM-DD"),
+        ("20261012", ": Changelog dates must use YYYY-MM-DD"),
+        ("2026-W42-1", ": Changelog dates must use YYYY-MM-DD"),
+        ("2026-02-29", ": Changelog dates must be valid calendar dates in YYYY-MM-DD format"),
         ("2026-10-13", "has a mismatched date"),
     ],
 )
@@ -1498,7 +1543,8 @@ def test_online_changelog_errors_do_not_echo_remote_release_keys(
         release_docs.main()
     assert raised.value.code == 1
     err = capsys.readouterr().err
-    assert f"PyPI release metadata: Changelog for a published release (expected UTC date {DATE}) {diagnostic}" in err
+    assert f"PyPI release metadata: Changelog for a published release (expected UTC date {DATE})" in err
+    assert diagnostic in err
     assert VERSION not in err
     assert not any(secret in err for secret in ("Traceback", "https://", "password", "secret"))
 
@@ -1571,18 +1617,8 @@ def test_preparation_and_build_verification_use_only_permitted_schemas(project: 
         == expected
     )
     assert (project / "docs/schemas/v2/rating.json").read_bytes() == previous
-    workflow = yaml.safe_load((ROOT / ".github/workflows/docs.yml").read_text())
-    step = workflow_step(workflow["jobs"]["build"]["steps"], "schema_build_outputs")
     environment = schema_build_environment(project)
-    result = subprocess.run(  # noqa: S603 - verify the real workflow against symlinked inputs
-        workflow_bash_command(step),
-        cwd=project,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=10,
-    )
+    result = run_schema_build(project, environment)
     assert result.returncode == 0, result.stderr
     assert json.loads(Path(environment["GITHUB_OUTPUT"]).read_text().removeprefix("schema_paths=")) == expected
 
@@ -1607,10 +1643,7 @@ def fail_schema_discovery(monkeypatch: pytest.MonkeyPatch, source: Path, failure
                 entry = Mock()
                 entry.path = str(source / "v1/rating.json")
                 entry.stat.side_effect = OSError(errno.EIO, "password secret")
-                entries = Mock()
-                entries.__enter__ = Mock(return_value=iter([entry]))
-                entries.__exit__ = Mock(return_value=False)
-                return entries
+                return scandir_entries(entry)
             return original_scan(path)
 
         monkeypatch.setattr(os, "scandir", denied_scan)
@@ -1641,9 +1674,9 @@ def test_schema_failures_preserve_output_and_precede_all_fetches(
             operation()
         assert "schema" in str(raised.value).lower()
         if failure == "scanning":
-            assert "inventory at v1" in str(raised.value)
+            assert "inventory at schemas/v1" in str(raised.value)
         elif failure == "entry-stat":
-            assert "stat entry v1/rating.json" in str(raised.value)
+            assert "stat entry schemas/v1/rating.json" in str(raised.value)
         assert not any(secret in str(raised.value) for secret in ("password", "secret"))
     assert (project / "docs/schemas/v1/rating.json").read_bytes() == previous
     fetch.assert_not_called()
@@ -1803,15 +1836,7 @@ def test_verified_workflow_inventory_is_probed_with_encoded_paths(project: Path)
     prepare_site(project)
     environment = schema_build_environment(project)
     workflow = yaml.safe_load((ROOT / ".github/workflows/docs.yml").read_text())
-    result = subprocess.run(  # noqa: S603 - run the complete build-to-deploy manifest handoff
-        workflow_bash_command(workflow_step(workflow["jobs"]["build"]["steps"], "schema_build_outputs")),
-        cwd=project,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=10,
-    )
+    result = run_schema_build(project, environment)
     assert result.returncode == 0, result.stderr
     inventory = Path(environment["GITHUB_OUTPUT"]).read_text().removeprefix("schema_paths=").strip()
     shutil.rmtree(project / "pyroma")
@@ -1896,7 +1921,8 @@ def test_tagged_checks_reject_noncanonical_changelog_dates(
         release_docs.main()
     assert raised.value.code == 1
     err = capsys.readouterr().err
-    assert f"{version} needs a dated changelog entry" in err
+    assert f"Local docs/changelog.md: Release {version}: Changelog dates must" in err
+    assert "YYYY-MM-DD" in err
     assert "Traceback" not in err
 
 
@@ -1951,7 +1977,7 @@ def test_online_schema_comparison_uses_json_types(
         with pytest.raises(SystemExit) as raised:
             release_docs.main()
         assert raised.value.code == 1
-        assert "Published schema v1/rating.json does not match packaged schema" in capsys.readouterr().err
+        assert "Published schema schemas/v1/rating.json does not match packaged schema" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -2011,7 +2037,7 @@ def test_required_schema_parents_and_ignored_empty_source_directories(project: P
     assert not (project / "site/schemas/unused").exists()
 
 
-@pytest.mark.parametrize("kind", ["fifo", "socket", "character-device", "block-device"])
+@pytest.mark.parametrize("kind", ["socket", "character-device", "block-device"])
 @pytest.mark.skipif(os.name == "nt", reason="Special filesystem entries require POSIX")
 def test_special_source_entries_preserve_output_and_precede_fetches(
     monkeypatch: pytest.MonkeyPatch, project: Path, capsys: pytest.CaptureFixture, kind: str
@@ -2020,9 +2046,7 @@ def test_special_source_entries_preserve_output_and_precede_fetches(
     previous = (project / "docs/schemas/v1/rating.json").read_bytes()
     source = project / "pyroma/schemas"
     entry_path = source / "unexpected.json"
-    if kind == "fifo":
-        os.mkfifo(entry_path)
-    elif kind == "socket":
+    if kind == "socket":
         monkeypatch.chdir(source)
         with socket.socket(socket.AF_UNIX) as connection:
             connection.bind(entry_path.name)
@@ -2034,10 +2058,7 @@ def test_special_source_entries_preserve_output_and_precede_fetches(
 
         def scan(path: Path) -> object:
             if Path(path) == source:
-                entries = Mock()
-                entries.__enter__ = Mock(return_value=iter([entry]))
-                entries.__exit__ = Mock(return_value=False)
-                return entries
+                return scandir_entries(entry)
             return original_scan(path)
 
         monkeypatch.setattr(os, "scandir", scan)
@@ -2050,8 +2071,8 @@ def test_special_source_entries_preserve_output_and_precede_fetches(
         assert raised.value.code == 1
         err = capsys.readouterr().err
         assert (
-            "Canonical packaged schema directory: entries must be regular files or directories at unexpected.json"
-            in err
+            "Canonical packaged schema directory: entries must be regular files "
+            "or directories at schemas/unexpected.json" in err
         )
         assert str(project) not in err
         assert "Traceback" not in err
@@ -2136,9 +2157,12 @@ def test_output_os_failures_have_safe_cli_diagnostics(
     elif operation == "mkdir":
         monkeypatch.setattr(Path, "mkdir", Mock(side_effect=error))
         label = "Generated schema schemas/v1/error.json"
+    elif operation == "manifest-write":
+        monkeypatch.setattr(release_docs.tempfile, "NamedTemporaryFile", Mock(side_effect=error))
+        label = "Schema inventory output"
     else:
         monkeypatch.setattr(Path, "write_bytes", Mock(side_effect=error))
-        label = "Schema inventory output" if operation == "manifest-write" else "Generated schema schemas/v1/error.json"
+        label = "Generated schema schemas/v1/error.json"
     arguments = ["release_docs", "schemas", "--project", str(project)]
     if operation == "manifest-write":
         arguments = ["release_docs", "check-schemas", "--project", str(project), "--inventory-output", str(manifest)]
@@ -2160,17 +2184,8 @@ def test_actual_build_step_rejects_unexpected_tree_entries(project: Path, failur
         (project / "site/schemas/v99").mkdir()
     else:
         os.mkfifo(project / "site/schemas/unexpected.json")
-    workflow = yaml.safe_load((ROOT / ".github/workflows/docs.yml").read_text())
     environment = schema_build_environment(project)
-    result = subprocess.run(  # noqa: S603 - exercise the actual build verification command
-        workflow_bash_command(workflow_step(workflow["jobs"]["build"]["steps"], "schema_build_outputs")),
-        cwd=project,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=10,
-    )
+    result = run_schema_build(project, environment)
     assert result.returncode == 1
     assert "Built schema" in result.stderr
     entry = "v99" if failure == "empty-directory" else "unexpected.json"
@@ -2180,19 +2195,323 @@ def test_actual_build_step_rejects_unexpected_tree_entries(project: Path, failur
 
 @pytest.mark.skipif(os.name == "nt", reason="Documentation workflows require POSIX")
 def test_actual_build_step_does_not_hide_a_failed_manifest_read(project: Path) -> None:
-    workflow = yaml.safe_load((ROOT / ".github/workflows/docs.yml").read_text())
     environment = schema_build_environment(project)
     # Simulate a successful checker that did not leave the expected handoff file.
     (project / "uv").write_text("#!/bin/sh\nexit 0\n")
-    result = subprocess.run(  # noqa: S603 - verify command-substitution failure stops output emission
-        workflow_bash_command(workflow_step(workflow["jobs"]["build"]["steps"], "schema_build_outputs")),
-        cwd=project,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=10,
-    )
+    result = run_schema_build(project, environment)
     assert result.returncode != 0
     assert "schema-inventory.json" in result.stderr
     assert not Path(environment["GITHUB_OUTPUT"]).exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Real FIFOs require POSIX")
+def test_fifo_source_is_rejected_in_a_bounded_process(project: Path) -> None:
+    release_docs.prepare_schemas(project)
+    previous = (project / "docs/schemas/v1/rating.json").read_bytes()
+    os.mkfifo(project / "pyroma/schemas/unexpected.json")
+    result = run_fifo_checks(project)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stderr.count("regular files or directories at schemas/unexpected.json") == 2
+    assert "Traceback" not in result.stderr
+    assert str(project) not in result.stderr
+    assert (project / "docs/schemas/v1/rating.json").read_bytes() == previous
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Real FIFOs require POSIX")
+def test_faulty_fifo_classification_cannot_hang_pytest(project: Path) -> None:
+    os.mkfifo(project / "pyroma/schemas/unexpected.json")
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_fifo_checks(project, faulty=True, timeout=1)
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize(
+    "case",
+    [
+        (phase, number)
+        for phase in ["creation", "write", "close", "replace"]
+        for number in [errno.ENOSPC, errno.EACCES, errno.EIO]
+    ],
+)
+def test_atomic_inventory_failures_preserve_previous_output(
+    monkeypatch: pytest.MonkeyPatch,
+    project: Path,
+    capsys: pytest.CaptureFixture,
+    existing: bool,
+    case: tuple[str, int],
+) -> None:
+    phase, number = case
+    prepare_site(project)
+    manifest = project / "inventory.json"
+    previous = b'["previous"]\n'
+    if existing:
+        manifest.write_bytes(previous)
+    error = OSError(number, "password secret", str(project / "secret"))
+    original_create = release_docs.tempfile.NamedTemporaryFile
+
+    def create(*, mode: str, dir: Path, prefix: str, delete: bool) -> Mock:  # noqa: A002 - stdlib keyword
+        actual = original_create(mode=mode, dir=dir, prefix=prefix, delete=delete)
+        output = Mock()
+        output.name = actual.name
+
+        def write(payload: bytes) -> int:
+            if phase == "write":
+                actual.write(payload[:3])
+                raise error
+            return actual.write(payload)
+
+        def close(*_args: object) -> None:
+            actual.close()
+            if phase == "close":
+                raise error
+
+        output.write.side_effect = write
+        output.close.side_effect = close
+        return output
+
+    monkeypatch.setattr(
+        release_docs.tempfile, "NamedTemporaryFile", Mock(side_effect=error) if phase == "creation" else create
+    )
+    if phase == "replace":
+        monkeypatch.setattr(os, "replace", Mock(side_effect=error))
+    monkeypatch.setattr(
+        "sys.argv", ["release_docs", "check-schemas", "--project", str(project), "--inventory-output", str(manifest)]
+    )
+    with pytest.raises(SystemExit) as raised:
+        release_docs.main()
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert "Schema inventory output: unable to write file" in err
+    assert {errno.ENOSPC: "disk full", errno.EACCES: "permission denied", errno.EIO: "I/O failure"}[number] in err
+    assert not any(value in err for value in ("Traceback", "password", "secret", str(project)))
+    assert manifest.read_bytes() == previous if existing else not manifest.exists()
+    assert not list(project.glob(".schema-inventory-*"))
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize("phase", ["creation", "replace", "cleanup"])
+def test_inventory_interrupts_propagate_and_preserve_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    interrupt: type[BaseException],
+    phase: str,
+) -> None:
+    manifest = tmp_path / "inventory.json"
+    manifest.write_bytes(b"previous")
+    if phase == "creation":
+        monkeypatch.setattr(release_docs.tempfile, "NamedTemporaryFile", Mock(side_effect=interrupt))
+    else:
+        monkeypatch.setattr(
+            os, "replace", Mock(side_effect=interrupt if phase == "replace" else OSError(errno.ENOSPC, "secret"))
+        )
+        if phase == "cleanup":
+            monkeypatch.setattr(Path, "unlink", Mock(side_effect=interrupt))
+    with pytest.raises(interrupt):
+        release_docs._write_inventory(manifest, b"replacement")
+    assert manifest.read_bytes() == b"previous"
+    if phase != "cleanup":
+        assert not list(tmp_path.glob(".schema-inventory-*"))
+
+
+def test_inventory_cleanup_failure_preserves_the_primary_diagnostic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manifest = tmp_path / "inventory.json"
+    manifest.write_bytes(b"previous")
+    monkeypatch.setattr(os, "replace", Mock(side_effect=OSError(errno.ENOSPC, "secret")))
+    monkeypatch.setattr(Path, "unlink", Mock(side_effect=OSError(errno.EACCES, "password")))
+    with pytest.raises(ValueError, match=r"Schema inventory output: unable to write file \(disk full\)"):
+        release_docs._write_inventory(manifest, b"replacement")
+    assert manifest.read_bytes() == b"previous"
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_inventory_replacement_keeps_compact_manifest_format(
+    monkeypatch: pytest.MonkeyPatch,
+    project: Path,
+    existing: bool,
+) -> None:
+    prepare_site(project)
+    manifest = project / "inventory.json"
+    if existing:
+        manifest.write_bytes(b"old")
+    monkeypatch.setattr(
+        "sys.argv", ["release_docs", "check-schemas", "--project", str(project), "--inventory-output", str(manifest)]
+    )
+    release_docs.main()
+    assert manifest.read_bytes() == b'["schemas/v1/error.json","schemas/v1/rating.json"]\n'
+    assert not list(project.glob(".schema-inventory-*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Output symlinks require POSIX")
+def test_inventory_replacement_replaces_link_without_changing_target(tmp_path: Path) -> None:
+    target = tmp_path / "target.json"
+    target.write_bytes(b"preserved")
+    manifest = tmp_path / "inventory.json"
+    manifest.symlink_to(target)
+    release_docs._write_inventory(manifest, b"replacement")
+    assert not manifest.is_symlink()
+    assert manifest.read_bytes() == b"replacement"
+    assert target.read_bytes() == b"preserved"
+
+
+def test_inventory_output_does_not_create_missing_parents(tmp_path: Path) -> None:
+    directory = tmp_path / "missing"
+    with pytest.raises(ValueError, match=r"Schema inventory output.*file missing"):
+        release_docs._write_inventory(directory / "inventory.json", b"replacement")
+    assert not directory.exists()
+
+
+@pytest.mark.parametrize("heading", ["missing", "unreleased"])
+@pytest.mark.parametrize("version", [VERSION, "9.0.0rc1", "9.0.0.dev1"])
+def test_tagged_changelog_diagnostics_distinguish_missing_and_unreleased(
+    monkeypatch: pytest.MonkeyPatch,
+    project: Path,
+    capsys: pytest.CaptureFixture,
+    heading: str,
+    version: str,
+) -> None:
+    replace_once(project / "pyproject.toml", f'version = "{VERSION}"', f'version = "{version}"')
+    replace_once(project / "README.md", f'rev: "{VERSION}"', f'rev: "{version}"')
+    replace_once(
+        project / "docs/changelog.md",
+        f"## {VERSION} ({DATE})",
+        "" if heading == "missing" else f"## {version} (unreleased)",
+    )
+    monkeypatch.setattr("sys.argv", ["release_docs", "check", "--project", str(project), "--release-tag", version])
+    with pytest.raises(SystemExit) as raised:
+        release_docs.main()
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert f"Local docs/changelog.md: Release {version}" in err
+    assert ("has no matching heading" if heading == "missing" else "is unreleased") in err
+    if heading == "unreleased":
+        assert "YYYY-MM-DD" in err
+    assert "Traceback" not in err
+
+
+@pytest.mark.parametrize("root_failure", ["scan", "stat"])
+def test_root_inventory_errors_identify_schemas(
+    monkeypatch: pytest.MonkeyPatch, project: Path, root_failure: str
+) -> None:
+    root = project / "pyroma/schemas"
+    error = OSError(errno.EIO, "secret")
+    if root_failure == "stat":
+        fail_schema_discovery(monkeypatch, root, "root-stat")
+    else:
+        original = os.scandir
+
+        def denied_scan(path: Path) -> object:
+            if Path(path) == root:
+                raise error
+            return original(path)
+
+        monkeypatch.setattr(os, "scandir", denied_scan)
+    with pytest.raises(
+        ValueError, match=r"Canonical packaged schema directory: unable to read inventory at schemas"
+    ) as raised:
+        release_docs.schema_paths(project)
+    assert " at . " not in str(raised.value)
+    assert str(project) not in str(raised.value)
+
+
+@pytest.mark.parametrize("operation", ["stat", "symlink", "special", "content", "published"])
+@pytest.mark.skipif(os.name == "nt", reason="Unusual filenames and symlinks require POSIX")
+def test_schema_path_diagnostics_share_one_escaped_base(
+    monkeypatch: pytest.MonkeyPatch,
+    project: Path,
+    operation: str,
+) -> None:
+    filename = 'réponse"\\line\n.json'
+    relative = Path("schemas/v2") / filename
+    source = project / "pyroma" / relative
+    source.parent.mkdir()
+    source.write_text("{}")
+    prepare_site(project)
+    built = project / "site" / relative
+    schemas = {}
+    if operation in {"stat", "special"}:
+        entry = Mock()
+        entry.path = str(source)
+        if operation == "stat":
+            entry.stat.side_effect = OSError(errno.EIO, "secret")
+        else:
+            entry.stat.return_value.st_mode = stat.S_IFCHR
+        original = os.scandir
+        monkeypatch.setattr(
+            os, "scandir", lambda path: scandir_entries(entry) if Path(path) == source.parent else original(path)
+        )
+        expected = 'schemas/v2/r\\u00e9ponse\\"\\\\line\\n.json'
+    elif operation == "published":
+        schemas = release_docs._canonical_schemas(project)
+        monkeypatch.setattr(release_docs, "fetch", lambda *_args, **_kwargs: "[]")
+        # Keep only the unusual file so its failure is the one reported.
+        expected = 'schemas/v2/r\\u00e9ponse\\"\\\\line\\n.json'
+    else:
+        if operation == "symlink":
+            built.unlink()
+            built.symlink_to(source)
+        else:
+            built.write_text("[]")
+        expected = 'schemas/v2/r\\u00e9ponse\\"\\\\line\\n.json'
+
+    def check() -> None:
+        if operation in {"stat", "special"}:
+            release_docs.schema_paths(project)
+        elif operation == "published":
+            release_docs._check_published_contract({relative: schemas[relative]})
+        else:
+            release_docs.check_schema_outputs(project, project / "site")
+
+    with pytest.raises(ValueError, match="schema") as raised:
+        check()
+    message = str(raised.value)
+    assert expected in message
+    assert str(project) not in message
+    assert "secret" not in message
+    assert "\n" not in message
+
+
+@pytest.mark.parametrize("phase", ["write", "close"])
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_inventory_write_and_close_interrupts_are_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    phase: str,
+    interrupt: type[BaseException],
+) -> None:
+    manifest = tmp_path / "inventory.json"
+    manifest.write_bytes(b"previous")
+    temporary = tmp_path / ".schema-inventory-test"
+    temporary.write_bytes(b"partial")
+    output = Mock()
+    output.name = str(temporary)
+    if phase == "write":
+        output.write.side_effect = interrupt
+        output.close.side_effect = OSError(errno.EIO, "cleanup secret")
+    else:
+        output.close.side_effect = interrupt
+    monkeypatch.setattr(release_docs.tempfile, "NamedTemporaryFile", Mock(return_value=output))
+    with pytest.raises(interrupt):
+        release_docs._write_inventory(manifest, b"replacement")
+    assert manifest.read_bytes() == b"previous"
+    assert not temporary.exists()
+
+
+def test_inventory_write_failure_is_not_masked_by_close_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "inventory.json"
+    manifest.write_bytes(b"previous")
+    temporary = tmp_path / ".schema-inventory-test"
+    temporary.write_bytes(b"partial")
+    output = Mock()
+    output.name = str(temporary)
+    output.write.side_effect = OSError(errno.ENOSPC, "write secret")
+    output.close.side_effect = OSError(errno.EIO, "close secret")
+    monkeypatch.setattr(release_docs.tempfile, "NamedTemporaryFile", Mock(return_value=output))
+    with pytest.raises(ValueError, match=r"Schema inventory output: unable to write file \(disk full\)"):
+        release_docs._write_inventory(manifest, b"replacement")
+    assert manifest.read_bytes() == b"previous"
+    assert not temporary.exists()

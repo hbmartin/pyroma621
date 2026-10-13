@@ -431,13 +431,22 @@ After the strict build, CI requires a nonempty JSON guide and compares the
 permitted schema paths and original bytes before uploading it; unexpected files
 and built symlinks fail verification. Built directories must be exactly the
 parents required by the schema files, so unexpected empty directories also fail.
-Inventory mismatches list sorted missing and extra relative paths; paths in
-diagnostics escape control characters. Generated `docs/schemas` must be a real
+Inventory mismatches list sorted missing and extra paths. Schema diagnostics
+consistently use paths starting with `schemas/`, with resource labels identifying
+canonical, generated, built, or published files. Paths use JSON-style ASCII
+escaping for non-ASCII characters, controls, quotes, and backslashes.
+Generated `docs/schemas` must be a real
 directory when present; normal and broken symlinks are rejected. This also runs
 on pull requests and covers every schema version. `check-schemas` accepts
 `--site PATH` (default: the project's
 `site/`) and `--inventory-output PATH` to write the verified, sorted paths as
 compact JSON. Failed verification does not overwrite an existing inventory.
+The manifest is written to a temporary sibling and replaces its destination only
+after writing and closing succeed. Creation, writing, closing, or replacement
+failures preserve the previous manifest; cleanup is best effort. Its parent
+directory must already exist. Replacement acts on the destination entry itself,
+so an existing symlink is replaced without changing its target. This does not
+provide power-loss durability or make generated-schema publication atomic.
 Check documentation consistency locally, or include live release evidence:
 
 ```console
@@ -469,6 +478,10 @@ order does not. Online changelog dates require the same `YYYY-MM-DD` spelling.
 It is not part of the publish gate and can fail for old checkouts after the live
 site or published release list changes. It reads and validates all local schemas
 and the changelog before making any network requests.
+Date diagnostics distinguish missing headings and unreleased entries from
+invalid spelling or calendar dates and explain the required `YYYY-MM-DD` format.
+Offline errors identify the local changelog and release; online errors retain
+the expected UTC date without copying remote release keys or raw heading values.
 For a tagged offline check, pass `--release-tag TAG` from the corresponding release
 checkout after dating its changelog heading and updating its documented hook.
 Only README examples preceded by a standalone `<!-- pyroma-pre-commit -->`
