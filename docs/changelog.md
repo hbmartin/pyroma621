@@ -2,6 +2,12 @@
 
 ## 6.2.0 (2026-10-13)
 
+- Preserve guide parent-folder diagnostics before pinning file identity, report
+  guide symlinks explicitly, and use consistent selected project/site bases for
+  schema errors. Share regular-file validation and required built directories
+  without reducing ancestor identity checks. Keep the forced no-search regression
+  in the full macOS PyPy suite without running it twice.
+
 - Pin the built JSON guide's file identity before opening, recognize descriptor
   namespace case aliases by directory identity, and keep fallback schema errors
   relative to the package or site. Report unexpected built directory boundaries
