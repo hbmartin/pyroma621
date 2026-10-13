@@ -37,6 +37,12 @@
   and replace inventory manifests only after their temporary siblings are written
   and closed successfully. Bound real FIFO regression checks so faulty file
   classification cannot hang the test suite.
+  Preserve existing manifest rwx permissions and respect the umask for new output,
+  add explicit inventory stdout output, and reject special output destinations.
+  Validate opened schema descriptors without blocking on POSIX FIFOs introduced
+  after discovery. Make root labels identify their package or site location,
+  share changelog heading validation, and keep race tests independent of implicit
+  interpreter import paths.
 - Keep release lifecycle tests independent of the current checkout version,
   share CLI/config selector validation, and include test dependencies in the
   default development environment.

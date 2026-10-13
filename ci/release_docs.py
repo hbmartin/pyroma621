@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 import tempfile
 import tomllib
 from contextlib import suppress
@@ -208,9 +209,9 @@ def _changelog_date(value: str) -> datetime.date:
         raise ValueError(message) from error
 
 
-def _require_date(entries: dict[str, str], version: str, expected: str | None = None) -> None:
+def _changelog_entry_date(entries: dict[str, str], version: str, context: str) -> datetime.date:
+    """Share heading validation without constructing a resource's context."""
     value = entries.get(version)
-    context = f"Local docs/changelog.md: Release {version}"
     if value is None:
         message = f"{context} has no matching heading"
         raise ValueError(message)
@@ -218,12 +219,17 @@ def _require_date(entries: dict[str, str], version: str, expected: str | None = 
         message = f"{context} is unreleased; needs a dated heading in YYYY-MM-DD format"
         raise ValueError(message)
     try:
-        _changelog_date(value)
+        return _changelog_date(value)
     except ValueError as error:
         message = f"{context}: {error}"
         raise ValueError(message) from error
-    if expected is not None and value != expected:
-        message = f"{context}: Changelog date must be {expected}, not {value}"
+
+
+def _require_date(entries: dict[str, str], version: str, expected: str | None = None) -> None:
+    context = f"Local docs/changelog.md: Release {version}"
+    date = _changelog_entry_date(entries, version, context).isoformat()
+    if expected is not None and date != expected:
+        message = f"{context}: Changelog date must be {expected}, not {date}"
         raise ValueError(message)
 
 
@@ -327,6 +333,7 @@ def _os_error_reason(error: OSError) -> str:
         errno.ENOTDIR: "path component is not a directory",
         errno.EIO: "I/O failure",
         errno.ENOSPC: "disk full",
+        errno.EPIPE: "broken pipe",
     }.get(error.errno, "OS failure")
 
 
@@ -338,6 +345,35 @@ def _read_bytes(path: Path, label: str) -> bytes:
         raise ValueError(message) from error
 
 
+def _read_schema_bytes(path: Path, label: str) -> bytes:
+    """Check and read the opened file, without blocking on POSIX FIFOs."""
+    descriptor = None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        protected = hasattr(os, "O_NONBLOCK") and hasattr(os, "O_NOFOLLOW")
+        if protected:
+            flags |= os.O_NONBLOCK | os.O_NOFOLLOW
+        elif not stat.S_ISREG(path.lstat().st_mode):
+            message = f"{label}: schema must be a regular file, not a symlink or special entry"
+            raise ValueError(message)
+        descriptor = os.open(path, flags)
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            message = f"{label}: schema must be a regular file, not a symlink or special entry"
+            raise ValueError(message)
+        output = bytearray()
+        while chunk := os.read(descriptor, 65536):
+            output.extend(chunk)
+        return bytes(output)
+    except OSError as error:
+        reason = "symlink not permitted" if error.errno == errno.ELOOP else _os_error_reason(error)
+        message = f"{label}: unable to read file ({reason})"
+        raise ValueError(message) from error
+    finally:
+        if descriptor is not None:
+            with suppress(Exception):
+                os.close(descriptor)
+
+
 def _write_bytes(path: Path, payload: bytes, label: str) -> None:
     try:
         path.write_bytes(payload)
@@ -346,29 +382,62 @@ def _write_bytes(path: Path, payload: bytes, label: str) -> None:
         raise ValueError(message) from error
 
 
+def _inventory_mode(path: Path) -> int | None:
+    """Preserve regular-file permissions without following output symlinks."""
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return None
+    if stat.S_ISREG(mode):
+        return mode & 0o777
+    if stat.S_ISLNK(mode):
+        try:
+            target_mode = path.stat().st_mode
+        except FileNotFoundError:
+            return None
+        if stat.S_ISREG(target_mode) or stat.S_ISDIR(target_mode):
+            return None
+    message = (
+        "Schema inventory output: destination must be a regular file or replaceable symlink; "
+        "use --inventory-output - for stdout"
+    )
+    raise ValueError(message)
+
+
 def _write_inventory(path: Path, payload: bytes) -> None:
-    """Replace the manifest only after its temporary sibling is closed."""
+    """Replace files atomically with ordinary permissions, or emit stdout."""
     temporary = None
     try:
-        output = tempfile.NamedTemporaryFile(  # noqa: SIM115 - close failures must not mask write errors or interrupts
-            mode="wb", dir=path.parent, prefix=".schema-inventory-", delete=False
-        )
-        temporary = Path(output.name)
+        if path == Path("-"):
+            sys.stdout.write(payload.decode("utf-8"))
+            sys.stdout.flush()
+            return
+        mode = _inventory_mode(path)
+        temporary = tempfile.TemporaryDirectory(dir=path.parent, prefix=".schema-inventory-")
+        folder = Path(temporary.name)
+        folder.chmod(0o700)
+        sibling = folder / "inventory.json"
+        output = sibling.open("xb")
         try:
+            if mode is not None:
+                sibling.chmod(mode)
             output.write(payload)
+            output.close()
         except BaseException:
             with suppress(Exception):
                 output.close()
             raise
-        output.close()
-        os.replace(temporary, path)  # noqa: PTH105 - replace the destination entry atomically
+        os.replace(sibling, path)  # noqa: PTH105 - replace the destination entry atomically
     except OSError as error:
+        if path == Path("-") and isinstance(error, BrokenPipeError):
+            with suppress(Exception):
+                sys.stdout.close()
         message = f"Schema inventory output: unable to write file ({_os_error_reason(error)})"
         raise ValueError(message) from error
     finally:
         if temporary is not None:
             with suppress(Exception):
-                temporary.unlink(missing_ok=True)
+                temporary.cleanup()
 
 
 def _decode_utf8(payload: bytes, label: str, *, encoding: str = "utf-8") -> str:
@@ -520,15 +589,17 @@ def _scan_inventory(folder: Path, root: Path, label: str, *, ignore_symlinks: bo
             for entry in entries:
                 path = Path(entry.path)
                 relative = path.relative_to(root)
-                display = _escaped_path(Path("schemas") / relative)
                 try:
                     entry_mode = entry.stat(follow_symlinks=False).st_mode
                 except OSError as error:
-                    message = f"{label}: unable to stat entry {display} ({_os_error_reason(error)})"
+                    message = (
+                        f"{label}: unable to stat entry {_escaped_path(Path('schemas') / relative)} "
+                        f"({_os_error_reason(error)})"
+                    )
                     raise ValueError(message) from error
                 if stat.S_ISLNK(entry_mode):
                     if not ignore_symlinks:
-                        message = f"{label}: symlinks are not permitted at {display}"
+                        message = f"{label}: symlinks are not permitted at {_escaped_path(Path('schemas') / relative)}"
                         raise ValueError(message)
                 elif stat.S_ISDIR(entry_mode):
                     directories.add(relative)
@@ -538,7 +609,10 @@ def _scan_inventory(folder: Path, root: Path, label: str, *, ignore_symlinks: bo
                 elif stat.S_ISREG(entry_mode):
                     files.add(relative)
                 else:
-                    message = f"{label}: entries must be regular files or directories at {display}"
+                    message = (
+                        f"{label}: entries must be regular files or directories at "
+                        f"{_escaped_path(Path('schemas') / relative)}"
+                    )
                     raise ValueError(message)
     except OSError as error:
         message = (
@@ -571,7 +645,7 @@ def _schema_inventory(directory: Path, label: str, *, ignore_symlinks: bool) -> 
 def schema_paths(project: Path) -> list[Path]:
     """Discover every canonical JSON schema relative to the package."""
     inventory = _schema_inventory(
-        project / "pyroma" / "schemas", "Canonical packaged schema directory", ignore_symlinks=True
+        project / "pyroma" / "schemas", "Canonical packaged schema directory (pyroma/schemas)", ignore_symlinks=True
     )
     paths = sorted(Path("schemas") / path for path in inventory.files if path.name.endswith(".json"))
     if not paths:
@@ -585,7 +659,7 @@ def _canonical_schemas(project: Path) -> dict[Path, _SchemaEvidence]:
     schemas = {}
     for relative in schema_paths(project):
         label = f"Packaged schema {_escaped_path(relative)}"
-        payload = _read_bytes(project / "pyroma" / relative, label)
+        payload = _read_schema_bytes(project / "pyroma" / relative, label)
         document = _load_json(_decode_utf8(payload, label), label)
         schemas[relative] = _SchemaEvidence(payload, document)
     return schemas
@@ -640,19 +714,7 @@ def check_online(project: Path, revision: str) -> None:
     dates = _published_release_dates(fetch("https://pypi.org/pypi/pyroma621/json", label="PyPI release metadata"))
     for release_version, date in dates.items():
         context = f"PyPI release metadata: Changelog for a published release (expected UTC date {date})"
-        value = entries.get(release_version)
-        if value is None:
-            message = f"{context} has no matching heading"
-            raise ValueError(message)
-        if value == "unreleased":
-            message = f"{context} is unreleased; needs a dated heading in YYYY-MM-DD format"
-            raise ValueError(message)
-        try:
-            _changelog_date(value)
-        except ValueError as error:
-            message = f"{context}: {error}"
-            raise ValueError(message) from error
-        if value != date:
+        if _changelog_entry_date(entries, release_version, context).isoformat() != date:
             message = f"{context} has a mismatched date"
             raise ValueError(message)
 
@@ -705,7 +767,9 @@ def check_schema_outputs(project: Path, site: Path) -> list[Path]:
     if not _read_bytes(guide, "Built JSON guide json/index.html"):
         message = "Built JSON guide json/index.html must not be empty"
         raise ValueError(message)
-    inventory = _schema_inventory(site / "schemas", "Built schema directory", ignore_symlinks=False)
+    inventory = _schema_inventory(
+        site / "schemas", "Built schema directory (schemas relative to --site)", ignore_symlinks=False
+    )
     built = {Path("schemas") / path for path in inventory.files}
     directories = {Path("schemas") / path for path in inventory.directories}
     expected = set(schemas)
@@ -721,7 +785,7 @@ def check_schema_outputs(project: Path, site: Path) -> list[Path]:
         raise ValueError(message)
     for relative, evidence in schemas.items():
         label = f"Built schema {_escaped_path(relative)}"
-        if _read_bytes(site / relative, label) != evidence.payload:
+        if _read_schema_bytes(site / relative, label) != evidence.payload:
             message = f"{label} does not match packaged schema bytes"
             raise ValueError(message)
     return list(schemas)
@@ -735,7 +799,9 @@ def main() -> None:
     parser.add_argument("--release-tag", default="")
     parser.add_argument("--online", action="store_true")
     parser.add_argument("--site", type=Path, help="Built site for check-schemas (default: PROJECT/site)")
-    parser.add_argument("--inventory-output", type=Path, help="Write verified schema paths as compact JSON")
+    parser.add_argument(
+        "--inventory-output", type=Path, help="Write verified schema paths as compact JSON; - uses stdout"
+    )
     args = parser.parse_args()
     if args.command != "check-schemas" and (args.site is not None or args.inventory_output is not None):
         parser.error("--site and --inventory-output require check-schemas")
