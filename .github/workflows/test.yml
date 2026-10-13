@@ -34,6 +34,10 @@ jobs:
         run: >-
           uv run --locked --no-default-groups --group test python -c
           'from ci import release_docs; assert release_docs._anchored_paths_supported(), "macOS PyPy must anchor schema traversal"'
+      - name: Exercise descriptor traversal without search flags
+        run: >-
+          uv run --locked --no-default-groups --group test python -bb -X dev -m pytest
+          tests/ci/test_release_docs.py::test_inventory_without_search_flags_keeps_discovery_descriptors --no-cov
       - name: Test release validation
         run: >-
           uv run --locked --no-default-groups --group test python -bb -X dev -m pytest

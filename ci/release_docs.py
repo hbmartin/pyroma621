@@ -350,7 +350,7 @@ def _load_toml(text: str, label: str) -> dict[str, object]:
 
 def _os_error_reason(error: OSError) -> str:
     """Keep useful OS failure categories without copying exception text."""
-    return {
+    reasons: dict[int | None, str] = {
         errno.ENOENT: "file missing",
         errno.EACCES: "permission denied",
         errno.EPERM: "permission denied",
@@ -361,7 +361,8 @@ def _os_error_reason(error: OSError) -> str:
         errno.EPIPE: "broken pipe",
         errno.EBADF: "bad file descriptor",
         errno.EAGAIN: "operation would block",
-    }.get(error.errno, "OS failure")
+    }
+    return reasons.get(error.errno, "OS failure")
 
 
 def _read_bytes(path: Path, label: str) -> bytes:
@@ -443,12 +444,15 @@ def _directory_descriptor(
     path: Path, root: Path, identities: list[_DirectoryIdentity], label: str
 ) -> Generator[int, None, None]:
     """Anchor existing ancestors with search permission, recording their identities."""
+    search_flag = _SEARCH_FLAG
+    if search_flag is None or not _search_anchors_supported():
+        message = f"{label}: search-only directory anchoring is unavailable"
+        raise ValueError(message)
     descriptors: list[int] = []
     try:
         for expected in _ancestor_identities(path, root, label):
             try:
-                assert _SEARCH_FLAG is not None  # noqa: S101 - guarded by the search-anchor capability
-                flags = _SEARCH_FLAG | os.O_DIRECTORY
+                flags = search_flag | os.O_DIRECTORY
                 descriptor = os.open(
                     expected.path if not descriptors else expected.path.name,
                     flags,
@@ -501,6 +505,14 @@ def _read_regular_stream(descriptor: int, label: str, expected: os.stat_result |
                 raw.close()
 
 
+def _regular_file_info(path: Path, label: str) -> os.stat_result:
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode):
+        message = f"{label}: file must be a regular file, not a symlink or special entry"
+        raise ValueError(message)
+    return info
+
+
 def _read_schema_bytes(  # noqa: PLR0913 - optional discovery context avoids reopening scanned directories
     path: Path,
     label: str,
@@ -515,12 +527,13 @@ def _read_schema_bytes(  # noqa: PLR0913 - optional discovery context avoids reo
     opening = True
     captured: list[_DirectoryIdentity] = []
     try:
+        if expected is None:
+            expected = _regular_file_info(path, label)
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
         if _protected_reads_supported():
             flags |= os.O_NONBLOCK | os.O_NOFOLLOW
-        elif not stat.S_ISREG(path.lstat().st_mode):
-            message = f"{label}: file must be a regular file, not a symlink or special entry"
-            raise ValueError(message)
+        else:
+            _regular_file_info(path, label)
         if parent is not None:
             descriptor = os.open(path.name, flags, dir_fd=parent)
         elif _search_anchors_supported():
@@ -576,21 +589,38 @@ def _resolved_output_mode(mode: int, *, linked: bool) -> int | None:
     raise ValueError(_INVENTORY_DESTINATION_ERROR)
 
 
+def _descriptor_namespaces() -> dict[tuple[int, int], Path]:
+    """Recognize namespace directories without opening any descriptor aliases."""
+    namespaces = {}
+    for directory in (Path("/dev"), Path("/dev/fd"), Path("/proc")):
+        try:
+            info = directory.stat()
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        if stat.S_ISDIR(info.st_mode):
+            namespaces[info.st_dev, info.st_ino] = directory
+    return namespaces
+
+
 def _inventory_destination(path: Path) -> tuple[Path, int | None]:
     """Resolve components once, checking aliases before following any descriptor path."""
     absolute = path.absolute()
     resolved = Path("/") if os.name == "posix" else Path(absolute.anchor)
+    alias_resolved = resolved
+    alias_parents: list[Path] = []
+    namespaces = _descriptor_namespaces() if os.name == "posix" else {}
     pending = list(absolute.parts[1:])
     expansions = 0
     linked = False
     destination = None
     while pending:
-        remaining = "/" + resolved.joinpath(*pending).as_posix().lstrip("/")
+        remaining = "/" + alias_resolved.joinpath(*pending).as_posix().lstrip("/")
         if os.name == "posix" and _DESCRIPTOR_ALIAS.match(remaining):
             raise ValueError(_INVENTORY_DESTINATION_ERROR)
         component = pending.pop(0)
         if component == "..":
             resolved = resolved.parent
+            alias_resolved = alias_parents.pop() if alias_parents else alias_resolved.parent
             continue
         candidate = resolved / component
         destination = candidate if not pending and not linked else destination
@@ -605,6 +635,8 @@ def _inventory_destination(path: Path) -> tuple[Path, int | None]:
             target = candidate.readlink()
             if target.is_absolute():
                 resolved = Path("/") if os.name == "posix" else Path(target.anchor)
+                alias_resolved = resolved
+                alias_parents.clear()
                 pending = list(target.parts[1:]) + pending
             else:
                 pending = list(target.parts) + pending
@@ -614,6 +646,8 @@ def _inventory_destination(path: Path) -> tuple[Path, int | None]:
             return destination or absolute, None
         else:
             resolved = candidate
+            alias_parents.append(alias_resolved)
+            alias_resolved = namespaces.get((info.st_dev, info.st_ino), alias_resolved / component)
     info = _output_entry(resolved)
     return destination or resolved, None if info is None else _resolved_output_mode(info.st_mode, linked=linked)
 
@@ -871,6 +905,7 @@ def _scan_inventory(  # noqa: PLR0913 - optional reads share the discovery descr
     directories: set[Path] = set()
     payloads: dict[Path, bytes] = {}
     identities: list[_DirectoryIdentity] = []
+    permitted_directories = None if read_paths is None else {parent for path in read_paths for parent in path.parents}
     try:
         with os.scandir(folder if descriptor is None else descriptor) as entries:
             for entry in entries:
@@ -889,6 +924,8 @@ def _scan_inventory(  # noqa: PLR0913 - optional reads share the discovery descr
                         raise ValueError(message)
                 elif stat.S_ISDIR(info.st_mode):
                     directories.add(relative)
+                    if permitted_directories is not None and relative not in permitted_directories:
+                        continue
                     nested = _scan_child(
                         path,
                         root,
@@ -911,7 +948,11 @@ def _scan_inventory(  # noqa: PLR0913 - optional reads share the discovery descr
                         and (read_paths is None or relative in read_paths)
                     ):
                         payloads[relative] = _read_schema_bytes(
-                            path, f"{read_label} {_schema_display_path(relative)}", parent=descriptor, expected=info
+                            path,
+                            f"{read_label} {_schema_display_path(relative)}",
+                            root=root.parent,
+                            parent=descriptor,
+                            expected=info,
                         )
                 else:
                     message = (

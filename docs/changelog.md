@@ -2,6 +2,13 @@
 
 ## 6.2.0 (2026-10-13)
 
+- Pin the built JSON guide's file identity before opening, recognize descriptor
+  namespace case aliases by directory identity, and keep fallback schema errors
+  relative to the package or site. Report unexpected built directory boundaries
+  without scanning their subtrees. Assert which capability each race test uses,
+  exercise no-search traversal explicitly on macOS PyPy, and label unavailable
+  search anchoring even under optimized Python.
+
 - Keep descriptor-backed POSIX schema traversal when search-only flags are
   unavailable, give changed ancestors precise logical paths, and report extra
   built JSON files without reading them. Resolve output aliases in one bounded
