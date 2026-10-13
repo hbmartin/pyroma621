@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import errno
 import json
+import os
 import re
 import shutil
+import stat
 import tomllib
 from contextlib import suppress
+from dataclasses import dataclass
 from http.client import HTTPException
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,6 +35,21 @@ RELEASE_DATES = {"6.0.0": "2026-08-01", "6.1.0": "2026-10-12"}
 _RESPONSE_LIMIT = 2 * 1024 * 1024
 _PRECOMMIT_MARKER = "<!-- pyroma-pre-commit -->"
 _FINAL_STATUSES = {"Development Status :: 5 - Production/Stable", "Development Status :: 6 - Mature"}
+_LOCAL_PROJECT_LABEL = "Local pyproject.toml"
+
+
+@dataclass(frozen=True)
+class _LocalProjectMetadata:
+    name: str
+    version: str
+    documentation: str
+    classifiers: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _SchemaEvidence:
+    payload: bytes
+    document: object
 
 
 def changelog_entries(text: str) -> dict[str, str]:
@@ -191,32 +210,30 @@ def _require_hook_revision(revision: str, release_tag: str) -> None:
 def check_offline(project: Path, release_tag: str = "") -> str:
     """Check distribution identity, canonical links, and known release dates."""
     _require_hook_definition(
-        (project / ".pre-commit-hooks.yaml").read_text(encoding="utf-8"), "Local .pre-commit-hooks.yaml"
+        _read_utf8(project / ".pre-commit-hooks.yaml", "Local .pre-commit-hooks.yaml"),
+        "Local .pre-commit-hooks.yaml",
     )
-    metadata_label = "Local pyproject.toml"
-    name, project_version, documentation, classifiers = _local_project_metadata(
-        _read_utf8(project / "pyproject.toml", metadata_label)
-    )
+    metadata = _local_project_metadata(_read_utf8(project / "pyproject.toml", _LOCAL_PROJECT_LABEL))
     site_url = _local_site_url(_read_utf8(project / "zensical.toml", "Local zensical.toml"))
-    readme = (project / "README.md").read_text(encoding="utf-8-sig")
-    if name != "pyroma621" or "pip install pyroma621" not in readme:
+    readme = _read_utf8(project / "README.md", "Local README.md", encoding="utf-8-sig")
+    if metadata.name != "pyroma621" or "pip install pyroma621" not in readme:
         message = "Installation documentation must select the pyroma621 distribution"
         raise ValueError(message)
-    if documentation != SITE_URL or site_url != SITE_URL:
+    if metadata.documentation != SITE_URL or site_url != SITE_URL:
         message = "Project metadata and documentation site must use the canonical documentation URL"
         raise ValueError(message)
     if SITE_URL not in readme or "https://hbmartin.github.io/pyroma/" in readme:
         message = "README must link to the canonical pyroma621 documentation"
         raise ValueError(message)
-    entries = changelog_entries((project / "docs" / "changelog.md").read_text(encoding="utf-8"))
+    entries = changelog_entries(_read_utf8(project / "docs" / "changelog.md", "Local docs/changelog.md"))
     for version, date in RELEASE_DATES.items():
         _require_date(entries, version, date)
     if release_tag:
-        if Version(release_tag) != Version(project_version):
+        if Version(release_tag) != Version(metadata.version):
             message = "Documentation release tag does not match project version"
             raise ValueError(message)
-        _require_date(entries, project_version)
-        if not Version(project_version).is_prerelease and not _FINAL_STATUSES.intersection(classifiers):
+        _require_date(entries, metadata.version)
+        if not Version(metadata.version).is_prerelease and not _FINAL_STATUSES.intersection(metadata.classifiers):
             message = "Final pyroma621 releases require Development Status :: 5 - Production/Stable or 6 - Mature"
             raise ValueError(message)
     revision = precommit_revision(readme)
@@ -273,21 +290,43 @@ def _load_toml(text: str, label: str) -> dict[str, object]:
         raise ValueError(message) from error
 
 
-def _read_utf8(path: Path, label: str) -> str:
-    """Label local file reading and decoding without copying exception text."""
+def _os_error_reason(error: OSError) -> str:
+    """Keep useful OS failure categories without copying exception text."""
+    return {
+        errno.ENOENT: "file missing",
+        errno.EACCES: "permission denied",
+        errno.EPERM: "permission denied",
+        errno.EISDIR: "directory instead of file",
+        errno.ENOTDIR: "path component is not a directory",
+        errno.EIO: "I/O failure",
+    }.get(error.errno, "OS failure")
+
+
+def _read_bytes(path: Path, label: str) -> bytes:
     try:
-        return path.read_text(encoding="utf-8")
+        return path.read_bytes()
+    except OSError as error:
+        message = f"{label}: unable to read file ({_os_error_reason(error)})"
+        raise ValueError(message) from error
+
+
+def _decode_utf8(payload: bytes, label: str, *, encoding: str = "utf-8") -> str:
+    try:
+        return payload.decode(encoding)
     except UnicodeDecodeError as error:
         message = f"{label} must contain valid UTF-8"
         raise ValueError(message) from error
-    except OSError as error:
-        message = f"{label}: unable to read file"
-        raise ValueError(message) from error
 
 
-def _local_project_metadata(text: str) -> tuple[str, str, str, list[str]]:
+def _read_utf8(path: Path, label: str, *, encoding: str = "utf-8") -> str:
+    """Label reading and decoding while preserving universal newline handling."""
+    text = _decode_utf8(_read_bytes(path, label), label, encoding=encoding)
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _local_project_metadata(text: str) -> _LocalProjectMetadata:
     """Validate the local project fields consumed by documentation checks."""
-    label = "Local pyproject.toml"
+    label = _LOCAL_PROJECT_LABEL
     project = _load_toml(text, label).get("project")
     if not isinstance(project, dict):
         message = f"{label}: project must be a table"
@@ -316,7 +355,7 @@ def _local_project_metadata(text: str) -> tuple[str, str, str, list[str]]:
     if not isinstance(classifiers, list) or not all(isinstance(value, str) for value in classifiers):
         message = f"{label}: project.classifiers must be a list of strings"
         raise ValueError(message)
-    return name, version, documentation, classifiers
+    return _LocalProjectMetadata(name, version, documentation, tuple(classifiers))
 
 
 def _local_site_url(text: str) -> str:
@@ -368,7 +407,7 @@ def _upload_date(artifact: object) -> str:
         uploaded = datetime.datetime.fromisoformat(timestamp)
     except ValueError as error:
         raise ValueError(message) from error
-    if uploaded.tzinfo is None or uploaded.utcoffset() is None:
+    if uploaded.utcoffset() is None:
         message = f"{label}: upload_time_iso_8601 must be a timezone-aware ISO timestamp string"
         raise ValueError(message)
     try:
@@ -407,40 +446,90 @@ def _published_release_dates(text: str) -> dict[str, str]:
     return dates
 
 
+def _scan_inventory(folder: Path, root: Path, label: str, *, ignore_symlinks: bool) -> list[Path]:
+    paths: list[Path] = []
+    try:
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                entry_mode = entry.stat(follow_symlinks=False).st_mode
+                path = Path(entry.path)
+                if stat.S_ISLNK(entry_mode):
+                    if not ignore_symlinks:
+                        message = f"{label}: symlinks are not permitted"
+                        raise ValueError(message)
+                elif stat.S_ISDIR(entry_mode):
+                    paths.extend(_scan_inventory(path, root, label, ignore_symlinks=ignore_symlinks))
+                elif stat.S_ISREG(entry_mode):
+                    paths.append(path.relative_to(root))
+                elif not ignore_symlinks:
+                    message = f"{label}: entries must be regular files or directories"
+                    raise ValueError(message)
+    except OSError as error:
+        message = f"{label}: unable to read inventory ({_os_error_reason(error)})"
+        raise ValueError(message) from error
+    return paths
+
+
+def _inventory_files(directory: Path, label: str, *, ignore_symlinks: bool) -> list[Path]:
+    """Scan without following links or suppressing directory/stat failures."""
+    try:
+        mode = directory.lstat().st_mode
+    except FileNotFoundError as error:
+        message = f"{label} is missing"
+        raise ValueError(message) from error
+    except OSError as error:
+        message = f"{label}: unable to read inventory ({_os_error_reason(error)})"
+        raise ValueError(message) from error
+    if stat.S_ISLNK(mode):
+        message = f"{label} must not be a symlink"
+        raise ValueError(message)
+    if not stat.S_ISDIR(mode):
+        message = f"{label} is not a directory"
+        raise ValueError(message)
+    return sorted(_scan_inventory(directory, directory, label, ignore_symlinks=ignore_symlinks))
+
+
 def schema_paths(project: Path) -> list[Path]:
     """Discover every canonical JSON schema relative to the package."""
-    package = project / "pyroma"
-    source = package / "schemas"
-    if source.is_symlink():
-        message = "Canonical packaged schema directory must not be a symlink"
-        raise ValueError(message)
-    if not source.is_dir():
-        message = "Canonical packaged schema directory is missing"
-        raise ValueError(message)
-    paths = sorted(
-        path.relative_to(package) for path in source.rglob("*.json") if not path.is_symlink() and path.is_file()
-    )
+    paths = [
+        Path("schemas") / path
+        for path in _inventory_files(
+            project / "pyroma" / "schemas", "Canonical packaged schema directory", ignore_symlinks=True
+        )
+        if path.name.endswith(".json")
+    ]
     if not paths:
         message = "Canonical packaged schema directory has no JSON schemas"
         raise ValueError(message)
     return paths
 
 
-def _check_published_contract(project: Path) -> None:
+def _canonical_schemas(project: Path) -> dict[Path, _SchemaEvidence]:
+    """Read all schema evidence before modifying output or fetching resources."""
+    schemas = {}
+    for relative in schema_paths(project):
+        label = f"Packaged schema {relative.as_posix()}"
+        payload = _read_bytes(project / "pyroma" / relative, label)
+        document = _load_json(_decode_utf8(payload, label), label)
+        schemas[relative] = _SchemaEvidence(payload, document)
+    return schemas
+
+
+def _check_published_contract(schemas: dict[Path, _SchemaEvidence]) -> None:
     """Require the JSON guide and canonical schema downloads to be published."""
     fetch(SITE_URL + "json/", label="JSON guide")
-    for relative in schema_paths(project):
+    for relative, evidence in schemas.items():
         label = f"Published schema {relative.relative_to('schemas').as_posix()}"
-        packaged_label = f"Packaged schema {relative.as_posix()}"
-        canonical = _load_json(_read_utf8(project / "pyroma" / relative, packaged_label), packaged_label)
-        published = _load_json(fetch(SITE_URL + relative.as_posix(), label=label), label)
-        if published != canonical:
+        published = _load_json(fetch(SITE_URL + quote(relative.as_posix(), safe="/"), label=label), label)
+        if published != evidence.document:
             message = f"{label} does not match packaged schema"
             raise ValueError(message)
 
 
 def check_online(project: Path, revision: str) -> None:
     """Verify live docs, the installation revision, and all published dates."""
+    schemas = _canonical_schemas(project)
+    entries = changelog_entries(_read_utf8(project / "docs" / "changelog.md", "Local docs/changelog.md"))
     for page, label in (
         ("", "Documentation home"),
         ("rules/", "Rules guide"),
@@ -448,7 +537,7 @@ def check_online(project: Path, revision: str) -> None:
         ("changelog/", "Changelog"),
     ):
         fetch(SITE_URL + page, label=label)
-    _check_published_contract(project)
+    _check_published_contract(schemas)
     base = "https://raw.githubusercontent.com/hbmartin/pyroma621/" + quote(revision, safe="") + "/"
     name, hook_version = _hook_package_metadata(fetch(base + "pyproject.toml", label="Hook package metadata"))
     if name != "pyroma621" or hook_version != Version(revision):
@@ -457,39 +546,78 @@ def check_online(project: Path, revision: str) -> None:
     _require_hook_definition(
         fetch(base + ".pre-commit-hooks.yaml", label="Published hook manifest"), "Published pre-commit hooks"
     )
-    entries = changelog_entries((project / "docs" / "changelog.md").read_text(encoding="utf-8"))
     dates = _published_release_dates(fetch("https://pypi.org/pypi/pyroma621/json", label="PyPI release metadata"))
     for release_version, date in dates.items():
+        context = f"PyPI release metadata: Changelog for a published release (expected UTC date {date})"
+        value = entries.get(release_version)
+        if value is None:
+            message = f"{context} has no matching heading"
+            raise ValueError(message)
         try:
-            _require_date(entries, release_version, date)
+            datetime.date.fromisoformat(value)
         except ValueError as error:
-            message = "PyPI release metadata: Changelog must have a matching dated entry for each published release"
+            message = f"{context} needs a valid dated heading"
             raise ValueError(message) from error
+        if value != date:
+            message = f"{context} has a mismatched date"
+            raise ValueError(message)
 
 
 def prepare_schemas(project: Path) -> None:
     """Copy the canonical packaged schemas into the documentation input."""
-    source = project / "pyroma" / "schemas"
+    schemas = _canonical_schemas(project)
     destination = project / "docs" / "schemas"
-    if not source.is_dir():
-        message = "Canonical packaged schema directory is missing"
-        raise ValueError(message)
     if destination.exists():
         shutil.rmtree(destination)
-    shutil.copytree(source, destination)
+    for relative, evidence in schemas.items():
+        path = project / "docs" / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(evidence.payload)
+
+
+def check_schema_outputs(project: Path, site: Path) -> list[Path]:
+    """Require exactly the permitted schema files and their original bytes."""
+    schemas = _canonical_schemas(project)
+    guide = site / "json" / "index.html"
+    if not _read_bytes(guide, "Built JSON guide json/index.html"):
+        message = "Built JSON guide json/index.html must not be empty"
+        raise ValueError(message)
+    built = {
+        Path("schemas") / path
+        for path in _inventory_files(site / "schemas", "Built schema directory", ignore_symlinks=False)
+    }
+    if built != set(schemas):
+        message = "Built schema files do not match the canonical packaged inventory"
+        raise ValueError(message)
+    for relative, evidence in schemas.items():
+        label = f"Built schema {relative.as_posix()}"
+        if _read_bytes(site / relative, label) != evidence.payload:
+            message = f"{label} does not match packaged schema bytes"
+            raise ValueError(message)
+    return list(schemas)
 
 
 def main() -> None:
     """Expose offline checks, tagged-release checks, and schema preparation."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("check", "schemas"))
+    parser.add_argument("command", choices=("check", "schemas", "check-schemas"))
     parser.add_argument("--project", type=Path, default=Path.cwd())
     parser.add_argument("--release-tag", default="")
     parser.add_argument("--online", action="store_true")
+    parser.add_argument("--site", type=Path, help="Built site for check-schemas (default: PROJECT/site)")
+    parser.add_argument("--inventory-output", type=Path, help="Write verified schema paths as compact JSON")
     args = parser.parse_args()
+    if args.command != "check-schemas" and (args.site is not None or args.inventory_output is not None):
+        parser.error("--site and --inventory-output require check-schemas")
     try:
         if args.command == "schemas":
             prepare_schemas(args.project)
+        elif args.command == "check-schemas":
+            paths = check_schema_outputs(args.project, args.site if args.site is not None else args.project / "site")
+            if args.inventory_output is not None:
+                args.inventory_output.write_text(
+                    json.dumps([path.as_posix() for path in paths], separators=(",", ":")) + "\n", encoding="utf-8"
+                )
         else:
             revision = check_offline(args.project, args.release_tag)
             if args.online:

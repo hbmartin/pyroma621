@@ -14,6 +14,8 @@ jobs:
   build:
     name: Build documentation
     runs-on: ubuntu-latest
+    outputs:
+      schema_paths: ${{ steps.schema_build_outputs.outputs.schema_paths }}
 
     steps:
       - name: Checkout
@@ -32,11 +34,16 @@ jobs:
         id: schema_build_outputs
         shell: bash
         run: |
-          if [ ! -s site/json/index.html ]; then
-            printf 'Missing or empty documentation output: site/json/index.html\n' >&2
-            exit 1
-          fi
-          diff -r pyroma/schemas site/schemas
+          uv run --locked --only-group docs python ci/release_docs.py check-schemas \
+            --inventory-output "$RUNNER_TEMP/schema-inventory.json"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          manifest = Path(os.environ["RUNNER_TEMP"]) / "schema-inventory.json"
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write("schema_paths=" + manifest.read_text(encoding="utf-8").strip() + "\n")
+          PY
       - name: Configure GitHub Pages
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
@@ -66,39 +73,43 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
-      - name: Checkout canonical schema inventory
-        id: schema_inventory
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-        with:
-          persist-credentials: false
-          sparse-checkout: pyroma/schemas
-          sparse-checkout-cone-mode: false
       - name: Check JSON guide and schema availability
         id: schema_availability
         shell: bash
         env:
           DOCS_URL: ${{ steps.deployment.outputs.page_url }}
+          SCHEMA_PATHS_JSON: ${{ needs.build.outputs.schema_paths }}
         run: |
-          if [ -L pyroma/schemas ]; then
-            printf 'Canonical packaged schema directory must not be a symlink\n' >&2
-            exit 1
-          fi
-          if [ ! -d pyroma/schemas ]; then
-            printf 'Canonical packaged schema directory is missing\n' >&2
-            exit 1
-          fi
-          if ! schemas=$(find pyroma/schemas -type f -name '*.json' | sort | sed 's|^pyroma/||'); then
-            printf 'Unable to read canonical schema inventory\n' >&2
-            exit 1
-          fi
-          if [ -z "$schemas" ]; then
-            printf 'Canonical packaged schema directory has no JSON schemas\n' >&2
-            exit 1
-          fi
-          {
-            printf 'json/\n'
-            printf '%s\n' "$schemas"
-          } | while IFS= read -r path; do
+          paths=$(python3 - <<'PY'
+          import json
+          import os
+          import sys
+          from urllib.parse import quote
+
+          raw = os.environ.get("SCHEMA_PATHS_JSON", "")
+          if not raw:
+              sys.exit("Schema inventory from build is missing")
+          try:
+              paths = json.loads(raw)
+          except ValueError:
+              sys.exit("Schema inventory from build must contain valid JSON")
+          if not isinstance(paths, list):
+              sys.exit("Schema inventory from build must be a list of schema paths")
+          if not paths:
+              sys.exit("Schema inventory from build has no JSON schemas")
+          for path in paths:
+              if (not isinstance(path, str) or not path.startswith("schemas/")
+                      or not path.endswith(".json")
+                      or any(part in {"", ".", ".."} for part in path.split("/"))):
+                  sys.exit("Schema inventory from build contains an invalid schema path")
+          if len(set(paths)) != len(paths):
+              sys.exit("Schema inventory from build contains duplicate schema paths")
+          print("json/")
+          for path in paths:
+              print(quote(path, safe="/"))
+          PY
+          )
+          printf '%s\n' "$paths" | while IFS= read -r path; do
             curl --fail --silent --show-error --location \
               --retry 3 --retry-all-errors --retry-delay 5 --max-time 15 \
               --output /dev/null "${DOCS_URL%/}/$path"
