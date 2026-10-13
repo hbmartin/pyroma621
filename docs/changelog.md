@@ -1,6 +1,6 @@
 # Changelog
 
-## 6.2.0 (unreleased)
+## 6.2.0 (2026-10-13)
 
 - Stabilize inventory stdout output with exact binary bytes and exit 1 after
   write failures, distinguish `./-` file output, and reject descriptor aliases.

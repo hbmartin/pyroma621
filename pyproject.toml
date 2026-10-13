@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "pyroma621"
-version = "6.2.0.dev0"
+version = "6.2.0"
 description = "Test your project's packaging friendliness"
 readme = "README.md"
 authors = [
@@ -12,7 +12,7 @@ authors = [
     {name = "Lennart Regebro", email = "regebro@gmail.com"}
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python",
