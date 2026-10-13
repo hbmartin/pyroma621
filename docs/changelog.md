@@ -19,12 +19,14 @@
   Production/Stable or Mature, and fetch errors identify resources without URLs.
 - Reject hook markers swallowed by larger HTML blocks, label malformed remote
   metadata structures and packaged schemas, and close HTTP error responses.
-  Deploy Pages before checking out schema inventory, and fail availability
-  checks when inventory discovery fails or finds no schemas.
+  Reject unreadable or empty schema inventories before building Pages.
 - Label local documentation metadata and packaged-schema decoding failures,
   reject local-version PyPI evidence, compare upload dates in UTC, and preserve
-  interrupts during HTTP error cleanup. Match regular-file schema inventories
-  across release and deployment checks and use a sparse inventory checkout.
+  interrupts during HTTP error cleanup. Prepare and verify only regular schema
+  files, reject built symlinks, and pass the verified build inventory to deployment.
+  Validate all local schemas before fetching live evidence, label README,
+  changelog and hook-manifest read failures with safe OS categories, and explain
+  online changelog failures with the expected UTC date without remote release keys.
 - Keep release lifecycle tests independent of the current checkout version,
   share CLI/config selector validation, and include test dependencies in the
   default development environment.

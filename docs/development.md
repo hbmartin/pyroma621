@@ -414,16 +414,24 @@ Prepare downloadable schemas before a strict documentation build:
 ```console
 $ uv run --locked --only-group docs python ci/release_docs.py schemas
 $ uv run --locked --only-group docs zensical build --clean --strict
+$ uv run --locked --only-group docs python ci/release_docs.py check-schemas
 ```
 
 The packaged JSON files are the source of truth; `docs/schemas/` is generated
 and ignored. Preparation replaces this generated tree, including all canonical
-schema versions, so repeated builds remove stale downloads. The docs-only
+schema versions, so repeated builds remove stale downloads. Discovery includes
+regular JSON files and excludes file and directory symlinks; a symlinked root
+is rejected. Missing, empty, or unreadable inventories fail explicitly, and
+all schemas must decode as UTF-8 and parse as JSON before preparation replaces
+existing generated files. The docs-only
 environment does not install the runtime project. Offline tests validate every
 JSON documentation example and the PEP 440 syntax of its illustrative checker version.
 After the strict build, CI requires a nonempty JSON guide and compares the
-complete generated schema tree with the canonical packaged tree before uploading
-it; this also runs on pull requests and covers every schema version.
+permitted schema paths and original bytes before uploading it; unexpected files
+and built symlinks fail verification. This also runs on pull requests and covers
+every schema version. `check-schemas` accepts `--site PATH` (default: the project's
+`site/`) and `--inventory-output PATH` to write the verified, sorted paths as
+compact JSON. Failed verification does not overwrite an existing inventory.
 Check documentation consistency locally, or include live release evidence:
 
 ```console
@@ -434,21 +442,23 @@ $ uv run --locked --only-group release python ci/release_docs.py check --online
 Tagged package validation runs the offline check before building. It requires
 a dated changelog heading, a documented hook revision equal to the literal tag,
 and a Production/Stable or Mature classifier for final releases. Every offline
-check also requires the local `.pre-commit-hooks.yaml` to provide a `pyroma` hook
+check requires a valid static project version and the local `.pre-commit-hooks.yaml` to provide a `pyroma` hook
 with `entry: pyroma` in the same entry. Publishing is independent
 of the current Pages deployment. After deploying Pages, the docs workflow checks
 availability of the JSON guide and every canonical schema download with bounded curl
-retries. A sparse checkout of the schema tree follows deployment. Inventories
-include regular JSON files and exclude file and directory symlinks; a symlinked
-inventory root is rejected. Missing, empty, or unreadable inventories fail with
-explicit diagnostics before any probes. The availability check does not compare
+retries. The build passes its verified JSON inventory to deployment as a job
+output, so availability probes use precisely the build's schema paths without
+another checkout or filesystem scan. Missing, empty, or malformed manifests
+fail before any probes. Schema paths are URL-encoded before fetching them.
+The availability check does not compare
 contents with a release tag.
 
 The optional `--online` maintainer audit probes live documentation, compares
 downloaded schemas with the checkout, verifies the documented release's
 distribution and hook, and checks PyPI upload dates against changelog headings.
 It is not part of the publish gate and can fail for old checkouts after the live
-site or published release list changes.
+site or published release list changes. It reads and validates all local schemas
+and the changelog before making any network requests.
 For a tagged offline check, pass `--release-tag TAG` from the corresponding release
 checkout after dating its changelog heading and updating its documented hook.
 Only README examples preceded by a standalone `<!-- pyroma-pre-commit -->`
@@ -475,11 +485,16 @@ and diagnostics use Markdown source lines.
 Requests have 15-second timeouts and 2 MiB response limits; fetch, decoding,
 and remote JSON/TOML parsing or structure errors identify the resource and
 invalid field without printing its URL or response values. Local project and site
-TOML syntax, decoding, and field errors identify the file; malformed or undecodable
-packaged schemas identify their path. PyPI release keys must be public versions
+TOML syntax, decoding, and field errors identify the file; README, changelog,
+hook-manifest, and packaged-schema read or decoding failures also identify their
+resource. OS failures distinguish missing files, permission failures, directories
+instead of files, and I/O failures without copying raw exception text.
+PyPI release keys must be public versions
 without local labels, and upload timestamps must include a timezone. Upload dates
 use UTC, including timestamps supplied with another offset. Online changelog
-failures do not print remote release keys. HTTP error responses are closed;
+failures distinguish missing headings, invalid or unreleased dates, and date
+mismatches, and show the expected UTC date without printing remote release keys
+or raw heading values. HTTP error responses are closed;
 ordinary cleanup failures preserve the status diagnostic, while interrupts
 propagate. Unit tests mock all remote evidence.
 Installed-artifact validation covers Python 3.11, 3.13, and 3.14, including

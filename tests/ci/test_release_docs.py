@@ -1,10 +1,12 @@
 """Validate release documentation without depending on live services."""
 
+import errno
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tomllib
 from collections.abc import Callable
 from http.client import IncompleteRead
@@ -12,6 +14,7 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import Mock
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 
 import pytest
 import yaml
@@ -46,6 +49,37 @@ def workflow_step(steps: list[dict[str, str]], step_id: str) -> dict[str, str]:
 def workflow_bash_command(step: dict[str, str]) -> list[str]:
     assert step.get("shell") == "bash", f"Workflow step {step['id']!r} must explicitly use shell: bash"
     return ["/bin/bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", step["run"]]
+
+
+def schema_build_environment(project: Path) -> dict[str, str]:
+    """Use the real checker with the test interpreter instead of resolving uv."""
+    scripts = project / "ci"
+    scripts.mkdir(exist_ok=True)
+    shutil.copyfile(ROOT / "ci/release_docs.py", scripts / "release_docs.py")
+    uv = project / "uv"
+    uv.write_text(
+        '#!/bin/sh\n[ "$1 $2 $3 $4 $5" = "run --locked --only-group docs python" ] || exit 2\n'
+        'shift 5\nexec "$DOCS_TEST_PYTHON" "$@"\n',
+        encoding="utf-8",
+    )
+    uv.chmod(0o755)
+    runner = project / "runner"
+    runner.mkdir(exist_ok=True)
+    return {
+        **os.environ,
+        "PATH": str(project) + os.pathsep + os.environ["PATH"],
+        "DOCS_TEST_PYTHON": sys.executable,
+        "RUNNER_TEMP": str(runner),
+        "GITHUB_OUTPUT": str(runner / "output"),
+    }
+
+
+def prepare_site(project: Path) -> None:
+    release_docs.prepare_schemas(project)
+    shutil.copytree(project / "docs/schemas", project / "site/schemas")
+    guide = project / "site/json/index.html"
+    guide.parent.mkdir(parents=True)
+    guide.write_text("JSON guide", encoding="utf-8")
 
 
 def release_check_commands(text: str) -> str:
@@ -827,16 +861,14 @@ def test_online_evidence_covers_future_schema_versions(
         assert url in {call.args[0] for call in fetch.call_args_list}
 
 
-@pytest.mark.parametrize("failure", ["", "missing", "modified", "extra", "guide", "empty-guide"])
+@pytest.mark.parametrize("failure", ["", "missing", "modified", "extra", "non-json", "guide", "empty-guide"])
 @pytest.mark.skipif(os.name == "nt", reason="Documentation workflows use POSIX shells")
 def test_docs_workflow_checks_all_built_schema_contents(project: Path, failure: str) -> None:
     future = project / "pyroma" / "schemas" / "v2" / "rating.json"
     future.parent.mkdir()
     future.write_text('{"title": "Future schema"}', encoding="utf-8")
-    shutil.copytree(project / "pyroma" / "schemas", project / "site" / "schemas")
+    prepare_site(project)
     guide = project / "site" / "json" / "index.html"
-    guide.parent.mkdir()
-    guide.write_text("JSON guide", encoding="utf-8")
     built = project / "site" / "schemas" / "v2" / "rating.json"
     if failure == "missing":
         built.unlink()
@@ -844,36 +876,40 @@ def test_docs_workflow_checks_all_built_schema_contents(project: Path, failure: 
         built.write_text("{}", encoding="utf-8")
     elif failure == "extra":
         (built.parent / "extra.json").write_text("{}", encoding="utf-8")
+    elif failure == "non-json":
+        (built.parent / "extra.txt").write_text("extra", encoding="utf-8")
     elif failure == "guide":
         guide.unlink()
     elif failure == "empty-guide":
         guide.write_text("", encoding="utf-8")
     workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "docs.yml").read_text())
     step = workflow_step(workflow["jobs"]["build"]["steps"], "schema_build_outputs")
+    environment = schema_build_environment(project)
     result = subprocess.run(  # noqa: S603 - execute the repository's workflow step in a temporary tree
         workflow_bash_command(step),
         cwd=project,
+        env=environment,
         capture_output=True,
         text=True,
         check=False,
         timeout=10,
     )
     assert (result.returncode != 0) == bool(failure), result.stdout + result.stderr
+    output = Path(environment["GITHUB_OUTPUT"])
+    if failure:
+        assert not output.exists(), "Failed verification must not emit deploy inventory"
+    else:
+        assert json.loads(output.read_text().removeprefix("schema_paths=")) == [
+            "schemas/v1/error.json",
+            "schemas/v1/rating.json",
+            "schemas/v2/rating.json",
+        ]
 
 
-@pytest.mark.parametrize(
-    ("missing", "inventory"),
-    [("", "present"), ("json/", "present"), ("schemas/v2/rating.json", "present"), ("", "missing"), ("", "empty")],
-)
+@pytest.mark.parametrize("missing", ["", "json/", "schemas/v2/rating.json"])
 @pytest.mark.skipif(os.name == "nt", reason="Documentation workflows use POSIX shells")
-def test_deployment_probes_every_canonical_schema(project: Path, missing: str, inventory: str) -> None:
-    future = project / "pyroma" / "schemas" / "v2" / "rating.json"
-    future.parent.mkdir()
-    future.write_text("{}", encoding="utf-8")
-    if inventory != "present":
-        shutil.rmtree(project / "pyroma" / "schemas")
-        if inventory == "empty":
-            (project / "pyroma" / "schemas").mkdir()
+def test_deployment_probes_every_manifest_schema_without_a_checkout(project: Path, missing: str) -> None:
+    shutil.rmtree(project / "pyroma")
     curl = project / "curl"
     curl.write_text(
         "#!/bin/sh\nfor request_url do :; done\n"
@@ -891,6 +927,7 @@ def test_deployment_probes_every_canonical_schema(project: Path, missing: str, i
         "DOCS_URL": release_docs.SITE_URL,
         "DOCS_PROBE_LOG": str(log),
         "DOCS_PROBE_MISSING": release_docs.SITE_URL + missing if missing else "",
+        "SCHEMA_PATHS_JSON": json.dumps(["schemas/v1/error.json", "schemas/v1/rating.json", "schemas/v2/rating.json"]),
     }
     result = subprocess.run(  # noqa: S603 - execute the repository's deployment step with a curl probe
         workflow_bash_command(step),
@@ -901,10 +938,8 @@ def test_deployment_probes_every_canonical_schema(project: Path, missing: str, i
         check=False,
         timeout=10,
     )
-    assert (result.returncode != 0) == bool(missing or inventory != "present"), result.stdout + result.stderr
-    if inventory != "present":
-        assert not log.exists(), "Invalid inventory must fail before probing the JSON guide"
-    elif not missing:
+    assert (result.returncode != 0) == bool(missing), result.stdout + result.stderr
+    if not missing:
         assert set(log.read_text().splitlines()) == {
             release_docs.SITE_URL + path
             for path in ("json/", "schemas/v1/error.json", "schemas/v1/rating.json", "schemas/v2/rating.json")
@@ -1167,14 +1202,22 @@ def test_malformed_packaged_schema_has_a_controlled_path_diagnostic(
     assert not any(secret in err for secret in ("Traceback", "password", "secret", "https://"))
 
 
-def test_deployment_permissions_and_order_keep_inventory_checks_after_deploy() -> None:
+def test_deployment_uses_verified_build_inventory_after_deploy() -> None:
     workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "docs.yml").read_text())
     deploy = workflow["jobs"]["deploy"]
     assert deploy["permissions"]["contents"] == "read"
     steps = deploy["steps"]
     ids = [step.get("id") for step in steps]
-    assert ids.index("deployment") < ids.index("schema_inventory") < ids.index("schema_availability")
-    assert workflow_step(steps, "schema_inventory")["uses"].startswith("actions/checkout@")
+    assert ids.index("deployment") < ids.index("schema_availability")
+    assert not any(step.get("uses", "").startswith("actions/checkout@") for step in steps)
+    availability = workflow_step(steps, "schema_availability")
+    assert availability["env"]["SCHEMA_PATHS_JSON"] == "${{ needs.build.outputs.schema_paths }}"
+    build = workflow["jobs"]["build"]
+    assert build["outputs"]["schema_paths"] == "${{ steps.schema_build_outputs.outputs.schema_paths }}"
+    steps = build["steps"]
+    check = steps.index(workflow_step(steps, "schema_build_outputs"))
+    upload = next(index for index, step in enumerate(steps) if "actions/upload-pages-artifact@" in step.get("uses", ""))
+    assert check < upload
 
 
 def test_workflow_selector_uses_ids_instead_of_display_names() -> None:
@@ -1426,14 +1469,23 @@ def test_pypi_local_version_labels_cannot_leak(
     assert not any(secret in err for secret in ("Traceback", "password", "secret", "https://"))
 
 
-@pytest.mark.parametrize("heading", ["", "unreleased", "2026-10-13"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("", "has no matching heading"),
+        ("unreleased", "needs a valid dated heading"),
+        ("password secret", "needs a valid dated heading"),
+        ("2026-10-13", "has a mismatched date"),
+    ],
+)
 def test_online_changelog_errors_do_not_echo_remote_release_keys(
     monkeypatch: pytest.MonkeyPatch,
     project: Path,
     online_evidence: dict[str, str],
     capsys: pytest.CaptureFixture,
-    heading: str,
+    case: tuple[str, str],
 ) -> None:
+    heading, diagnostic = case
     replace_once(project / "docs/changelog.md", f"## {VERSION} ({DATE})", f"## {VERSION} ({heading})")
     monkeypatch.setattr(release_docs, "fetch", lambda url, **_kwargs: online_evidence[url])
     monkeypatch.setattr("sys.argv", ["release_docs", "check", "--online", "--project", str(project)])
@@ -1441,9 +1493,9 @@ def test_online_changelog_errors_do_not_echo_remote_release_keys(
         release_docs.main()
     assert raised.value.code == 1
     err = capsys.readouterr().err
-    assert "PyPI release metadata: Changelog must have a matching dated entry" in err
+    assert f"PyPI release metadata: Changelog for a published release (expected UTC date {DATE}) {diagnostic}" in err
     assert VERSION not in err
-    assert not any(secret in err for secret in ("Traceback", "https://"))
+    assert not any(secret in err for secret in ("Traceback", "https://", "password", "secret"))
 
 
 @pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
@@ -1480,96 +1532,325 @@ def test_release_command_selector_accepts_closed_nested_fences(delimiter: str) -
     assert release_check_commands(text) == "true\n"
 
 
-@pytest.mark.parametrize("links", ["files", "directory", "root", "broken-root"])
-@pytest.mark.skipif(os.name == "nt", reason="Schema deployment uses POSIX symlinks and shells")
-def test_python_and_deployment_schema_inventories_agree_on_symlinks(project: Path, links: str) -> None:
-    schemas = project / "pyroma/schemas"
-    future = schemas / "v2/rating.json"
+@pytest.mark.parametrize("links", ["file", "broken-file", "directory", "broken-directory", "root", "broken-root"])
+@pytest.mark.skipif(os.name == "nt", reason="Schema symlinks require POSIX permissions")
+def test_preparation_and_build_verification_use_only_permitted_schemas(project: Path, links: str) -> None:
+    source = project / "pyroma/schemas"
+    future = source / "v2/rating.json"
     future.parent.mkdir()
-    future.write_text("{}", encoding="utf-8")
-    target = project / "external.json"
-    target.write_text("{}", encoding="utf-8")
-    if links == "files":
-        (schemas / "linked.json").symlink_to(target)
-        (schemas / "broken.json").symlink_to(project / "absent.json")
-    elif links == "directory":
-        directory = project / "external-schemas"
-        directory.mkdir()
-        (directory / "outside.json").write_text("{}", encoding="utf-8")
-        (schemas / "v99").symlink_to(directory, target_is_directory=True)
+    future.write_bytes(b'{\r\n "title": "Future schema"\r\n}\r\n')
+    release_docs.prepare_schemas(project)
+    previous = (project / "docs/schemas/v2/rating.json").read_bytes()
+    if links in {"root", "broken-root"}:
+        destination = project / "external-schemas"
+        source.rename(destination)
+        source.symlink_to(destination if links == "root" else project / "absent", target_is_directory=True)
+        with pytest.raises(ValueError, match="Canonical packaged schema directory must not be a symlink"):
+            release_docs.prepare_schemas(project)
+        assert (project / "docs/schemas/v2/rating.json").read_bytes() == previous
+        return
+    external = project / "external"
+    if "directory" in links:
+        external.mkdir()
+        (external / "outside.json").write_bytes(b"\xff")
+        (source / "v99").symlink_to(external if links == "directory" else project / "absent", target_is_directory=True)
     else:
-        destination = project / "inventory"
-        schemas.rename(destination)
-        schemas.symlink_to(destination if links == "root" else project / "absent", target_is_directory=True)
+        external.write_bytes(b"\xff")
+        (source / "linked.json").symlink_to(external if links == "file" else project / "absent")
+    (source / "notes.txt").write_text("not a schema")
+    prepare_site(project)
+    expected = ["schemas/v1/error.json", "schemas/v1/rating.json", "schemas/v2/rating.json"]
+    assert [path.as_posix() for path in release_docs.schema_paths(project)] == expected
+    assert (
+        sorted(path.relative_to(project / "docs").as_posix() for path in (project / "docs/schemas").rglob("*.*"))
+        == expected
+    )
+    assert (project / "docs/schemas/v2/rating.json").read_bytes() == previous
     workflow = yaml.safe_load((ROOT / ".github/workflows/docs.yml").read_text())
-    step = workflow_step(workflow["jobs"]["deploy"]["steps"], "schema_availability")
-    curl = project / "curl"
-    curl.write_text('#!/bin/sh\nfor request_url do :; done\nprintf "%s\\n" "$request_url"\n', encoding="utf-8")
-    curl.chmod(0o755)
-    result = subprocess.run(  # noqa: S603 - execute the actual schema workflow with a local probe
+    step = workflow_step(workflow["jobs"]["build"]["steps"], "schema_build_outputs")
+    environment = schema_build_environment(project)
+    result = subprocess.run(  # noqa: S603 - verify the real workflow against symlinked inputs
         workflow_bash_command(step),
         cwd=project,
-        env={**os.environ, "PATH": str(project) + os.pathsep + os.environ["PATH"], "DOCS_URL": release_docs.SITE_URL},
+        env=environment,
         capture_output=True,
         text=True,
         check=False,
         timeout=10,
     )
-    if links in {"root", "broken-root"}:
-        with pytest.raises(ValueError, match="Canonical packaged schema directory must not be a symlink"):
-            release_docs.schema_paths(project)
-        assert result.returncode != 0
-        assert "Canonical packaged schema directory must not be a symlink" in result.stderr
-        assert not result.stdout
+    assert result.returncode == 0, result.stderr
+    assert json.loads(Path(environment["GITHUB_OUTPUT"]).read_text().removeprefix("schema_paths=")) == expected
+
+
+def fail_schema_discovery(monkeypatch: pytest.MonkeyPatch, source: Path, failure: str) -> None:
+    if failure == "root-stat":
+        original_stat = Path.lstat
+
+        def denied_stat(path: Path) -> os.stat_result:
+            if path == source:
+                raise PermissionError(errno.EACCES, "password secret")
+            return original_stat(path)
+
+        monkeypatch.setattr(Path, "lstat", denied_stat)
     else:
-        expected = {"schemas/v1/error.json", "schemas/v1/rating.json", "schemas/v2/rating.json"}
-        assert {path.as_posix() for path in release_docs.schema_paths(project)} == expected
-        assert result.returncode == 0, result.stderr
-        assert set(result.stdout.splitlines()) == {release_docs.SITE_URL + path for path in {"json/", *expected}}
+        original_scan = os.scandir
+
+        def denied_scan(path: Path) -> object:
+            if Path(path) == source / "v1":
+                if failure == "scanning":
+                    raise PermissionError(errno.EACCES, "password secret")
+                entry = Mock()
+                entry.stat.side_effect = OSError(errno.EIO, "password secret")
+                entries = Mock()
+                entries.__enter__ = Mock(return_value=iter([entry]))
+                entries.__exit__ = Mock(return_value=False)
+                return entries
+            return original_scan(path)
+
+        monkeypatch.setattr(os, "scandir", denied_scan)
+
+
+@pytest.mark.parametrize("failure", ["missing", "empty", "utf8", "json", "scanning", "root-stat", "entry-stat"])
+def test_schema_failures_preserve_output_and_precede_all_fetches(
+    monkeypatch: pytest.MonkeyPatch, project: Path, failure: str
+) -> None:
+    release_docs.prepare_schemas(project)
+    previous = (project / "docs/schemas/v1/rating.json").read_bytes()
+    source = project / "pyroma/schemas"
+    if failure in {"missing", "empty"}:
+        shutil.rmtree(source)
+        if failure == "empty":
+            source.mkdir()
+    elif failure in {"utf8", "json"}:
+        (source / "v1/rating.json").write_bytes(b"\xffpassword secret" if failure == "utf8" else b"[password secret")
+    else:
+        fail_schema_discovery(monkeypatch, source, failure)
+    fetch = Mock(side_effect=AssertionError("Local schema failures must precede network calls"))
+    monkeypatch.setattr(release_docs, "fetch", fetch)
+    for operation in [
+        lambda: release_docs.prepare_schemas(project),
+        lambda: release_docs.check_online(project, VERSION),
+    ]:
+        with pytest.raises(ValueError, match=r"[Ss]chema") as raised:
+            operation()
+        assert "schema" in str(raised.value).lower()
+        assert not any(secret in str(raised.value) for secret in ("password", "secret"))
+    assert (project / "docs/schemas/v1/rating.json").read_bytes() == previous
+    fetch.assert_not_called()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Directory permissions require POSIX")
+def test_unreadable_nested_schema_directory_is_not_silently_skipped(project: Path) -> None:
+    hidden = project / "pyroma/schemas/v2"
+    hidden.mkdir()
+    (hidden / "rating.json").write_text("{}")
+    hidden.chmod(0)
+    try:
+        try:
+            with os.scandir(hidden):
+                pass
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("This account bypasses directory permission checks")
+        with pytest.raises(
+            ValueError, match=r"Canonical packaged schema directory: unable to read inventory.*permission denied"
+        ):
+            release_docs.schema_paths(project)
+    finally:
+        hidden.chmod(0o755)
+
+
+@pytest.mark.parametrize("location", ["root", "file", "directory", "broken"])
+@pytest.mark.skipif(os.name == "nt", reason="Built symlinks require POSIX")
+def test_built_schema_symlinks_fail_verification(project: Path, location: str) -> None:
+    prepare_site(project)
+    schemas = project / "site/schemas"
+    if location == "root":
+        target = project / "external"
+        schemas.rename(target)
+        schemas.symlink_to(target, target_is_directory=True)
+    elif location == "directory":
+        (schemas / "v99").symlink_to(project / "pyroma/schemas/v1", target_is_directory=True)
+    elif location == "broken":
+        (schemas / "broken.json").symlink_to(project / "absent")
+    else:
+        (schemas / "v1/rating.json").unlink()
+        (schemas / "v1/rating.json").symlink_to(project / "pyroma/schemas/v1/rating.json")
+    with pytest.raises(ValueError, match=r"Built schema directory.*symlink"):
+        release_docs.check_schema_outputs(project, project / "site")
 
 
 @pytest.mark.parametrize(
-    ("inventory", "message"),
+    "filename",
     [
-        ("missing", "Canonical packaged schema directory is missing"),
-        ("empty", "Canonical packaged schema directory has no JSON schemas"),
-        ("failed", "Unable to read canonical schema inventory"),
+        "README.md",
+        "docs/changelog.md",
+        ".pre-commit-hooks.yaml",
+        "pyproject.toml",
+        "zensical.toml",
+        "pyroma/schemas/v1/rating.json",
     ],
 )
-@pytest.mark.skipif(os.name == "nt", reason="Schema deployment uses POSIX shells")
-def test_workflow_inventory_failures_have_explicit_diagnostics(project: Path, inventory: str, message: str) -> None:
-    if inventory != "failed":
-        shutil.rmtree(project / "pyroma/schemas")
-        if inventory == "empty":
-            (project / "pyroma/schemas").mkdir()
-        with pytest.raises(ValueError, match=message):
-            release_docs.schema_paths(project)
-    else:
-        find = project / "find"
-        find.write_text("#!/bin/sh\nprintf 'pyroma/schemas/v1/rating.json\\n'\nexit 1\n", encoding="utf-8")
-        find.chmod(0o755)
+@pytest.mark.parametrize(
+    "case",
+    [
+        (errno.ENOENT, "file missing"),
+        (errno.EACCES, "permission denied"),
+        (errno.EISDIR, "directory instead of file"),
+        (errno.EIO, "I/O failure"),
+        (None, "OS failure"),
+        ("utf8", "valid UTF-8"),
+    ],
+)
+def test_every_local_read_has_safe_cli_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    project: Path,
+    capsys: pytest.CaptureFixture,
+    filename: str,
+    case: tuple[int | str | None, str],
+) -> None:
+    error_number, category = case
+    path = project / filename
+    original_read = Path.read_bytes
+
+    def read(path_to_read: Path) -> bytes:
+        if path_to_read == path:
+            if error_number == "utf8":
+                return b"\xffpassword secret"
+            raise OSError(error_number, "password secret https://user:password@example.com/?secret=1")
+        return original_read(path_to_read)
+
+    monkeypatch.setattr(Path, "read_bytes", read)
+    monkeypatch.setattr("sys.argv", ["release_docs", "check", "--online", "--project", str(project)])
+    fetch = Mock(side_effect=AssertionError("Read errors must precede network requests"))
+    monkeypatch.setattr(release_docs, "fetch", fetch)
+    with pytest.raises(SystemExit) as raised:
+        release_docs.main()
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    label = "Packaged schema schemas/v1/rating.json" if filename.startswith("pyroma/") else f"Local {filename}"
+    assert label in err
+    assert category in err
+    assert not any(secret in err for secret in ("Traceback", "password", "secret", "https://"))
+    fetch.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("inventory", "diagnostic"),
+    [
+        ("", "is missing"),
+        ("[password secret", "valid JSON"),
+        ("{}", "must be a list"),
+        ("null", "must be a list"),
+        ("[]", "has no JSON schemas"),
+        ("[42]", "invalid schema path"),
+        ('["schemas/../password.secret.json"]', "invalid schema path"),
+        ('["/schemas/password.secret.json"]', "invalid schema path"),
+        ('["schemas//password.secret.json"]', "invalid schema path"),
+        ('["schemas/password.secret.txt"]', "invalid schema path"),
+        ('["schemas/a.json","schemas/a.json"]', "duplicate schema paths"),
+    ],
+)
+@pytest.mark.skipif(os.name == "nt", reason="Deployment workflow uses POSIX shells")
+def test_invalid_deploy_manifest_fails_before_any_probe(project: Path, inventory: str, diagnostic: str) -> None:
     curl = project / "curl"
     curl.write_text("#!/bin/sh\nprintf 'unexpected probe\\n'\n", encoding="utf-8")
     curl.chmod(0o755)
     workflow = yaml.safe_load((ROOT / ".github/workflows/docs.yml").read_text())
     step = workflow_step(workflow["jobs"]["deploy"]["steps"], "schema_availability")
-    result = subprocess.run(  # noqa: S603 - exercise failed inventory discovery using local tools
+    result = subprocess.run(  # noqa: S603 - validate the actual manifest decoder with a local curl probe
         workflow_bash_command(step),
         cwd=project,
-        env={**os.environ, "PATH": str(project) + os.pathsep + os.environ["PATH"], "DOCS_URL": release_docs.SITE_URL},
+        env={
+            **os.environ,
+            "PATH": str(project) + os.pathsep + os.environ["PATH"],
+            "DOCS_URL": release_docs.SITE_URL,
+            "SCHEMA_PATHS_JSON": inventory,
+        },
         capture_output=True,
         text=True,
         check=False,
         timeout=10,
     )
-    assert result.returncode != 0
-    assert message in result.stderr
-    assert not result.stdout, "Inventory failures must precede every probe"
+    assert result.returncode == 1
+    assert "Schema inventory from build" in result.stderr
+    assert diagnostic in result.stderr
+    assert not result.stdout
+    assert not any(secret in result.stderr for secret in ("Traceback", "password", "secret"))
 
 
-def test_schema_inventory_checkout_is_sparse() -> None:
+@pytest.mark.skipif(os.name == "nt", reason="Workflow uses POSIX shells")
+def test_verified_workflow_inventory_is_probed_with_encoded_paths(project: Path) -> None:
+    filename = "new # schema\\name\n$(touch injected).json"
+    future = project / "pyroma/schemas/v2" / filename
+    future.parent.mkdir()
+    future.write_text("{}")
+    prepare_site(project)
+    environment = schema_build_environment(project)
     workflow = yaml.safe_load((ROOT / ".github/workflows/docs.yml").read_text())
-    step = workflow_step(workflow["jobs"]["deploy"]["steps"], "schema_inventory")
-    assert step["with"]["sparse-checkout"] == "pyroma/schemas"
-    assert step["with"]["sparse-checkout-cone-mode"] is False
-    assert step["with"]["persist-credentials"] is False
+    result = subprocess.run(  # noqa: S603 - run the complete build-to-deploy manifest handoff
+        workflow_bash_command(workflow_step(workflow["jobs"]["build"]["steps"], "schema_build_outputs")),
+        cwd=project,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    inventory = Path(environment["GITHUB_OUTPUT"]).read_text().removeprefix("schema_paths=").strip()
+    shutil.rmtree(project / "pyroma")
+    curl = project / "curl"
+    curl.write_text('#!/bin/sh\nfor request_url do :; done\nprintf "%s\\n" "$request_url"\n', encoding="utf-8")
+    curl.chmod(0o755)
+    result = subprocess.run(  # noqa: S603 - probe exactly the verified manifest with a local curl
+        workflow_bash_command(workflow_step(workflow["jobs"]["deploy"]["steps"], "schema_availability")),
+        cwd=project,
+        env={**environment, "SCHEMA_PATHS_JSON": inventory, "DOCS_URL": release_docs.SITE_URL},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert set(result.stdout.splitlines()) == {
+        release_docs.SITE_URL + "json/",
+        *[release_docs.SITE_URL + quote(path, safe="/") for path in json.loads(inventory)],
+    }
+    assert not (project / "injected").exists()
+
+
+def test_check_schemas_cli_supports_an_explicit_site_and_preserves_failed_manifest(
+    monkeypatch: pytest.MonkeyPatch, project: Path, capsys: pytest.CaptureFixture
+) -> None:
+    prepare_site(project)
+    site = project / "custom-site"
+    (project / "site").rename(site)
+    inventory = project / "inventory.json"
+    arguments = [
+        "release_docs",
+        "check-schemas",
+        "--project",
+        str(project),
+        "--site",
+        str(site),
+        "--inventory-output",
+        str(inventory),
+    ]
+    monkeypatch.setattr("sys.argv", arguments)
+    release_docs.main()
+    previous = inventory.read_bytes()
+    assert json.loads(previous) == ["schemas/v1/error.json", "schemas/v1/rating.json"]
+    (site / "schemas/v1/rating.json").write_bytes(b"modified")
+    with pytest.raises(SystemExit) as raised:
+        release_docs.main()
+    assert raised.value.code == 1
+    assert inventory.read_bytes() == previous
+    assert "Built schema schemas/v1/rating.json does not match packaged schema bytes" in capsys.readouterr().err
+
+
+def test_untagged_checks_still_require_a_static_version(project: Path) -> None:
+    replace_once(project / "pyproject.toml", f'version = "{VERSION}"', 'dynamic = ["version"]')
+    with pytest.raises(ValueError, match=r"Local pyproject\.toml: project\.version must be a valid version string"):
+        release_docs.check_offline(project)
