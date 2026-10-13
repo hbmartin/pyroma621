@@ -43,7 +43,8 @@ _FINAL_STATUSES = {"Development Status :: 5 - Production/Stable", "Development S
 _LOCAL_PROJECT_LABEL = "Local pyproject.toml"
 _CHANGELOG_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _DESCRIPTOR_ALIAS = re.compile(
-    r"/(?:dev/(?:stdin|stdout|stderr|fd/[0-9]+)|proc/(?:self|thread-self|[0-9]+)/fd/[0-9]+)(?=/|$)"
+    r"/(?:dev/(?:stdin|stdout|stderr|fd/[0-9]+)|"
+    r"proc/(?:self|thread-self|[0-9]+)(?:/task/[0-9]+)?/fd/[0-9]+)(?=/|$)"
 )
 _LINK_LIMIT = 40
 _DIRECTORY_OPERATIONS = os.open in os.supports_dir_fd and os.scandir in os.supports_fd
@@ -359,7 +360,7 @@ def _os_error_reason(error: OSError) -> str:
         errno.ENOSPC: "disk full",
         errno.EPIPE: "broken pipe",
         errno.EBADF: "bad file descriptor",
-        errno.EAGAIN: "output would block",
+        errno.EAGAIN: "operation would block",
     }.get(error.errno, "OS failure")
 
 
@@ -376,12 +377,11 @@ def _protected_reads_supported() -> bool:
 
 
 def _anchored_paths_supported() -> bool:
-    return (
-        _DIRECTORY_OPERATIONS
-        and _SEARCH_FLAG is not None
-        and hasattr(os, "O_DIRECTORY")
-        and _protected_reads_supported()
-    )
+    return _DIRECTORY_OPERATIONS and hasattr(os, "O_DIRECTORY") and _protected_reads_supported()
+
+
+def _search_anchors_supported() -> bool:
+    return _anchored_paths_supported() and _SEARCH_FLAG is not None
 
 
 def _identity(info: os.stat_result) -> tuple[int, int, int]:
@@ -392,6 +392,24 @@ def _directory_identity(path: Path, label: str) -> _DirectoryIdentity:
     entry = path.lstat()
     target = path.stat() if stat.S_ISLNK(entry.st_mode) else entry
     return _DirectoryIdentity(path, _identity(entry), _identity(target), label)
+
+
+def _ancestor_identities(path: Path, root: Path, label: str) -> list[_DirectoryIdentity]:
+    """Give every logical ancestor the same context in either capability path."""
+    identities = []
+    logical = root
+    for part in (None, *path.relative_to(root).parts):
+        if part is not None:
+            logical /= part
+        display = logical.relative_to(root)
+        location = _escaped_path(display) if display.parts else "selected root"
+        context = f"{label} at {location}"
+        try:
+            identities.append(_directory_identity(logical, context))
+        except OSError as error:
+            message = f"{context}: unable to inspect directory ({_os_error_reason(error)})"
+            raise ValueError(message) from error
+    return identities
 
 
 def _validate_directories(identities: list[_DirectoryIdentity] | tuple[_DirectoryIdentity, ...]) -> None:
@@ -426,27 +444,23 @@ def _directory_descriptor(
 ) -> Generator[int, None, None]:
     """Anchor existing ancestors with search permission, recording their identities."""
     descriptors: list[int] = []
-    logical = root
     try:
-        for part in (None, *path.relative_to(root).parts):
-            if part is not None:
-                logical /= part
-            display = logical.relative_to(root)
-            location = _escaped_path(display) if display.parts else "selected root"
-            context = f"{label} at {location}"
+        for expected in _ancestor_identities(path, root, label):
             try:
-                expected = _directory_identity(logical, context)
-                flags = (_SEARCH_FLAG or os.O_RDONLY) | os.O_DIRECTORY
+                assert _SEARCH_FLAG is not None  # noqa: S101 - guarded by the search-anchor capability
+                flags = _SEARCH_FLAG | os.O_DIRECTORY
                 descriptor = os.open(
-                    root if part is None else part, flags, dir_fd=None if not descriptors else descriptors[-1]
+                    expected.path if not descriptors else expected.path.name,
+                    flags,
+                    dir_fd=None if not descriptors else descriptors[-1],
                 )
                 descriptors.append(descriptor)
                 if _identity(os.fstat(descriptor)) != expected.target:
-                    message = f"{context}: directory changed during validation"
+                    message = f"{expected.label}: directory changed during validation"
                     raise ValueError(message)
                 identities.append(expected)
             except OSError as error:
-                message = f"{context}: unable to open directory ({_os_error_reason(error)})"
+                message = f"{expected.label}: unable to open directory ({_os_error_reason(error)})"
                 raise ValueError(message) from error
         yield descriptors[-1]
     finally:
@@ -509,11 +523,11 @@ def _read_schema_bytes(  # noqa: PLR0913 - optional discovery context avoids reo
             raise ValueError(message)
         if parent is not None:
             descriptor = os.open(path.name, flags, dir_fd=parent)
-        elif _anchored_paths_supported():
+        elif _search_anchors_supported():
             with _directory_descriptor(path.parent, root or path.parent, captured, label) as ancestor:
                 descriptor = os.open(path.name, flags, dir_fd=ancestor)
         else:
-            captured.append(_directory_identity(path.parent, label))
+            captured.extend(_ancestor_identities(path.parent, root or path.parent, label))
             descriptor = os.open(path, flags)
         opening = False
         payload = _read_regular_stream(descriptor, label, expected)
@@ -544,80 +558,64 @@ def _write_bytes(path: Path, payload: bytes, label: str) -> None:
         raise ValueError(message) from error
 
 
-def _reject_descriptor_alias(path: Path) -> None:
-    """Inspect parent links before any destination or descriptor dereference."""
-    if os.name != "posix":
-        return
-    pending = list(path.absolute().parts[1:])
-    resolved = Path("/")
-    links: set[Path] = set()
-    while pending:
-        remaining = os.path.normpath("/" + str(resolved.joinpath(*pending)).lstrip("/"))
-        if _DESCRIPTOR_ALIAS.match(remaining):
-            raise ValueError(_INVENTORY_DESTINATION_ERROR)
-        component = pending.pop(0)
-        candidate = resolved / component
-        normalized = os.path.normpath("/" + str(candidate).lstrip("/"))
-        if not pending:
-            return
-        try:
-            mode = candidate.lstat().st_mode
-        except OSError as error:
-            if error.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
-                return
-            raise
-        if stat.S_ISLNK(mode):
-            if candidate in links or len(links) == _LINK_LIMIT:
-                return
-            links.add(candidate)
-            target = candidate.readlink()
-            if target.is_absolute():
-                resolved = Path("/")
-                pending = list(target.parts[1:]) + pending
-            else:
-                pending = list(target.parts) + pending
-        else:
-            resolved = Path(normalized)
-
-
-def _inventory_mode(path: Path) -> int | None:
-    """Preserve regular-file permissions without following output symlinks."""
-    _reject_descriptor_alias(path)
+def _output_entry(path: Path) -> os.stat_result | None:
+    """Treat ordinary unresolved link targets as replaceable, preserving other failures."""
     try:
-        mode = path.lstat().st_mode
-    except FileNotFoundError:
-        return None
+        return path.lstat()
+    except OSError as error:
+        if error.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+            return None
+        raise
+
+
+def _resolved_output_mode(mode: int, *, linked: bool) -> int | None:
     if stat.S_ISREG(mode):
-        return mode & 0o777
-    if stat.S_ISLNK(mode):
-        _require_replaceable_output_link(path)
+        return None if linked else mode & 0o777
+    if linked and stat.S_ISDIR(mode):
         return None
     raise ValueError(_INVENTORY_DESTINATION_ERROR)
 
 
-def _require_replaceable_output_link(path: Path) -> None:
-    """Inspect at most forty links without dereferencing descriptor aliases."""
-    current = path.absolute()
-    seen: set[Path] = set()
-    for _ in range(_LINK_LIMIT):
-        _reject_descriptor_alias(current)
-        if current in seen:
-            return
-        seen.add(current)
-        try:
-            target_mode = current.lstat().st_mode
-        except OSError as error:
-            if error.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
-                return
-            raise
-        if stat.S_ISLNK(target_mode):
-            target = current.readlink()
-            current = target if target.is_absolute() else current.parent / target
-        elif stat.S_ISREG(target_mode) or (current != path.absolute() and stat.S_ISDIR(target_mode)):
-            return
-        else:
+def _inventory_destination(path: Path) -> tuple[Path, int | None]:
+    """Resolve components once, checking aliases before following any descriptor path."""
+    absolute = path.absolute()
+    resolved = Path("/") if os.name == "posix" else Path(absolute.anchor)
+    pending = list(absolute.parts[1:])
+    expansions = 0
+    linked = False
+    destination = None
+    while pending:
+        remaining = "/" + resolved.joinpath(*pending).as_posix().lstrip("/")
+        if os.name == "posix" and _DESCRIPTOR_ALIAS.match(remaining):
             raise ValueError(_INVENTORY_DESTINATION_ERROR)
-    return
+        component = pending.pop(0)
+        if component == "..":
+            resolved = resolved.parent
+            continue
+        candidate = resolved / component
+        destination = candidate if not pending and not linked else destination
+        info = _output_entry(candidate)
+        if info is None:
+            return destination or absolute, None
+        if stat.S_ISLNK(info.st_mode):
+            expansions += 1
+            if expansions > _LINK_LIMIT:
+                return destination or absolute, None
+            linked |= not pending
+            target = candidate.readlink()
+            if target.is_absolute():
+                resolved = Path("/") if os.name == "posix" else Path(target.anchor)
+                pending = list(target.parts[1:]) + pending
+            else:
+                pending = list(target.parts) + pending
+        elif not pending:
+            return destination or candidate, _resolved_output_mode(info.st_mode, linked=linked)
+        elif not stat.S_ISDIR(info.st_mode):
+            return destination or absolute, None
+        else:
+            resolved = candidate
+    info = _output_entry(resolved)
+    return destination or resolved, None if info is None else _resolved_output_mode(info.st_mode, linked=linked)
 
 
 def _write_inventory_stdout(payload: bytes) -> None:
@@ -645,8 +643,8 @@ def _write_inventory(path: Path, payload: bytes) -> None:
     """Replace files atomically with ordinary permissions."""
     temporary = None
     try:
-        mode = _inventory_mode(path)
-        temporary = tempfile.TemporaryDirectory(dir=path.parent, prefix=".schema-inventory-")
+        destination, mode = _inventory_destination(path)
+        temporary = tempfile.TemporaryDirectory(dir=destination.parent, prefix=".schema-inventory-")
         folder = Path(temporary.name)
         folder.chmod(0o700)
         sibling = folder / "inventory.json"
@@ -660,7 +658,7 @@ def _write_inventory(path: Path, payload: bytes) -> None:
             with suppress(Exception):
                 output.close()
             raise
-        os.replace(sibling, path)  # noqa: PTH105 - replace the destination entry atomically
+        os.replace(sibling, destination)  # noqa: PTH105 - replace the destination entry atomically
     except OSError as error:
         message = f"Schema inventory output: unable to write file ({_os_error_reason(error)})"
         raise ValueError(message) from error
@@ -824,6 +822,7 @@ def _scan_child(  # noqa: PLR0913 - carry the scan context and the discovered en
     ignore_symlinks: bool,
     descriptor: int | None,
     read_label: str | None,
+    read_paths: set[Path] | None,
 ) -> _SchemaInventory:
     relative = path.relative_to(root)
     context = f"{label} at {_schema_display_path(relative)}"
@@ -843,7 +842,13 @@ def _scan_child(  # noqa: PLR0913 - carry the scan context and the discovered en
         else:
             _validate_directories([expected])
         nested = _scan_inventory(
-            path, root, label, ignore_symlinks=ignore_symlinks, descriptor=child, read_label=read_label
+            path,
+            root,
+            label,
+            ignore_symlinks=ignore_symlinks,
+            descriptor=child,
+            read_label=read_label,
+            read_paths=read_paths,
         )
         return _SchemaInventory(nested.files, nested.directories, nested.payloads, (expected, *nested.identities))
     finally:
@@ -860,6 +865,7 @@ def _scan_inventory(  # noqa: PLR0913 - optional reads share the discovery descr
     ignore_symlinks: bool,
     descriptor: int | None = None,
     read_label: str | None = None,
+    read_paths: set[Path] | None = None,
 ) -> _SchemaInventory:
     files: set[Path] = set()
     directories: set[Path] = set()
@@ -891,6 +897,7 @@ def _scan_inventory(  # noqa: PLR0913 - optional reads share the discovery descr
                         ignore_symlinks=ignore_symlinks,
                         descriptor=descriptor,
                         read_label=read_label,
+                        read_paths=read_paths,
                     )
                     files.update(nested.files)
                     directories.update(nested.directories)
@@ -898,7 +905,11 @@ def _scan_inventory(  # noqa: PLR0913 - optional reads share the discovery descr
                     identities.extend(nested.identities)
                 elif stat.S_ISREG(info.st_mode):
                     files.add(relative)
-                    if read_label is not None and path.name.endswith(".json"):
+                    if (
+                        read_label is not None
+                        and path.name.endswith(".json")
+                        and (read_paths is None or relative in read_paths)
+                    ):
                         payloads[relative] = _read_schema_bytes(
                             path, f"{read_label} {_schema_display_path(relative)}", parent=descriptor, expected=info
                         )
@@ -934,20 +945,21 @@ def _inventory_root(directory: Path, label: str) -> os.stat_result:
     return info
 
 
-def _schema_inventory(
+def _schema_inventory(  # noqa: PLR0913 - expected built paths limit reads during descriptor-backed discovery
     directory: Path,
     label: str,
     *,
     ignore_symlinks: bool,
     root: Path | None = None,
     read_label: str | None = None,
+    read_paths: set[Path] | None = None,
 ) -> _SchemaInventory:
     """Discover and optionally read JSON through the same directory descriptors."""
     info = _inventory_root(directory, label)
     captured = [_DirectoryIdentity(directory, _identity(info), _identity(info), f"{label} at schemas")]
     descriptor = None
     try:
-        if _anchored_paths_supported():
+        if _search_anchors_supported():
             with _directory_descriptor(directory.parent, root or directory.parent, captured, label) as parent:
                 try:
                     descriptor = os.open(directory.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
@@ -955,17 +967,25 @@ def _schema_inventory(
                     reason = _opening_reason(error, directory.name, parent=parent)
                     message = f"{label}: unable to read inventory at schemas ({reason})"
                     raise ValueError(message) from error
-            if _identity(os.fstat(descriptor)) != captured[0].target:
-                message = f"{label} at schemas: directory changed during validation"
-                raise ValueError(message)
         else:
-            ancestor = root or directory.parent
-            for part in (None, *directory.parent.relative_to(ancestor).parts):
-                if part is not None:
-                    ancestor /= part
-                captured.append(_directory_identity(ancestor, label))
+            captured.extend(_ancestor_identities(directory.parent, root or directory.parent, label))
+            if _anchored_paths_supported():
+                try:
+                    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                except OSError as error:
+                    message = f"{label}: unable to read inventory at schemas ({_opening_reason(error, directory)})"
+                    raise ValueError(message) from error
+        if descriptor is not None and _identity(os.fstat(descriptor)) != captured[0].target:
+            message = f"{label} at schemas: directory changed during validation"
+            raise ValueError(message)
         inventory = _scan_inventory(
-            directory, directory, label, ignore_symlinks=ignore_symlinks, descriptor=descriptor, read_label=read_label
+            directory,
+            directory,
+            label,
+            ignore_symlinks=ignore_symlinks,
+            descriptor=descriptor,
+            read_label=read_label,
+            read_paths=read_paths,
         )
         captured.extend(inventory.identities)
         _validate_directories(captured)
@@ -1128,6 +1148,7 @@ def check_schema_outputs(project: Path, site: Path) -> list[Path]:
         ignore_symlinks=False,
         root=site,
         read_label="Built schema",
+        read_paths={relative.relative_to("schemas") for relative in schemas},
     )
     built = {Path("schemas") / path for path in inventory.files}
     directories = {Path("schemas") / path for path in inventory.directories}

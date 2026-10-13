@@ -2,6 +2,13 @@
 
 ## 6.2.0 (2026-10-13)
 
+- Keep descriptor-backed POSIX schema traversal when search-only flags are
+  unavailable, give changed ancestors precise logical paths, and report extra
+  built JSON files without reading them. Resolve output aliases in one bounded
+  component walk, expanding links before parent components and recognizing
+  thread-specific descriptor namespaces. Cover macOS PyPy release validation
+  and Python 3.14 CLI color detection with accurate stream doubles.
+
 - Require complete inventory stdout writes, reporting nonblocking output with no
   progress instead of silently losing the manifest. Preserve existing ancestor
   directory links and search-only permissions, read schemas during discovery,

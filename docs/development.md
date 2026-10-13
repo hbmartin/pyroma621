@@ -426,20 +426,25 @@ devices, are rejected with their relative paths. Missing, empty, or unreadable
 inventories fail explicitly, and all schemas must decode as UTF-8 and parse as
 JSON before preparation replaces existing generated files.
 On supported POSIX platforms, schemas are read through the same directory
-descriptors used for discovery. Existing ancestor directory links, such as
-`pyroma/` and `site/json/`, are accepted and anchored once. Ancestors that are not
-listed use search-only opens, so readable schema files do not require read
-permission on those ancestors. Directory identities are recorded and rechecked
-before evidence is accepted; real-directory replacement and ancestor-link
-retargeting fail with relative-path diagnostics.
+descriptors used for discovery. Descriptor-backed traversal does not require
+`O_PATH` or `O_SEARCH`; without those flags the scanned root is opened directly,
+and descendants are still opened relative to their discovering descriptors.
+Existing ancestor directory links, such as
+`pyroma/` and `site/json/`, are accepted. Ancestors that are not
+listed use search-only opens when available, so readable schema files do not
+require read permission on those ancestors. Without search-only flags, ancestor
+identities are captured and rechecked without opening them for reading; guide
+reads retain weaker path-based parent protection. Directory identities are
+recorded and rechecked before evidence is accepted; real-directory replacement
+and ancestor-link retargeting fail with relative-path diagnostics.
 Schema files and the built JSON guide use nonblocking, non-following opens and
 descriptor validation. After confirming the file is regular, reads restore
 blocking mode and consume that same descriptor. File and directory symlinks
 introduced after discovery are rejected. Stream wrappers do not own the opened
 descriptor, so failed construction cannot close it twice. Caller-selected project
-and site roots are the trust boundaries. Platforms without these facilities use
-non-following prechecks and descriptor validation, without equivalent race
-protection or additional read-permission requirements on ancestors. These checks
+and site roots are the trust boundaries. Platforms without descriptor-backed
+traversal use non-following prechecks and descriptor validation, without equivalent
+race protection or additional read-permission requirements on ancestors. These checks
 do not prevent every filesystem race or bound I/O on regular files.
 The docs-only environment does not install the runtime project. Offline tests validate every
 JSON documentation example and the PEP 440 syntax of its illustrative checker version.
@@ -447,9 +452,11 @@ After the strict build, CI requires a nonempty JSON guide and compares the
 permitted schema paths and original bytes before uploading it; unexpected files
 and built symlinks fail verification. Built directories must be exactly the
 parents required by the schema files, so unexpected empty directories also fail.
-Inventory mismatches list sorted missing and extra paths. Schema diagnostics
-use nested paths starting with `schemas/`, relative to the package or site, with
-resource labels identifying canonical, generated, built, or published files.
+Inventory mismatches list sorted missing and extra paths. Unexpected built JSON
+files are reported without opening their contents, including unreadable or huge
+extra files. Expected schemas retain protected reads and byte comparison. Schema
+diagnostics use nested paths starting with `schemas/`, relative to the package or
+site, with resource labels identifying canonical, generated, built, or published files.
 Root labels identify `pyroma/schemas`, `docs/schemas`, or `schemas` relative to
 the site directory, including the default `site/`, without printing absolute
 paths. Paths use JSON-style ASCII escaping for non-ASCII characters, controls, quotes, and backslashes.
@@ -470,10 +477,14 @@ standard descriptor aliases such as `/dev/stdout`, `/dev/fd/1`, and
 `/proc/self/fd/1`, including repeated leading separators, parent-directory aliases, and symlink
 chains pointing to them, are rejected even
 when redirected to regular files. Use `-` and shell redirection for streams.
+This includes `/proc/<pid>/task/<tid>/fd/N`. Destination resolution expands each
+link before applying following `..` components, so valid paths are not rejected
+by lexical normalization. Revisiting a link with a different remaining path does
+not end alias checks; the bound counts all link expansions.
 Failed verification emits no manifest and does not overwrite an existing inventory.
 File output uses an exclusively created manifest inside a private temporary
-directory in the destination's parent and replaces its destination only after
-writing and closing succeed. Existing regular-file rwx permissions are retained,
+directory in the resolved destination parent and replaces its destination entry
+only after writing and closing succeed. Existing regular-file rwx permissions are retained,
 excluding special mode bits; new files use `0666` filtered by the current umask.
 Ownership and ACLs are not preserved; retaining mode bits does not preserve the
 same access policy when ownership changes. Creation, permission-setting, writing,
@@ -485,6 +496,11 @@ during target inspection fail explicitly. Resolution is bounded to forty links.
 Cleanup is best effort and interrupts propagate; an interruption during resource
 acquisition can still leave temporary output behind. This does not provide
 power-loss durability or make generated-schema publication atomic.
+
+Release-validation CI also runs focused tests on macOS PyPy 3.11, including
+descriptor-backed discovery without search-only flags. Read and write diagnostics
+use the shared category "operation would block". Windows release-schema
+validation is outside this stabilization and remains unverified.
 Check documentation consistency locally, or include live release evidence:
 
 ```console
