@@ -32,6 +32,11 @@
   filesystem entries and unexpected built directories; inventory diagnostics name
   sorted missing and extra relative paths. Generated-schema and inventory-output
   failures use safe resource labels, including symlinked generated directories.
+  Explain missing, unreleased, and malformed changelog dates with actionable
+  diagnostics. Use a consistent `schemas/` path base and JSON-style ASCII escaping,
+  and replace inventory manifests only after their temporary siblings are written
+  and closed successfully. Bound real FIFO regression checks so faulty file
+  classification cannot hang the test suite.
 - Keep release lifecycle tests independent of the current checkout version,
   share CLI/config selector validation, and include test dependencies in the
   default development environment.

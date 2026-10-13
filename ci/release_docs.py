@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import stat
+import tempfile
 import tomllib
 from contextlib import suppress
 from dataclasses import dataclass
@@ -200,18 +201,29 @@ def _changelog_date(value: str) -> datetime.date:
     if _CHANGELOG_DATE.fullmatch(value) is None:
         message = "Changelog dates must use YYYY-MM-DD"
         raise ValueError(message)
-    return datetime.date.fromisoformat(value)
+    try:
+        return datetime.date.fromisoformat(value)
+    except ValueError as error:
+        message = "Changelog dates must be valid calendar dates in YYYY-MM-DD format"
+        raise ValueError(message) from error
 
 
 def _require_date(entries: dict[str, str], version: str, expected: str | None = None) -> None:
-    value = entries.get(version, "")
+    value = entries.get(version)
+    context = f"Local docs/changelog.md: Release {version}"
+    if value is None:
+        message = f"{context} has no matching heading"
+        raise ValueError(message)
+    if value == "unreleased":
+        message = f"{context} is unreleased; needs a dated heading in YYYY-MM-DD format"
+        raise ValueError(message)
     try:
         _changelog_date(value)
     except ValueError as error:
-        message = f"Published/release version {version} needs a dated changelog entry"
+        message = f"{context}: {error}"
         raise ValueError(message) from error
     if expected is not None and value != expected:
-        message = f"Changelog date for {version} must be {expected}, not {value}"
+        message = f"{context}: Changelog date must be {expected}, not {value}"
         raise ValueError(message)
 
 
@@ -314,6 +326,7 @@ def _os_error_reason(error: OSError) -> str:
         errno.EISDIR: "directory instead of file",
         errno.ENOTDIR: "path component is not a directory",
         errno.EIO: "I/O failure",
+        errno.ENOSPC: "disk full",
     }.get(error.errno, "OS failure")
 
 
@@ -331,6 +344,31 @@ def _write_bytes(path: Path, payload: bytes, label: str) -> None:
     except OSError as error:
         message = f"{label}: unable to write file ({_os_error_reason(error)})"
         raise ValueError(message) from error
+
+
+def _write_inventory(path: Path, payload: bytes) -> None:
+    """Replace the manifest only after its temporary sibling is closed."""
+    temporary = None
+    try:
+        output = tempfile.NamedTemporaryFile(  # noqa: SIM115 - close failures must not mask write errors or interrupts
+            mode="wb", dir=path.parent, prefix=".schema-inventory-", delete=False
+        )
+        temporary = Path(output.name)
+        try:
+            output.write(payload)
+        except BaseException:
+            with suppress(Exception):
+                output.close()
+            raise
+        output.close()
+        os.replace(temporary, path)  # noqa: PTH105 - replace the destination entry atomically
+    except OSError as error:
+        message = f"Schema inventory output: unable to write file ({_os_error_reason(error)})"
+        raise ValueError(message) from error
+    finally:
+        if temporary is not None:
+            with suppress(Exception):
+                temporary.unlink(missing_ok=True)
 
 
 def _decode_utf8(payload: bytes, label: str, *, encoding: str = "utf-8") -> str:
@@ -470,7 +508,7 @@ def _published_release_dates(text: str) -> dict[str, str]:
 
 
 def _escaped_path(path: Path) -> str:
-    """Display relative paths without embedding control characters."""
+    """Display paths with JSON-style ASCII, control, quote and backslash escapes."""
     return json.dumps(path.as_posix())[1:-1]
 
 
@@ -482,14 +520,15 @@ def _scan_inventory(folder: Path, root: Path, label: str, *, ignore_symlinks: bo
             for entry in entries:
                 path = Path(entry.path)
                 relative = path.relative_to(root)
+                display = _escaped_path(Path("schemas") / relative)
                 try:
                     entry_mode = entry.stat(follow_symlinks=False).st_mode
                 except OSError as error:
-                    message = f"{label}: unable to stat entry {_escaped_path(relative)} ({_os_error_reason(error)})"
+                    message = f"{label}: unable to stat entry {display} ({_os_error_reason(error)})"
                     raise ValueError(message) from error
                 if stat.S_ISLNK(entry_mode):
                     if not ignore_symlinks:
-                        message = f"{label}: symlinks are not permitted at {_escaped_path(relative)}"
+                        message = f"{label}: symlinks are not permitted at {display}"
                         raise ValueError(message)
                 elif stat.S_ISDIR(entry_mode):
                     directories.add(relative)
@@ -499,11 +538,11 @@ def _scan_inventory(folder: Path, root: Path, label: str, *, ignore_symlinks: bo
                 elif stat.S_ISREG(entry_mode):
                     files.add(relative)
                 else:
-                    message = f"{label}: entries must be regular files or directories at {_escaped_path(relative)}"
+                    message = f"{label}: entries must be regular files or directories at {display}"
                     raise ValueError(message)
     except OSError as error:
         message = (
-            f"{label}: unable to read inventory at {_escaped_path(folder.relative_to(root))} "
+            f"{label}: unable to read inventory at {_escaped_path(Path('schemas') / folder.relative_to(root))} "
             f"({_os_error_reason(error)})"
         )
         raise ValueError(message) from error
@@ -515,16 +554,16 @@ def _schema_inventory(directory: Path, label: str, *, ignore_symlinks: bool) -> 
     try:
         mode = directory.lstat().st_mode
     except FileNotFoundError as error:
-        message = f"{label} is missing"
+        message = f"{label} is missing at schemas"
         raise ValueError(message) from error
     except OSError as error:
-        message = f"{label}: unable to read inventory ({_os_error_reason(error)})"
+        message = f"{label}: unable to read inventory at schemas ({_os_error_reason(error)})"
         raise ValueError(message) from error
     if stat.S_ISLNK(mode):
-        message = f"{label} must not be a symlink"
+        message = f"{label} must not be a symlink at schemas"
         raise ValueError(message)
     if not stat.S_ISDIR(mode):
-        message = f"{label} is not a directory"
+        message = f"{label} is not a directory at schemas"
         raise ValueError(message)
     return _scan_inventory(directory, directory, label, ignore_symlinks=ignore_symlinks)
 
@@ -571,7 +610,7 @@ def _check_published_contract(schemas: dict[Path, _SchemaEvidence]) -> None:
     """Require the JSON guide and canonical schema downloads to be published."""
     fetch(SITE_URL + "json/", label="JSON guide")
     for relative, evidence in schemas.items():
-        label = f"Published schema {_escaped_path(relative.relative_to('schemas'))}"
+        label = f"Published schema {_escaped_path(relative)}"
         published = _load_json(fetch(SITE_URL + quote(relative.as_posix(), safe="/"), label=label), label)
         if not _json_equal(published, evidence.document):
             message = f"{label} does not match packaged schema"
@@ -605,10 +644,13 @@ def check_online(project: Path, revision: str) -> None:
         if value is None:
             message = f"{context} has no matching heading"
             raise ValueError(message)
+        if value == "unreleased":
+            message = f"{context} is unreleased; needs a dated heading in YYYY-MM-DD format"
+            raise ValueError(message)
         try:
             _changelog_date(value)
         except ValueError as error:
-            message = f"{context} needs a valid dated heading"
+            message = f"{context}: {error}"
             raise ValueError(message) from error
         if value != date:
             message = f"{context} has a mismatched date"
@@ -703,10 +745,9 @@ def main() -> None:
         elif args.command == "check-schemas":
             paths = check_schema_outputs(args.project, args.site if args.site is not None else args.project / "site")
             if args.inventory_output is not None:
-                _write_bytes(
+                _write_inventory(
                     args.inventory_output,
                     (json.dumps([path.as_posix() for path in paths], separators=(",", ":")) + "\n").encode("utf-8"),
-                    "Schema inventory output",
                 )
         else:
             revision = check_offline(args.project, args.release_tag)
