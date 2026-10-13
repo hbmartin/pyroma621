@@ -2,6 +2,13 @@
 
 ## 6.2.0 (2026-10-13)
 
+- Require complete inventory stdout writes, reporting nonblocking output with no
+  progress instead of silently losing the manifest. Preserve existing ancestor
+  directory links and search-only permissions, read schemas during discovery,
+  and reject changed directory identities. Keep descriptor ownership explicit
+  through stream construction, detect descriptor aliases through parent links,
+  and identify symlink failures precisely. Update the JSON guide for 6.2.0.
+
 - Stabilize inventory stdout output with exact binary bytes and exit 1 after
   write failures, distinguish `./-` file output, and reject descriptor aliases.
   Replace ordinary broken output links without touching their targets. Anchor

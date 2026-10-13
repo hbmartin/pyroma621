@@ -425,16 +425,22 @@ is rejected. Other special filesystem entries, including FIFOs, sockets and
 devices, are rejected with their relative paths. Missing, empty, or unreadable
 inventories fail explicitly, and all schemas must decode as UTF-8 and parse as
 JSON before preparation replaces existing generated files.
-On supported POSIX platforms, inventory traversal and schema reads anchor
-descendant components to open directory descriptors rather than following full
-paths again. Schema files and the built JSON guide use nonblocking, non-following
-opens and descriptor validation. After confirming the file is regular, reads
-restore blocking mode and consume that same descriptor. File and directory
-symlinks introduced after discovery are rejected. Caller-selected project and
-site roots are the trust boundaries. Platforms without these facilities use
+On supported POSIX platforms, schemas are read through the same directory
+descriptors used for discovery. Existing ancestor directory links, such as
+`pyroma/` and `site/json/`, are accepted and anchored once. Ancestors that are not
+listed use search-only opens, so readable schema files do not require read
+permission on those ancestors. Directory identities are recorded and rechecked
+before evidence is accepted; real-directory replacement and ancestor-link
+retargeting fail with relative-path diagnostics.
+Schema files and the built JSON guide use nonblocking, non-following opens and
+descriptor validation. After confirming the file is regular, reads restore
+blocking mode and consume that same descriptor. File and directory symlinks
+introduced after discovery are rejected. Stream wrappers do not own the opened
+descriptor, so failed construction cannot close it twice. Caller-selected project
+and site roots are the trust boundaries. Platforms without these facilities use
 non-following prechecks and descriptor validation, without equivalent race
-protection. These checks do not prevent every filesystem race or bound I/O on
-regular files.
+protection or additional read-permission requirements on ancestors. These checks
+do not prevent every filesystem race or bound I/O on regular files.
 The docs-only environment does not install the runtime project. Offline tests validate every
 JSON documentation example and the PEP 440 syntax of its illustrative checker version.
 After the strict build, CI requires a nonempty JSON guide and compares the
@@ -456,10 +462,13 @@ compact JSON. Use `--inventory-output -` to write the same JSON and trailing
 newline as binary bytes to stdout, flushing it only after verification succeeds.
 Only the exact argument `-` selects stdout; `./-` creates a file named `-`.
 Stdout must provide a binary buffer, so text newline conversion does not change
-the manifest. Write and flush failures close the failed stream best effort and
-exit 1 without a second shutdown diagnostic. Special output destinations and
+the manifest. Partial writes continue with the remaining bytes. A write returning no progress
+fails explicitly rather than losing output or retrying forever. Write and flush
+failures close the failed stream best effort and exit 1 without a second shutdown
+diagnostic. Special output destinations and
 standard descriptor aliases such as `/dev/stdout`, `/dev/fd/1`, and
-`/proc/self/fd/1`, including symlink chains pointing to them, are rejected even
+`/proc/self/fd/1`, including repeated leading separators, parent-directory aliases, and symlink
+chains pointing to them, are rejected even
 when redirected to regular files. Use `-` and shell redirection for streams.
 Failed verification emits no manifest and does not overwrite an existing inventory.
 File output uses an exclusively created manifest inside a private temporary
@@ -504,8 +513,12 @@ distribution and hook, and checks PyPI upload dates against changelog headings.
 Schema comparison uses JSON value types: booleans differ from numbers, numeric
 values such as `1` and `1.0` are equivalent, array order matters, and object-key
 order does not. Online changelog dates require the same `YYYY-MM-DD` spelling.
-It is not part of the publish gate and can fail for old checkouts after the live
-site or published release list changes. It reads and validates all local schemas
+The staged `6.2.0 (2026-10-13)` heading must match the actual UTC upload day;
+update it before publishing if the release occurs on a later day. A documented
+6.2.0 hook revision can be staged before its tag exists, so the optional online
+audit is expected to fail until that tag is available. Crossing midnight alone
+does not invalidate the heading. The audit is not part of the publish gate and
+can fail for old checkouts after the live site or published release list changes. It reads and validates all local schemas
 and the changelog before making any network requests.
 Date diagnostics distinguish missing headings and unreleased entries from
 invalid spelling or calendar dates and explain the required `YYYY-MM-DD` format.
