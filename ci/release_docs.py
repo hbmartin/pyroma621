@@ -17,10 +17,10 @@ from urllib.request import urlopen
 
 import yaml
 from markdown_it import MarkdownIt
-from markdown_it.rules_block import fence
 from packaging.version import Version
 
 if TYPE_CHECKING:
+    from markdown_it.parser_block import RuleFuncBlockType
     from markdown_it.rules_block.state_block import StateBlock
     from markdown_it.token import Token
 
@@ -29,7 +29,6 @@ REPOSITORY = "https://github.com/hbmartin/pyroma621"
 RELEASE_DATES = {"6.0.0": "2026-08-01", "6.1.0": "2026-10-12"}
 _RESPONSE_LIMIT = 2 * 1024 * 1024
 _PRECOMMIT_MARKER = "<!-- pyroma-pre-commit -->"
-_MARKER_BEFORE_FENCE = re.compile(re.escape(_PRECOMMIT_MARKER) + r"[ \t]*(?:`{3,}|~{3,})")
 _FINAL_STATUSES = {"Development Status :: 5 - Production/Stable", "Development Status :: 6 - Mature"}
 
 
@@ -46,25 +45,40 @@ def _load_yaml(text: str, context: str) -> object:
         raise ValueError(message) from error
 
 
-def _fence_with_closure(state: StateBlock, start: int, end: int, silent: bool) -> bool:  # noqa: FBT001 - parser callback
-    """Keep Markdown's fence rules and record explicit closure in its container."""
-    matched = fence(state, start, end, silent)
-    if matched and not silent:
-        token = state.tokens[-1]
-        last = state.line - 1
-        closing = state.src[state.bMarks[last] + state.tShift[last] : state.eMarks[last]].rstrip(" \t")
-        token.meta["closed"] = (
-            last > start
-            and not state.is_code_block(last)
-            and len(closing) >= len(token.markup)
-            and closing == token.markup[0] * len(closing)
-        )
-    return matched
+def _fence_with_closure(rule: RuleFuncBlockType) -> RuleFuncBlockType:
+    """Record whether the standard rule consumed two delimiter lines."""
+
+    def wrapped(state: StateBlock, start: int, end: int, silent: bool) -> bool:  # noqa: FBT001 - parser callback
+        matched = rule(state, start, end, silent)
+        if matched and not silent:
+            token = state.tokens[-1]
+            content_lines = token.content.count("\n") + bool(token.content and not token.content.endswith("\n"))
+            token.meta["closed"] = token.map is not None and token.map[1] - token.map[0] == content_lines + 2
+        return matched
+
+    return wrapped
+
+
+def _markdown_parser() -> MarkdownIt:
+    """Wrap the registered fence rule while preserving its alternative chains."""
+    parser = MarkdownIt("commonmark")
+    # The release dependency is bounded to markdown-it-py 4.x for this rule metadata.
+    rule = next(rule for rule in parser.block.ruler.__rules__ if rule.name == "fence")
+    parser.block.ruler.at("fence", _fence_with_closure(rule.fn), {"alt": list(rule.alt)})
+    return parser
+
+
+def _marked_fence_message(line: int) -> str:
+    return f"README line {line}: marked pyroma hook example needs a complete yaml code block"
+
+
+def _marker_placement_message(line: int) -> str:
+    return f"README line {line}: pyroma hook marker must be on its own line before the YAML fence"
 
 
 def _read_marked_fence(token: Token, pending: tuple[int, int]) -> tuple[int, str]:
     marker_line, level = pending
-    message = f"README line {marker_line}: marked pyroma hook example needs a complete yaml code block"
+    message = _marked_fence_message(marker_line)
     if token.type != "fence" or token.level != level or token.info.strip() != "yaml":
         raise ValueError(message)
     if not token.meta["closed"]:
@@ -76,8 +90,7 @@ def _read_marked_fence(token: Token, pending: tuple[int, int]) -> tuple[int, str
 
 def _marked_precommit_blocks(readme: str) -> list[tuple[int, str]]:
     """Read adjacent marker/YAML blocks in the same Markdown container."""
-    parser = MarkdownIt("commonmark")
-    parser.block.ruler.at("fence", _fence_with_closure, {"alt": ["paragraph", "reference", "blockquote", "list"]})
+    parser = _markdown_parser()
     blocks: list[tuple[int, str]] = []
     pending: tuple[int, int] | None = None
     for token in parser.parse(readme.removeprefix("\ufeff")):
@@ -91,16 +104,17 @@ def _marked_precommit_blocks(readme: str) -> list[tuple[int, str]]:
                 message = f"README line {line}: unclosed code fence hides possible pyroma hook examples"
                 raise ValueError(message)
             if _PRECOMMIT_MARKER in token.info:
-                message = f"README line {line}: pyroma hook marker must be on its own line before the YAML fence"
+                message = _marker_placement_message(line)
                 raise ValueError(message)
         elif token.type == "html_block":
             if token.content.strip() == _PRECOMMIT_MARKER:
                 pending = (line, token.level)
-            elif _MARKER_BEFORE_FENCE.search(token.content):
-                message = f"README line {line}: pyroma hook marker must be on its own line before the YAML fence"
+            elif _PRECOMMIT_MARKER in token.content:
+                marker_line = line + token.content.partition(_PRECOMMIT_MARKER)[0].count("\n")
+                message = _marker_placement_message(marker_line)
                 raise ValueError(message)
     if pending is not None:
-        message = f"README line {pending[0]}: marked pyroma hook example needs a complete yaml code block"
+        message = _marked_fence_message(pending[0])
         raise ValueError(message)
     return blocks
 
@@ -111,6 +125,7 @@ def precommit_revision(readme: str) -> str:
     revisions: set[str] = set()
     for marker_line, block in _marked_precommit_blocks(readme):
         context = f"README pre-commit example at line {marker_line}"
+        block_message = f"{context}: {message}"
         example = _load_yaml(block, context)
         repositories = example.get("repos") if isinstance(example, dict) else None
         repositories = repositories if isinstance(repositories, list) else []
@@ -125,11 +140,9 @@ def precommit_revision(readme: str) -> str:
                 continue
             revision = repository.get("rev")
             if not isinstance(revision, str) or not revision.strip():
-                block_message = f"{context}: {message}"
                 raise ValueError(block_message)
             block_revisions.add(revision)
         if not block_revisions:
-            block_message = f"{context}: {message}"
             raise ValueError(block_message)
         revisions.update(block_revisions)
     if not revisions:
@@ -219,7 +232,10 @@ def fetch(url: str, *, label: str = "Release evidence") -> str:
             payload = response.read(_RESPONSE_LIMIT + 1)
     except HTTPError as error:
         message = f"{label}: HTTP {error.code}"
-        raise ValueError(message) from error
+        try:
+            error.close()
+        finally:
+            raise ValueError(message) from error
     except TimeoutError as error:
         message = f"{label}: request timed out"
         raise ValueError(message) from error
@@ -256,6 +272,70 @@ def _load_toml(text: str, label: str) -> dict[str, object]:
         raise ValueError(message) from error
 
 
+def _hook_package_metadata(text: str) -> tuple[str, Version]:
+    """Validate the fields consumed from the documented hook's package."""
+    label = "Hook package metadata"
+    project = _load_toml(text, label).get("project")
+    if not isinstance(project, dict):
+        message = f"{label}: project must be a table"
+        raise ValueError(message)  # noqa: TRY004 - malformed release evidence
+    name = project.get("name")
+    if not isinstance(name, str) or not name.strip():
+        message = f"{label}: project.name must be a nonempty string"
+        raise ValueError(message)
+    version = project.get("version")
+    message = f"{label}: project.version must be a valid version string"
+    if not isinstance(version, str):
+        raise ValueError(message)  # noqa: TRY004 - malformed release evidence
+    try:
+        return name, Version(version)
+    except ValueError as error:
+        raise ValueError(message) from error
+
+
+def _upload_date(artifact: object) -> str:
+    """Read a safe calendar date from a PyPI artifact record."""
+    label = "PyPI release metadata"
+    if not isinstance(artifact, dict):
+        message = f"{label}: release artifacts must be objects"
+        raise ValueError(message)  # noqa: TRY004 - malformed release evidence
+    timestamp = artifact.get("upload_time_iso_8601")
+    message = f"{label}: upload_time_iso_8601 must be an ISO timestamp string"
+    if not isinstance(timestamp, str) or "T" not in timestamp:
+        raise ValueError(message)
+    try:
+        return datetime.datetime.fromisoformat(timestamp).date().isoformat()
+    except ValueError as error:
+        raise ValueError(message) from error
+
+
+def _published_release_dates(text: str) -> dict[str, str]:
+    """Validate PyPI response structure before using its release dates."""
+    label = "PyPI release metadata"
+    document = _load_json(text, label)
+    if not isinstance(document, dict):
+        message = f"{label}: response must be an object"
+        raise ValueError(message)  # noqa: TRY004 - malformed release evidence
+    releases = document.get("releases")
+    if not isinstance(releases, dict):
+        message = f"{label}: releases must be an object"
+        raise ValueError(message)  # noqa: TRY004 - malformed release evidence
+    dates: dict[str, str] = {}
+    for version, artifacts in releases.items():
+        if not isinstance(artifacts, list):
+            message = f"{label}: release artifacts must be lists"
+            raise ValueError(message)  # noqa: TRY004 - malformed release evidence
+        if not artifacts:
+            continue
+        try:
+            Version(version)
+        except ValueError as error:
+            message = f"{label}: release keys must be valid version strings"
+            raise ValueError(message) from error
+        dates[version] = min(_upload_date(artifact) for artifact in artifacts)
+    return dates
+
+
 def schema_paths(project: Path) -> list[Path]:
     """Discover every canonical JSON schema relative to the package."""
     package = project / "pyroma"
@@ -271,7 +351,9 @@ def _check_published_contract(project: Path) -> None:
     fetch(SITE_URL + "json/", label="JSON guide")
     for relative in schema_paths(project):
         label = f"Published schema {relative.relative_to('schemas').as_posix()}"
-        canonical = json.loads((project / "pyroma" / relative).read_text(encoding="utf-8"))
+        canonical = _load_json(
+            (project / "pyroma" / relative).read_text(encoding="utf-8"), f"Packaged schema {relative.as_posix()}"
+        )
         published = _load_json(fetch(SITE_URL + relative.as_posix(), label=label), label)
         if published != canonical:
             message = f"{label} does not match packaged schema"
@@ -289,23 +371,17 @@ def check_online(project: Path, revision: str) -> None:
         fetch(SITE_URL + page, label=label)
     _check_published_contract(project)
     base = "https://raw.githubusercontent.com/hbmartin/pyroma621/" + quote(revision, safe="") + "/"
-    metadata = _load_toml(fetch(base + "pyproject.toml", label="Hook package metadata"), "Hook package metadata")[
-        "project"
-    ]
-    if metadata["name"] != "pyroma621" or Version(metadata["version"]) != Version(revision):
+    name, version = _hook_package_metadata(fetch(base + "pyproject.toml", label="Hook package metadata"))
+    if name != "pyroma621" or version != Version(revision):
         message = "Documented pre-commit revision must install a pyroma621 release"
         raise ValueError(message)
     _require_hook_definition(
         fetch(base + ".pre-commit-hooks.yaml", label="Published hook manifest"), "Published pre-commit hooks"
     )
     entries = changelog_entries((project / "docs" / "changelog.md").read_text(encoding="utf-8"))
-    releases = _load_json(
-        fetch("https://pypi.org/pypi/pyroma621/json", label="PyPI release metadata"), "PyPI release metadata"
-    )["releases"]
-    for version, artifacts in releases.items():
-        if artifacts:
-            date = min(artifact["upload_time_iso_8601"] for artifact in artifacts)[:10]
-            _require_date(entries, version, date)
+    dates = _published_release_dates(fetch("https://pypi.org/pypi/pyroma621/json", label="PyPI release metadata"))
+    for version, date in dates.items():
+        _require_date(entries, version, date)
 
 
 def prepare_schemas(project: Path) -> None:

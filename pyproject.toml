@@ -59,7 +59,7 @@ test = [
 ]
 
 audit = ["packaging>=26.3", "pip-audit==2.10.1"]
-release = ["markdown-it-py>=4.2.0", "packaging>=26.3", "PyYAML>=6.0.3"]
+release = ["markdown-it-py>=4.2.0,<5", "packaging>=26.3", "PyYAML>=6.0.3"]
 docs = [{include-group = "release"}, "zensical>=0.0.50"]
 dev = [
     {include-group = "test"},
