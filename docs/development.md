@@ -424,29 +424,45 @@ regular JSON files and excludes file and directory symlinks; a symlinked root
 is rejected. Other special filesystem entries, including FIFOs, sockets and
 devices, are rejected with their relative paths. Missing, empty, or unreadable
 inventories fail explicitly, and all schemas must decode as UTF-8 and parse as
-JSON before preparation replaces existing generated files. The docs-only
-environment does not install the runtime project. Offline tests validate every
+JSON before preparation replaces existing generated files.
+Schema reads on POSIX use nonblocking, non-following opens and check that the
+opened descriptor is a regular file before reading it. A file replaced by a FIFO
+or symlink after discovery is rejected rather than read. Platforms without these
+open flags use a non-following precheck and descriptor validation, without the
+same race protection. These checks do not prevent every filesystem race.
+The docs-only environment does not install the runtime project. Offline tests validate every
 JSON documentation example and the PEP 440 syntax of its illustrative checker version.
 After the strict build, CI requires a nonempty JSON guide and compares the
 permitted schema paths and original bytes before uploading it; unexpected files
 and built symlinks fail verification. Built directories must be exactly the
 parents required by the schema files, so unexpected empty directories also fail.
 Inventory mismatches list sorted missing and extra paths. Schema diagnostics
-consistently use paths starting with `schemas/`, with resource labels identifying
-canonical, generated, built, or published files. Paths use JSON-style ASCII
+use nested paths starting with `schemas/`, relative to the package or site, with
+resource labels identifying canonical, generated, built, or published files.
+Root labels identify `pyroma/schemas`, `docs/schemas`, or `schemas` relative to
+`--site`, without printing absolute paths. Paths use JSON-style ASCII
 escaping for non-ASCII characters, controls, quotes, and backslashes.
 Generated `docs/schemas` must be a real
 directory when present; normal and broken symlinks are rejected. This also runs
 on pull requests and covers every schema version. `check-schemas` accepts
 `--site PATH` (default: the project's
 `site/`) and `--inventory-output PATH` to write the verified, sorted paths as
-compact JSON. Failed verification does not overwrite an existing inventory.
-The manifest is written to a temporary sibling and replaces its destination only
-after writing and closing succeed. Creation, writing, closing, or replacement
-failures preserve the previous manifest; cleanup is best effort. Its parent
-directory must already exist. Replacement acts on the destination entry itself,
-so an existing symlink is replaced without changing its target. This does not
-provide power-loss durability or make generated-schema publication atomic.
+compact JSON. Use `--inventory-output -` to write the same JSON and trailing
+newline to stdout, flushing it only after verification succeeds. Special output
+destinations, including links to devices or pipes, are rejected; use `-` for stdout
+and shell redirection for stream destinations. Failed verification emits no
+manifest and does not overwrite an existing inventory.
+File output uses an exclusively created manifest inside a private temporary
+directory in the destination's parent and replaces its destination only after
+writing and closing succeed. Existing regular-file rwx permissions are retained,
+excluding special mode bits; new files use `0666` filtered by the current umask.
+Ownership and ACLs are not preserved. Creation, permission-setting, writing,
+closing, or replacement failures preserve the previous manifest. Its parent
+directory must already exist and be writable; there is no in-place fallback.
+Other destination symlinks are replaced without changing their targets.
+Cleanup is best effort and interrupts propagate; an interruption during resource
+acquisition can still leave temporary output behind. This does not provide
+power-loss durability or make generated-schema publication atomic.
 Check documentation consistency locally, or include live release evidence:
 
 ```console
