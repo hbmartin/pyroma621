@@ -12,7 +12,7 @@ import sys
 import tomllib
 from collections.abc import Callable
 from http.client import IncompleteRead
-from io import BytesIO, StringIO, TextIOWrapper
+from io import BytesIO, StringIO, TextIOWrapper, UnsupportedOperation
 from pathlib import Path
 from unittest.mock import Mock
 from urllib.error import HTTPError, URLError
@@ -148,6 +148,15 @@ def failing_schema_stream(
 
     monkeypatch.setattr(release_docs.io, "BufferedReader", buffered)
     return streams
+
+
+def stdout_stream() -> Mock:
+    """Model a binary-capable, non-terminal stream for CLI color detection."""
+    stream = Mock()
+    stream.buffer.write.side_effect = len
+    stream.isatty.return_value = False
+    stream.fileno.side_effect = UnsupportedOperation("Stream has no descriptor")
+    return stream
 
 
 def mock_inventory_stream(monkeypatch: pytest.MonkeyPatch, output: Mock) -> None:
@@ -2407,9 +2416,27 @@ def test_schema_scan_read_races_are_rejected_promptly(project: Path, race: str) 
     if race.endswith("fifo"):
         assert "regular file" in result.stderr
     else:
-        assert (
-            "directory changed during validation" if race.endswith("directory-symlink") else "symlink not permitted"
-        ) in result.stderr
+        if race.endswith("directory-symlink"):
+            if race.startswith("guide"):
+                expected = "Built JSON guide json/index.html at json: directory changed during validation"
+            elif release_docs._anchored_paths_supported():
+                label = (
+                    "Built schema directory (schemas relative to the site directory)"
+                    if race.startswith("built")
+                    else "Canonical packaged schema directory (pyroma/schemas)"
+                )
+                expected = f"{label} at schemas/v1: directory changed during validation"
+            else:
+                label = "Built schema" if race.startswith("built") else "Packaged schema"
+                expected = f"{label} schemas/v1/error.json: file changed during validation"
+        else:
+            label = (
+                "Built JSON guide json/index.html"
+                if race.startswith("guide")
+                else (("Built schema" if race.startswith("built") else "Packaged schema") + " schemas/v1/error.json")
+            )
+            expected = f"{label}: unable to read file (symlink not permitted)"
+        assert f"Release documentation check failed: {expected}" in result.stderr.splitlines()
     assert "Traceback" not in result.stderr
     assert str(project) not in result.stderr
     assert (project / "docs/schemas/v1/error.json").read_bytes() == previous
@@ -2800,12 +2827,16 @@ def test_manifest_stdout_only_follows_successful_verification(
 
 
 @pytest.mark.parametrize("phase", ["write", "flush"])
+@pytest.mark.parametrize("color", ["automatic", "forced"])
 def test_manifest_stdout_failures_are_labelled(
-    monkeypatch: pytest.MonkeyPatch, project: Path, capsys: pytest.CaptureFixture, phase: str
+    monkeypatch: pytest.MonkeyPatch, project: Path, capsys: pytest.CaptureFixture, phase: str, color: str
 ) -> None:
     prepare_site(project)
-    stream = Mock()
-    stream.buffer.write.side_effect = len
+    for variable in ("NO_COLOR", "FORCE_COLOR", "PYTHON_COLORS", "TERM"):
+        monkeypatch.delenv(variable, raising=False)
+    if color == "forced":
+        monkeypatch.setenv("FORCE_COLOR", "1")
+    stream = stdout_stream()
     getattr(stream.buffer, phase).side_effect = OSError(errno.EIO, "password secret")
     monkeypatch.setattr(
         "sys.argv", ["release_docs", "check-schemas", "--project", str(project), "--inventory-output", "-"]
@@ -3012,8 +3043,7 @@ def test_stdout_requires_a_binary_buffer(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_stdout_cleanup_does_not_hide_the_write_diagnostic(monkeypatch: pytest.MonkeyPatch) -> None:
-    stream = Mock()
-    stream.buffer.write.side_effect = len
+    stream = stdout_stream()
     stream.buffer.flush.side_effect = OSError(errno.ENOSPC, "secret")
     stream.close.side_effect = OSError(errno.EIO, "cleanup secret")
     with monkeypatch.context() as patch:
@@ -3028,8 +3058,7 @@ def test_stdout_cleanup_does_not_hide_the_write_diagnostic(monkeypatch: pytest.M
 def test_stdout_interrupts_propagate(
     monkeypatch: pytest.MonkeyPatch, phase: str, interrupt: type[BaseException]
 ) -> None:
-    stream = Mock()
-    stream.buffer.write.side_effect = len
+    stream = stdout_stream()
     if phase == "cleanup":
         stream.buffer.write.side_effect = OSError(errno.EIO, "secret")
         stream.close.side_effect = interrupt
@@ -3052,6 +3081,8 @@ def test_stdout_interrupts_propagate(
         "/proc/self/fd/1",
         "/proc/thread-self/fd/2",
         f"/proc/{os.getpid()}/fd/1",
+        "/proc/123/task/456/fd/1",
+        "/proc/self/task/456/fd/1",
     ],
 )
 @pytest.mark.parametrize("linked", [False, True])
@@ -3258,7 +3289,9 @@ def test_stdout_requires_progress_and_closes_a_failed_stream(
     output.buffer.write.side_effect = [2, progress] if partial else [progress]
     with monkeypatch.context() as patch:
         patch.setattr(sys, "stdout", output)
-        with pytest.raises(ValueError, match=r"Schema inventory output: unable to write file \(output would block\)"):
+        with pytest.raises(
+            ValueError, match=r"Schema inventory output: unable to write file \(operation would block\)"
+        ):
             release_docs._write_inventory_stdout(b"[]\n")
     assert output.buffer.write.call_count == (2 if partial else 1)
     output.buffer.flush.assert_not_called()
@@ -3325,7 +3358,7 @@ def test_actual_unbuffered_cli_never_accepts_a_truncated_manifest(project: Path,
     finally:
         os.close(reader)
     assert result.returncode == 1
-    assert b"Schema inventory output: unable to write file (output would block)" in result.stderr
+    assert b"Schema inventory output: unable to write file (operation would block)" in result.stderr
     assert b"Traceback" not in result.stderr
     assert b"Exception ignored" not in result.stderr
     if full:
@@ -3378,11 +3411,14 @@ def test_existing_ancestor_links_remain_supported(project: Path, ancestor: str) 
     "location", ["pyroma/schemas", "pyroma/schemas/v1", "site/schemas", "site/schemas/v1", "site/json"]
 )
 @pytest.mark.parametrize("replacement", ["directory", "symlink"])
+@pytest.mark.parametrize("search_only", [False, True])
 @pytest.mark.skipif(not release_docs._anchored_paths_supported(), reason="Requires directory anchoring")
 def test_inventory_rejects_directory_identity_changes_after_reading(
-    monkeypatch: pytest.MonkeyPatch, project: Path, location: str, replacement: str
+    monkeypatch: pytest.MonkeyPatch, project: Path, location: str, replacement: str, search_only: bool
 ) -> None:
     prepare_site(project)
+    if not search_only:
+        monkeypatch.setattr(release_docs, "_SEARCH_FLAG", None)
     victim = project / location
     backup = victim.with_name("original-tree")
     external = project / "external-tree"
@@ -3447,6 +3483,175 @@ def test_existing_ancestor_link_retargeting_is_rejected(
     monkeypatch.setattr(release_docs, "_read_schema_bytes", read)
     with pytest.raises(ValueError, match="directory changed during validation"):
         release_docs.check_schema_outputs(project, project / "site")
+
+
+@pytest.mark.skipif(not release_docs._anchored_paths_supported(), reason="Requires descriptor-backed discovery")
+def test_inventory_without_search_flags_keeps_discovery_descriptors(
+    monkeypatch: pytest.MonkeyPatch, project: Path
+) -> None:
+    prepare_site(project)
+    monkeypatch.setattr(release_docs, "_SEARCH_FLAG", None)
+    assert release_docs._anchored_paths_supported()
+    assert not release_docs._search_anchors_supported()
+    original = os.open
+    opened = []
+
+    def opening(path: Path | str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        opened.append((Path(path), dir_fd))
+        return original(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", opening)
+    assert release_docs.check_schema_outputs(project, project / "site")
+    for root in (project / "pyroma/schemas", project / "site/schemas"):
+        assert (root, None) in opened
+    assert all(parent is not None for path, parent in opened if path.name in {"rating.json", "error.json", "v1"})
+    assert all(path not in {project, project / "pyroma", project / "site"} for path, _ in opened)
+
+
+@pytest.mark.parametrize("ancestor", ["pyroma", "site/json"])
+@pytest.mark.parametrize("path_only", [False, True])
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ancestor links")
+def test_fallback_ancestor_changes_have_precise_context(
+    monkeypatch: pytest.MonkeyPatch, project: Path, ancestor: str, path_only: bool
+) -> None:
+    prepare_site(project)
+    previous = (project / "docs/schemas/v1/error.json").read_bytes()
+    monkeypatch.setattr(release_docs, "_SEARCH_FLAG", None)
+    if path_only:
+        monkeypatch.setattr(release_docs, "_anchored_paths_supported", lambda: False)
+    directory = project / ancestor
+    backup = directory.with_name(directory.name + "-original")
+    original = release_docs._read_schema_bytes
+    changed = False
+
+    def read(path: Path, label: str, **kwargs: object) -> bytes:
+        nonlocal changed
+        payload = original(path, label, **kwargs)
+        if not changed and path.is_relative_to(directory):
+            changed = True
+            directory.rename(backup)
+            directory.symlink_to(backup.name, target_is_directory=True)
+        return payload
+
+    monkeypatch.setattr(release_docs, "_read_schema_bytes", read)
+    fetch = Mock(side_effect=AssertionError("Reject changed canonical ancestors before fetching"))
+    monkeypatch.setattr(release_docs, "fetch", fetch)
+    expected = (
+        "Canonical packaged schema directory (pyroma/schemas) at pyroma: directory changed during validation"
+        if ancestor == "pyroma"
+        else "Built JSON guide json/index.html at json: directory changed during validation"
+    )
+    operation = (
+        (lambda: release_docs.check_online(project, VERSION))
+        if ancestor == "pyroma"
+        else (lambda: release_docs.check_schema_outputs(project, project / "site"))
+    )
+    try:
+        with pytest.raises(ValueError, match="directory changed during validation") as raised:
+            operation()
+        assert str(raised.value) == expected
+        fetch.assert_not_called()
+        assert (project / "docs/schemas/v1/error.json").read_bytes() == previous
+    finally:
+        if changed:
+            directory.unlink()
+            backup.rename(directory)
+
+
+@pytest.mark.parametrize("kind", ["unreadable", "huge"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_unexpected_built_json_is_reported_without_reading(
+    monkeypatch: pytest.MonkeyPatch, project: Path, capsys: pytest.CaptureFixture, kind: str, nested: bool
+) -> None:
+    prepare_site(project)
+    relative = Path("schemas/v1/unexpected.json" if nested else "schemas/unexpected.json")
+    extra = project / "site" / relative
+    with extra.open("wb") as output:
+        output.truncate(1024 * 1024 * 1024 if kind == "huge" else 2)
+    if kind == "unreadable":
+        extra.chmod(0)
+    original = release_docs._read_schema_bytes
+    read = []
+
+    def reading(path: Path, label: str, **kwargs: object) -> bytes:
+        assert path != extra, "Never read an unexpected schema file"
+        read.append(path)
+        return original(path, label, **kwargs)
+
+    monkeypatch.setattr(release_docs, "_read_schema_bytes", reading)
+    monkeypatch.setattr(sys, "argv", ["release_docs", "check-schemas", "--project", str(project)])
+    try:
+        with pytest.raises(SystemExit) as raised:
+            release_docs.main()
+        assert raised.value.code == 1
+        error = capsys.readouterr().err
+        assert f'files: extra ["{relative.as_posix()}"]; missing []' in error
+        assert "unable to read file" not in error
+        assert "Traceback" not in error
+        assert extra not in read
+    finally:
+        extra.chmod(0o600)
+
+
+def test_read_would_block_has_a_read_context(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    source = tmp_path / "schema.json"
+    source.write_bytes(b"{}")
+    streams = failing_schema_stream(monkeypatch, BlockingIOError(errno.EAGAIN, "secret"))
+    with pytest.raises(ValueError, match="operation would block") as raised:
+        release_docs._read_schema_bytes(source, "Packaged schema schemas/schema.json")
+    assert str(raised.value) == "Packaged schema schemas/schema.json: unable to read file (operation would block)"
+    assert streams
+    assert all(stream.closed for stream in streams)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor aliases")
+def test_repeated_parent_link_does_not_hide_a_descriptor_alias(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    link = tmp_path / "root-link"
+    link.symlink_to("/", target_is_directory=True)
+    path = link / tmp_path.relative_to("/") / "root-link/dev/fd/1/child.json"
+    temporary = Mock(side_effect=AssertionError("Never follow descriptor aliases"))
+    monkeypatch.setattr(release_docs.tempfile, "TemporaryDirectory", temporary)
+    with pytest.raises(ValueError, match="use --inventory-output - for stdout"):
+        release_docs._write_inventory(path, b"[]\n")
+    temporary.assert_not_called()
+    assert link.is_symlink()
+
+
+@pytest.mark.parametrize("terminal_link", [False, True])
+@pytest.mark.skipif(os.name == "nt", reason="POSIX link and parent-component semantics")
+def test_symlink_expansion_precedes_parent_components(tmp_path: Path, terminal_link: bool) -> None:
+    levels = len(tmp_path.parts)
+    target = tmp_path.joinpath(*(["deep"] * levels))
+    target.mkdir(parents=True)
+    link = tmp_path / "link"
+    link.symlink_to(target, target_is_directory=True)
+    path = link.joinpath(*([".."] * levels), "dev/stdout")
+    resolved = path.resolve()
+    assert resolved.is_relative_to(tmp_path.resolve())
+    resolved.parent.mkdir()
+    resolved.write_bytes(b"old")
+    resolved.chmod(0o640)
+    output = tmp_path / "inventory.json" if terminal_link else path
+    if terminal_link:
+        output.symlink_to(path)
+    release_docs._write_inventory(output, b"[]\n")
+    assert output.read_bytes() == b"[]\n"
+    if terminal_link:
+        assert not output.is_symlink()
+        assert resolved.read_bytes() == b"old"
+    else:
+        assert stat.S_IMODE(resolved.stat().st_mode) == 0o640
+    assert link.is_symlink()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX output links")
+@pytest.mark.parametrize("target", ["/", ".."])
+def test_output_links_to_root_or_parent_are_replaceable(tmp_path: Path, target: str) -> None:
+    output = tmp_path / "inventory.json"
+    output.symlink_to(target, target_is_directory=True)
+    release_docs._write_inventory(output, b"[]\n")
+    assert not output.is_symlink()
+    assert output.read_bytes() == b"[]\n"
 
 
 @pytest.mark.parametrize("destination", ["//dev/stdout", "directory-alias", "parent-descriptor", "terminal-chain"])
