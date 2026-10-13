@@ -2,6 +2,12 @@
 
 ## 6.2.0 (unreleased)
 
+- Stabilize inventory stdout output with exact binary bytes and exit 1 after
+  write failures, distinguish `./-` file output, and reject descriptor aliases.
+  Replace ordinary broken output links without touching their targets. Anchor
+  schema discovery and reads to directory descriptors on supported POSIX
+  platforms, protect the JSON guide, and restore blocking mode after regular-file
+  validation. Keep portable, resource-labelled errors and bounded race tests.
 - Preserve unambiguous long CLI option abbreviations, including JSON format
   selection, keep parser error formatting consistent across ordinary and
   intermixed parses, and resolve checker metadata once per CLI invocation.
