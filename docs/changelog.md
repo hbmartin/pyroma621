@@ -2,7 +2,14 @@
 
 ## 6.2.0 (2026-10-13)
 
-- Preserve guide parent-folder diagnostics before pinning file identity, report
+- Restore fallback guide identity capture before ancestor validation while
+  preserving parent-folder diagnostics. Reject early parent swap-and-restore
+  races and known changed files before reading; check relative stat capabilities
+  without disabling descriptor-backed schema discovery. Share one immutable
+  expected-tree context and explicit path-display mapping, and make race
+  assertions independent of scan order.
+
+- Preserve guide parent-folder diagnostics while pinning file identity, report
   guide symlinks explicitly, and use consistent selected project/site bases for
   schema errors. Share regular-file validation and required built directories
   without reducing ancestor identity checks. Keep the forced no-search regression

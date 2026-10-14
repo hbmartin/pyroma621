@@ -437,15 +437,24 @@ identities are captured and rechecked without opening them for reading; guide
 reads retain weaker path-based parent protection. Directory identities are
 recorded and rechecked before evidence is accepted; real-directory replacement
 and ancestor-link retargeting fail with relative-path diagnostics.
-Guide reads check or anchor their parent folders first, preserving folder-specific
-inspection and open diagnostics. They then capture the file's non-following
-identity immediately before opening, using the anchored parent when available, and
-compare it with the opened descriptor, including when a substituted parent is
-restored before the parent identity check. Guide symlinks are reported explicitly;
-other special entries must satisfy the regular-file check. Fallback schema reads
+Search-anchored guide reads capture file identity through their opened parent.
+Without search anchoring, they capture the file's non-following identity before
+checking ancestors and retain it through opening and descriptor validation.
+This rejects substitutions between ancestor capture and opening, including when
+the original parent is restored before the final check. Initial file failures
+are deferred until parent checks finish so folder-specific diagnostics retain
+priority; interrupts propagate immediately. Guide symlinks are reported explicitly;
+other special entries must satisfy the regular-file check. Fresh fallback
+prechecks compare against supplied discovery identities before opening, and
+descriptor validation checks identity again before stream reading. Fallback schema reads
 keep the selected project or site as their diagnostic base: `selected root` names
 that boundary, canonical package ancestors use `pyroma`, and nested schema paths
 start with `schemas/...`.
+Schema callers supply the physical/display prefix mapping explicitly; ancestor
+checks have no repository-specific path rewrite. Search anchoring also requires
+descriptor-relative, non-following stat support. When it is unavailable, schema
+discovery retains directory descriptors while guide reads use the documented
+fallback. Unexpected unsupported stat operations produce labelled diagnostics.
 Schema files and the built JSON guide use nonblocking, non-following opens and
 descriptor validation. After confirming the file is regular, reads restore
 blocking mode and consume that same descriptor. File and directory symlinks
@@ -464,9 +473,9 @@ parents required by the schema files, so unexpected empty directories also fail.
 Unexpected directory boundaries are reported without opening their subtrees;
 their descendants are not included in the extra-file or extra-directory lists.
 Unreadable required directories still fail with resource-labelled permission
-diagnostics. Required built-directory paths are calculated once for traversal and
-shared through nested scans, using the same parent-path calculation as the final
-inventory comparison.
+diagnostics. One immutable expected-tree context derives required directories
+from schema-relative files once, sharing them through traversal and final
+comparison. Callers cannot provide inconsistent file and directory restrictions.
 Inventory mismatches list sorted missing and extra paths. Unexpected built JSON
 files are reported without opening their contents, including unreadable or huge
 extra files. Expected schemas retain protected reads and byte comparison. Schema
