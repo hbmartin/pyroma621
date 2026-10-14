@@ -437,11 +437,15 @@ identities are captured and rechecked without opening them for reading; guide
 reads retain weaker path-based parent protection. Directory identities are
 recorded and rechecked before evidence is accepted; real-directory replacement
 and ancestor-link retargeting fail with relative-path diagnostics.
-Guide reads also capture the file's non-following identity before opening and
+Guide reads check or anchor their parent folders first, preserving folder-specific
+inspection and open diagnostics. They then capture the file's non-following
+identity immediately before opening, using the anchored parent when available, and
 compare it with the opened descriptor, including when a substituted parent is
-restored before the parent identity check. Fallback schema reads retain their
-package/site-relative `schemas/...` context rather than naming the file's parent
-as the selected root.
+restored before the parent identity check. Guide symlinks are reported explicitly;
+other special entries must satisfy the regular-file check. Fallback schema reads
+keep the selected project or site as their diagnostic base: `selected root` names
+that boundary, canonical package ancestors use `pyroma`, and nested schema paths
+start with `schemas/...`.
 Schema files and the built JSON guide use nonblocking, non-following opens and
 descriptor validation. After confirming the file is regular, reads restore
 blocking mode and consume that same descriptor. File and directory symlinks
@@ -460,7 +464,9 @@ parents required by the schema files, so unexpected empty directories also fail.
 Unexpected directory boundaries are reported without opening their subtrees;
 their descendants are not included in the extra-file or extra-directory lists.
 Unreadable required directories still fail with resource-labelled permission
-diagnostics.
+diagnostics. Required built-directory paths are calculated once for traversal and
+shared through nested scans, using the same parent-path calculation as the final
+inventory comparison.
 Inventory mismatches list sorted missing and extra paths. Unexpected built JSON
 files are reported without opening their contents, including unreadable or huge
 extra files. Expected schemas retain protected reads and byte comparison. Schema
@@ -512,7 +518,8 @@ acquisition can still leave temporary output behind. This does not provide
 power-loss durability or make generated-schema publication atomic.
 
 Release-validation CI also runs focused tests on macOS PyPy 3.11, including
-descriptor-backed discovery without search-only flags. Read and write diagnostics
+descriptor-backed discovery without search-only flags in the full release-validation
+suite; the native job also requires descriptor capability. Read and write diagnostics
 use the shared category "operation would block". Windows release-schema
 validation is outside this stabilization and remains unverified.
 Check documentation consistency locally, or include live release evidence:

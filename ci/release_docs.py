@@ -403,6 +403,8 @@ def _ancestor_identities(path: Path, root: Path, label: str) -> list[_DirectoryI
         if part is not None:
             logical /= part
         display = logical.relative_to(root)
+        if display.parts[:2] == ("pyroma", "schemas"):
+            display = Path("schemas", *display.parts[2:])
         location = _escaped_path(display) if display.parts else "selected root"
         context = f"{label} at {location}"
         try:
@@ -476,9 +478,7 @@ def _directory_descriptor(
 def _read_regular_stream(descriptor: int, label: str, expected: os.stat_result | None = None) -> bytes:
     """Keep descriptor ownership with the caller across stream acquisition failures."""
     observed = os.fstat(descriptor)
-    if not stat.S_ISREG(observed.st_mode):
-        message = f"{label}: file must be a regular file, not a symlink or special entry"
-        raise ValueError(message)
+    _require_regular_file(observed, label)
     if expected is not None and _identity(observed) != _identity(expected):
         message = f"{label}: file changed during validation"
         raise ValueError(message)
@@ -505,12 +505,31 @@ def _read_regular_stream(descriptor: int, label: str, expected: os.stat_result |
                 raw.close()
 
 
-def _regular_file_info(path: Path, label: str) -> os.stat_result:
-    info = path.lstat()
+def _require_regular_file(info: os.stat_result, label: str) -> None:
+    if stat.S_ISLNK(info.st_mode):
+        message = f"{label}: unable to read file (symlink not permitted)"
+        raise ValueError(message)
     if not stat.S_ISREG(info.st_mode):
         message = f"{label}: file must be a regular file, not a symlink or special entry"
         raise ValueError(message)
+
+
+def _regular_file_info(path: Path, label: str, *, parent: int | None = None) -> os.stat_result:
+    info = path.lstat() if parent is None else os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+    _require_regular_file(info, label)
     return info
+
+
+def _open_regular_file(
+    path: Path, label: str, flags: int, expected: os.stat_result | None, *, parent: int | None = None
+) -> tuple[int, os.stat_result]:
+    """Pin an undiscovered file after checking its parents, immediately before opening."""
+    if expected is None or not _protected_reads_supported():
+        observed = _regular_file_info(path, label, parent=parent)
+        if expected is None:
+            expected = observed
+    descriptor = os.open(path if parent is None else path.name, flags, dir_fd=parent)
+    return descriptor, expected
 
 
 def _read_schema_bytes(  # noqa: PLR0913 - optional discovery context avoids reopening scanned directories
@@ -527,21 +546,17 @@ def _read_schema_bytes(  # noqa: PLR0913 - optional discovery context avoids reo
     opening = True
     captured: list[_DirectoryIdentity] = []
     try:
-        if expected is None:
-            expected = _regular_file_info(path, label)
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
         if _protected_reads_supported():
             flags |= os.O_NONBLOCK | os.O_NOFOLLOW
-        else:
-            _regular_file_info(path, label)
         if parent is not None:
-            descriptor = os.open(path.name, flags, dir_fd=parent)
+            descriptor, expected = _open_regular_file(path, label, flags, expected, parent=parent)
         elif _search_anchors_supported():
             with _directory_descriptor(path.parent, root or path.parent, captured, label) as ancestor:
-                descriptor = os.open(path.name, flags, dir_fd=ancestor)
+                descriptor, expected = _open_regular_file(path, label, flags, expected, parent=ancestor)
         else:
             captured.extend(_ancestor_identities(path.parent, root or path.parent, label))
-            descriptor = os.open(path, flags)
+            descriptor, expected = _open_regular_file(path, label, flags, expected)
         opening = False
         payload = _read_regular_stream(descriptor, label, expected)
         _validate_directories(captured)
@@ -847,6 +862,10 @@ def _schema_display_path(relative: Path) -> str:
     return _escaped_path(Path("schemas") / relative)
 
 
+def _parent_directories(paths: set[Path]) -> set[Path]:
+    return {parent for path in paths for parent in path.parents if parent != Path()}
+
+
 def _scan_child(  # noqa: PLR0913 - carry the scan context and the discovered entry's identity
     path: Path,
     root: Path,
@@ -857,6 +876,8 @@ def _scan_child(  # noqa: PLR0913 - carry the scan context and the discovered en
     descriptor: int | None,
     read_label: str | None,
     read_paths: set[Path] | None,
+    logical_root: Path,
+    permitted_directories: set[Path] | None,
 ) -> _SchemaInventory:
     relative = path.relative_to(root)
     context = f"{label} at {_schema_display_path(relative)}"
@@ -883,6 +904,8 @@ def _scan_child(  # noqa: PLR0913 - carry the scan context and the discovered en
             descriptor=child,
             read_label=read_label,
             read_paths=read_paths,
+            logical_root=logical_root,
+            permitted_directories=permitted_directories,
         )
         return _SchemaInventory(nested.files, nested.directories, nested.payloads, (expected, *nested.identities))
     finally:
@@ -900,12 +923,13 @@ def _scan_inventory(  # noqa: PLR0913 - optional reads share the discovery descr
     descriptor: int | None = None,
     read_label: str | None = None,
     read_paths: set[Path] | None = None,
+    logical_root: Path | None = None,
+    permitted_directories: set[Path] | None = None,
 ) -> _SchemaInventory:
     files: set[Path] = set()
     directories: set[Path] = set()
     payloads: dict[Path, bytes] = {}
     identities: list[_DirectoryIdentity] = []
-    permitted_directories = None if read_paths is None else {parent for path in read_paths for parent in path.parents}
     try:
         with os.scandir(folder if descriptor is None else descriptor) as entries:
             for entry in entries:
@@ -935,6 +959,8 @@ def _scan_inventory(  # noqa: PLR0913 - optional reads share the discovery descr
                         descriptor=descriptor,
                         read_label=read_label,
                         read_paths=read_paths,
+                        logical_root=logical_root or root.parent,
+                        permitted_directories=permitted_directories,
                     )
                     files.update(nested.files)
                     directories.update(nested.directories)
@@ -950,7 +976,7 @@ def _scan_inventory(  # noqa: PLR0913 - optional reads share the discovery descr
                         payloads[relative] = _read_schema_bytes(
                             path,
                             f"{read_label} {_schema_display_path(relative)}",
-                            root=root.parent,
+                            root=logical_root or root.parent,
                             parent=descriptor,
                             expected=info,
                         )
@@ -1027,6 +1053,8 @@ def _schema_inventory(  # noqa: PLR0913 - expected built paths limit reads durin
             descriptor=descriptor,
             read_label=read_label,
             read_paths=read_paths,
+            logical_root=root or directory.parent,
+            permitted_directories=None if read_paths is None else _parent_directories(read_paths),
         )
         captured.extend(inventory.identities)
         _validate_directories(captured)
@@ -1194,7 +1222,7 @@ def check_schema_outputs(project: Path, site: Path) -> list[Path]:
     built = {Path("schemas") / path for path in inventory.files}
     directories = {Path("schemas") / path for path in inventory.directories}
     expected = set(schemas)
-    expected_directories = {parent for path in expected for parent in path.parents if parent != Path()}
+    expected_directories = _parent_directories(expected)
     directories.add(Path("schemas"))
     if built != expected or directories != expected_directories:
         message = "Built schema files do not match the canonical packaged inventory; " + "; ".join(

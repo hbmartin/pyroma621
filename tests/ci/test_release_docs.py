@@ -2942,7 +2942,7 @@ def test_schema_reader_fallback_retains_nonfollowing_precheck(
         source = target
     monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
     if linked:
-        with pytest.raises(ValueError, match="file must be a regular file"):
+        with pytest.raises(ValueError, match="symlink not permitted"):
             release_docs._read_schema_bytes(source, "Packaged schema schemas/schema.json")
     else:
         assert release_docs._read_schema_bytes(source, "Packaged schema schemas/schema.json") == b"{}"
@@ -3775,6 +3775,210 @@ def select_read_capability(monkeypatch: pytest.MonkeyPatch, capability: str) -> 
             pytest.skip("Descriptor traversal is unavailable")
         assert not release_docs._search_anchors_supported()
         assert release_docs._anchored_paths_supported() == (capability == "descriptor")
+
+
+@pytest.mark.parametrize("capability", ["search", "descriptor", "path"])
+@pytest.mark.parametrize("case", ["missing-parent", "permission", "symlink", "broken-symlink", "directory"])
+@pytest.mark.parametrize("output", ["stdout", "existing"])
+@pytest.mark.skipif(os.name != "posix", reason="POSIX guide errors and directory permissions")
+def test_guide_errors_keep_parent_context_and_precise_file_diagnostics(  # noqa: PLR0913 - independent error/output capabilities
+    monkeypatch: pytest.MonkeyPatch,
+    project: Path,
+    capsys: pytest.CaptureFixture,
+    capability: str,
+    case: str,
+    output: str,
+) -> None:
+    prepare_site(project)
+    select_read_capability(monkeypatch, capability)
+    guide = project / "site/json/index.html"
+    label = "Built JSON guide json/index.html"
+    if case == "missing-parent":
+        shutil.rmtree(guide.parent)
+        diagnostic = f"{label} at json: unable to inspect directory (file missing)"
+    elif case == "permission":
+        if os.geteuid() == 0:
+            pytest.skip("Root bypasses directory permissions")
+        guide.parent.chmod(0o600)
+        diagnostic = (
+            f"{label} at json: unable to open directory (permission denied)"
+            if capability == "search" and getattr(os, "O_PATH", None) != release_docs._SEARCH_FLAG
+            else f"{label}: unable to read file (permission denied)"
+        )
+    else:
+        guide.unlink()
+        if case == "directory":
+            guide.mkdir()
+            diagnostic = f"{label}: file must be a regular file, not a symlink or special entry"
+        else:
+            target = project / "target.html"
+            if case == "symlink":
+                target.write_bytes(b"guide")
+            guide.symlink_to(target)
+            diagnostic = f"{label}: unable to read file (symlink not permitted)"
+    manifest = project / "inventory.json"
+    manifest.write_bytes(b"previous inventory")
+    descriptors = track_schema_descriptors(monkeypatch)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "release_docs",
+            "check-schemas",
+            "--project",
+            str(project),
+            "--inventory-output",
+            "-" if output == "stdout" else str(manifest),
+        ],
+    )
+    try:
+        with pytest.raises(SystemExit) as raised:
+            release_docs.main()
+        assert raised.value.code == 1
+        out, error = capsys.readouterr()
+        assert out == ""
+        assert error == f"Release documentation check failed: {diagnostic}\n"
+        assert manifest.read_bytes() == b"previous inventory"
+        assert not list(project.glob(".schema-inventory-*"))
+        for descriptor in set(descriptors):
+            with pytest.raises(OSError, match="Bad file descriptor"):
+                os.fstat(descriptor)
+    finally:
+        if case == "permission":
+            guide.parent.chmod(0o700)
+
+
+@pytest.mark.parametrize("supplied", [False, True])
+def test_unprotected_reader_prechecks_the_file_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, supplied: bool
+) -> None:
+    source = tmp_path / "schema.json"
+    source.write_bytes(b"{}")
+    expected = source.lstat() if supplied else None
+    monkeypatch.setattr(release_docs, "_protected_reads_supported", lambda: False)
+    inspected = Mock(wraps=release_docs._regular_file_info)
+    monkeypatch.setattr(release_docs, "_regular_file_info", inspected)
+    assert release_docs._read_schema_bytes(source, "Packaged schema schemas/schema.json", expected=expected) == b"{}"
+    inspected.assert_called_once_with(source, "Packaged schema schemas/schema.json", parent=None)
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "directory", "regular"])
+@pytest.mark.skipif(os.name != "posix", reason="POSIX non-following fallback prechecks")
+def test_unprotected_reader_rechecks_supplied_discovery_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, replacement: str
+) -> None:
+    source = tmp_path / "schema.json"
+    source.write_bytes(b"{}")
+    expected = source.lstat()
+    target = tmp_path / "original.json"
+    source.rename(target)
+    if replacement == "symlink":
+        source.symlink_to(target)
+        diagnostic = "symlink not permitted"
+    elif replacement == "directory":
+        source.mkdir()
+        diagnostic = "file must be a regular file"
+    else:
+        source.write_bytes(b"substituted")
+        diagnostic = "file changed during validation"
+    monkeypatch.setattr(release_docs, "_protected_reads_supported", lambda: False)
+    opened = Mock(wraps=os.open)
+    monkeypatch.setattr(os, "open", opened)
+    with pytest.raises(ValueError, match=diagnostic):
+        release_docs._read_schema_bytes(source, "Packaged schema schemas/schema.json", expected=expected)
+    assert opened.call_count == (1 if replacement == "regular" else 0)
+
+
+@pytest.mark.skipif(not release_docs._search_anchors_supported(), reason="Requires search-only anchoring")
+def test_guide_identity_capture_uses_its_anchored_parent(monkeypatch: pytest.MonkeyPatch, project: Path) -> None:
+    prepare_site(project)
+    inspected = Mock(wraps=release_docs._regular_file_info)
+    monkeypatch.setattr(release_docs, "_regular_file_info", inspected)
+    assert release_docs.check_schema_outputs(project, project / "site")
+    inspected.assert_called_once()
+    assert inspected.call_args.args == (project / "site/json/index.html", "Built JSON guide json/index.html")
+    assert isinstance(inspected.call_args.kwargs["parent"], int)
+
+
+@pytest.mark.parametrize("capability", ["search", "descriptor", "path"])
+@pytest.mark.parametrize(
+    ("resource", "ancestor"), [("canonical", "selected"), ("canonical", "pyroma"), ("built", "selected")]
+)
+@pytest.mark.skipif(os.name != "posix", reason="POSIX ancestor identity changes")
+def test_inventory_file_and_directory_checks_share_the_selected_base(
+    monkeypatch: pytest.MonkeyPatch,
+    project: Path,
+    capability: str,
+    resource: str,
+    ancestor: str,
+) -> None:
+    prepare_site(project)
+    select_read_capability(monkeypatch, capability)
+    victim = project if resource == "canonical" else project / "site"
+    if ancestor == "pyroma":
+        victim /= "pyroma"
+    backup = victim.with_name(victim.name + "-original")
+    previous = (project / "docs/schemas/v1/error.json").read_bytes()
+    original = release_docs._read_regular_stream
+    changed = False
+
+    def read(*args: object, **kwargs: object) -> bytes:
+        nonlocal changed
+        payload = original(*args, **kwargs)
+        if not changed and str(args[1]).startswith("Packaged schema" if resource == "canonical" else "Built schema"):
+            victim.rename(backup)
+            changed = True
+            victim.symlink_to(backup, target_is_directory=True)
+        return payload
+
+    monkeypatch.setattr(release_docs, "_read_regular_stream", read)
+    fetch = Mock(side_effect=AssertionError("Invalid canonical evidence must precede fetches"))
+    monkeypatch.setattr(release_docs, "fetch", fetch)
+    directory_label = (
+        "Canonical packaged schema directory (pyroma/schemas)"
+        if resource == "canonical"
+        else "Built schema directory (schemas relative to the site directory)"
+    )
+    prefix = "Packaged schema" if resource == "canonical" else "Built schema"
+    context = f"{prefix} schemas/v1/error.json" if capability == "path" else directory_label
+    location = "pyroma" if ancestor == "pyroma" else "selected root"
+    try:
+        operation = (
+            (lambda: release_docs.check_online(project, VERSION))
+            if resource == "canonical"
+            else (lambda: release_docs.check_schema_outputs(project, project / "site"))
+        )
+        with pytest.raises(ValueError, match="directory changed during validation") as raised:
+            operation()
+        assert str(raised.value) == f"{context} at {location}: directory changed during validation"
+        fetch.assert_not_called()
+        assert (project / "docs/schemas/v1/error.json").read_bytes() == previous
+    finally:
+        if changed:
+            victim.unlink()
+            backup.rename(victim)
+
+
+def test_required_built_directories_are_shared_through_nested_traversal(
+    monkeypatch: pytest.MonkeyPatch, project: Path
+) -> None:
+    future = project / "pyroma/schemas/v2/deep/nested/rating.json"
+    future.parent.mkdir(parents=True)
+    future.write_bytes(b"{}")
+    prepare_site(project)
+    original = release_docs._scan_inventory
+    permitted = []
+
+    def scan(*args: object, **kwargs: object) -> object:
+        if kwargs.get("read_paths") is not None:
+            permitted.append(kwargs["permitted_directories"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(release_docs, "_scan_inventory", scan)
+    assert Path("schemas/v2/deep/nested/rating.json") in release_docs.check_schema_outputs(project, project / "site")
+    assert len(permitted) == 5
+    assert all(value is permitted[0] for value in permitted)
+    assert permitted[0] == {Path("v1"), Path("v2"), Path("v2/deep"), Path("v2/deep/nested")}
 
 
 @pytest.mark.parametrize("capability", ["descriptor", "path"])
