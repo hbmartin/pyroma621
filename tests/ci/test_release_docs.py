@@ -4350,12 +4350,17 @@ def guide_parent_substitution(guide: Path, replacement: str) -> tuple[Callable[[
     def restore() -> None:
         nonlocal changed
         if changed:
-            if guide.parent.is_symlink():
-                guide.parent.unlink()
-            else:
-                shutil.rmtree(guide.parent)
-            backup.rename(guide.parent)
-            changed = False
+            active_error = sys.exc_info()[0] is not None
+            try:
+                if guide.parent.is_symlink():
+                    guide.parent.unlink()
+                elif guide.parent.exists():
+                    shutil.rmtree(guide.parent)
+                backup.rename(guide.parent)
+                changed = False
+            except Exception:
+                if not active_error:
+                    raise
 
     return replace, restore
 
@@ -4575,3 +4580,29 @@ def test_ancestor_display_prefix_is_explicit_instead_of_repository_specific(tmp_
     assert mapped[-1].label == "Resource at schemas/nested"
     assert mapped[1].label == "Resource at pyroma"
     assert mapped[0].label == "Resource at selected root"
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "directory"])
+def test_early_parent_race_fixture_restores_after_failed_substitution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, replacement: str
+) -> None:
+    guide = tmp_path / "json/index.html"
+    guide.parent.mkdir()
+    guide.write_bytes(b"original guide")
+    replace, restore = guide_parent_substitution(guide, replacement)
+    monkeypatch.setattr(
+        Path if replacement == "symlink" else shutil,
+        "symlink_to" if replacement == "symlink" else "copytree",
+        Mock(side_effect=OSError(errno.EIO, "simulated substitution failure")),
+    )
+
+    def failing_substitution() -> None:
+        try:
+            replace()
+        finally:
+            restore()
+
+    with pytest.raises(OSError, match="simulated substitution failure"):
+        failing_substitution()
+    assert guide.read_bytes() == b"original guide"
+    assert not guide.parent.with_name("original-json").exists()
